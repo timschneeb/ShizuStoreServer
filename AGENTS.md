@@ -2,7 +2,7 @@
 
 C# / .NET 10 backend for a Shizuku-app store. Single binary + systemd, Postgres.
 Behavior spec: `docs/SPEC.md`. Ops: `docs/server-setup.md`. State: `HANDOFF.md`.
-Governance: `.specify/memory/constitution.md`.
+Governance: `docs/constitution.md`.
 
 ## Commands
 

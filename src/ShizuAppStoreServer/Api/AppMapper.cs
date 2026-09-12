@@ -5,85 +5,95 @@ namespace ShizuAppStoreServer.Api;
 /// <summary>Entity → DTO projections shared by the apps and changes controllers.</summary>
 public static class AppMapper
 {
-    public static AppSummaryDto ToSummary(App a) => new(
-        a.Slug,
-        a.Name,
-        a.Description,
-        a.License,
-        ApiEnums.ToApiString(a.Listing),
-        ApiEnums.ToApiString(a.Type),
-        a.IsRecommended,
-        a.HasPaid,
-        a.HasIap,
-        a.HasAds,
-        a.TrialDays,
-        a.RequiresRoot,
-        ApiEnums.ToApiString(a.Availability),
-        a.PackageName,
-        a.VersionCode,
-        a.VersionName,
-        a.MinSdk,
-        a.IconHash,
-        a.IconAdaptive,
-        a.Category?.Slug ?? string.Empty,
-        a.UpdatedAt,
-        a.SigSha256,
-        a.SigMd5);
+    /// <summary>Default candidate for clients without an installed-signature match.</summary>
+    public static AppDownload? Primary(App a) => a.Downloads.FirstOrDefault(d => d.IsPrimary);
+
+    public static AppSummaryDto ToSummary(App a)
+    {
+        var primary = Primary(a);
+        return new(
+            a.Slug,
+            a.Name,
+            a.Description,
+            a.License,
+            ApiEnums.ToApiString(a.Listing),
+            ApiEnums.ToApiString(a.Type),
+            a.IsRecommended,
+            a.HasPaid,
+            a.HasIap,
+            a.HasAds,
+            a.TrialDays,
+            a.RequiresRoot,
+            ApiEnums.ToApiString(a.Availability),
+            a.PackageName,
+            primary?.VersionCode,
+            primary?.VersionName,
+            primary?.MinSdk,
+            a.IconHash,
+            a.IconAdaptive,
+            a.Category?.Slug ?? string.Empty,
+            a.UpdatedAt,
+            primary?.SigSha256,
+            primary?.SigMd5);
+    }
 
     /// <summary>
     /// Detail projection. <paramref name="path"/> is the root→leaf category
     /// chain (built by the caller, which already holds the category rows).
     /// </summary>
-    public static AppDetailDto ToDetail(App a, IReadOnlyList<CategoryPathDto> path) => new(
-        a.Slug,
-        a.Name,
-        a.Description,
-        a.License,
-        ApiEnums.ToApiString(a.Listing),
-        ApiEnums.ToApiString(a.Type),
-        a.IsRecommended,
-        a.HasPaid,
-        a.HasIap,
-        a.HasAds,
-        a.TrialDays,
-        a.RequiresRoot,
-        ApiEnums.ToApiString(a.Availability),
-        a.PackageName,
-        a.VersionCode,
-        a.VersionName,
-        a.MinSdk,
-        a.IconHash,
-        a.IconAdaptive,
-        a.Category?.Slug ?? string.Empty,
-        a.UpdatedAt,
-        a.Url,
-        a.SourceUrl,
-        ApiEnums.ToApiString(a.SourceKind),
-        a.ApkUrl,
-        a.ApkSize,
-        a.ApkSha256,
-        a.ApkArchiveEntry,
-        a.StoreUrl,
-        a.ExcludedReason,
-        path,
-        a.Parent?.Slug,
-        a.AddedAt,
-        a.LastCheckedAt,
-        a.SigSha256,
-        a.SigMd5,
-        ToVariant(a));
+    public static AppDetailDto ToDetail(App a, IReadOnlyList<CategoryPathDto> path)
+    {
+        var primary = Primary(a);
+        return new(
+            a.Slug,
+            a.Name,
+            a.Description,
+            a.License,
+            ApiEnums.ToApiString(a.Listing),
+            ApiEnums.ToApiString(a.Type),
+            a.IsRecommended,
+            a.HasPaid,
+            a.HasIap,
+            a.HasAds,
+            a.TrialDays,
+            a.RequiresRoot,
+            ApiEnums.ToApiString(a.Availability),
+            a.PackageName,
+            primary?.VersionCode,
+            primary?.VersionName,
+            primary?.MinSdk,
+            a.IconHash,
+            a.IconAdaptive,
+            a.Category?.Slug ?? string.Empty,
+            a.UpdatedAt,
+            a.Url,
+            a.SourceUrl,
+            ApiEnums.ToApiString(a.SourceKind),
+            a.Downloads
+                .OrderByDescending(d => d.IsPrimary)
+                .ThenByDescending(d => d.VersionCode ?? -1)
+                .Select(ToDownload)
+                .ToList(),
+            a.StoreUrl,
+            a.ExcludedReason,
+            path,
+            a.Parent?.Slug,
+            a.AddedAt,
+            a.LastCheckedAt);
+    }
 
-    private static FdroidVariantDto? ToVariant(App a) =>
-        a.FdroidApkUrl is null
-            ? null
-            : new FdroidVariantDto(
-                a.FdroidApkUrl,
-                a.FdroidVersionCode,
-                a.FdroidVersionName,
-                a.FdroidApkSize,
-                a.FdroidApkSha256,
-                a.FdroidSigSha256,
-                a.FdroidSigMd5);
+    private static DownloadDto ToDownload(AppDownload d) => new(
+        ApiEnums.ToApiString(d.Source),
+        d.ApkUrl,
+        d.ArchiveEntry,
+        d.VersionCode,
+        d.VersionName,
+        d.SizeBytes,
+        d.Sha256,
+        d.SigSha256,
+        d.SigMd5,
+        d.MinSdk,
+        d.IsPrimary);
 
     /// <summary>Root→leaf <c>(slug, name)</c> chain for a category (max depth 2 in real data).</summary>
     public static IReadOnlyList<CategoryPathDto> CategoryPath(Category? category)

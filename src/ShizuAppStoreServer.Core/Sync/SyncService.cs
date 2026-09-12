@@ -322,7 +322,7 @@ public sealed class SyncService(
     public async Task<IconRefreshResult> RefreshIconsAsync(CancellationToken ct = default, bool force = false)
     {
         var ids = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability == Availability.DirectApk && a.ApkUrl != null)
+            .Where(a => a.Availability == Availability.DirectApk && a.Downloads.Any(d => d.IsPrimary))
             .Select(a => a.Id)
             .ToListAsync(ct);
 

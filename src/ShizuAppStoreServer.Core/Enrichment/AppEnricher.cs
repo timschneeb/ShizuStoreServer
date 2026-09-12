@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Text;
 using System.Xml;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -102,7 +103,7 @@ public sealed class AppEnricher(
             // listing icon instead of a generated avatar and stop counting
             // them as failures on every pass.
             if (result.Outcome == EnrichOutcome.Failed
-                && app.ApkUrl is null
+                && !await HasDownloadsAsync(app, ct)
                 && app.IconHash is null
                 && await TryPlayIconAsync(app, now, ct))
             {
@@ -131,28 +132,6 @@ public sealed class AppEnricher(
 
     private async Task<EnrichResult> DispatchAsync(App app, DateTimeOffset now, CancellationToken ct)
     {
-        // APK source lock: once clients have seen a build from F-Droid/Izzy,
-        // only that repo may update it. F-Droid builds are signed with a
-        // different key (unless reproducible), so a later forge release must
-        // never replace them, or updates fail the signature check.
-        if (app.ApkSource is SourceKind.FDroid or SourceKind.Izzy)
-        {
-            var kind = app.ApkSource.Value;
-            var lockedPackageId = app.ApkSourceRef;
-            if (string.IsNullOrWhiteSpace(lockedPackageId)
-                && TryParseFdroid(app.Url, app.SourceUrl, out _, out var fromUrls, out _))
-            {
-                lockedPackageId = fromUrls;
-            }
-
-            if (string.IsNullOrWhiteSpace(lockedPackageId))
-            {
-                return Fail(app, now, "APK source is locked to F-Droid but no package id is recorded.");
-            }
-
-            return await EnrichFromFdroidAsync(app, FdroidRepos.BaseFor(kind), lockedPackageId, now, ct);
-        }
-
         var githubPrimary = SourceClassifier.TryParseGitHubRepo(app.Url, out var owner, out var repo);
         if (githubPrimary || SourceClassifier.TryParseGitHubRepo(app.SourceUrl, out owner, out repo))
         {
@@ -172,7 +151,12 @@ public sealed class AppEnricher(
                 result = await EnrichFromGitHubAsync(app, owner, repo, now, ct);
             }
 
-            await ResolveFdroidVariantAsync(app, result.Outcome, now, ct);
+            if (result.Outcome is EnrichOutcome.Enriched or EnrichOutcome.UpToDate
+                && app.SourceKind is not (SourceKind.FDroid or SourceKind.Izzy))
+            {
+                await ResolveFdroidCandidateAsync(app, now, ct);
+            }
+
             return result;
         }
 
@@ -182,7 +166,12 @@ public sealed class AppEnricher(
             app.SourceKind = SourceKind.GitLab;
             KeepPlayStoreUrl(app, gitlabPrimary);
             var result = await EnrichFromGitLabAsync(app, project, now, ct);
-            await ResolveFdroidVariantAsync(app, result.Outcome, now, ct);
+            if (result.Outcome is EnrichOutcome.Enriched or EnrichOutcome.UpToDate
+                && app.SourceKind is not (SourceKind.FDroid or SourceKind.Izzy))
+            {
+                await ResolveFdroidCandidateAsync(app, now, ct);
+            }
+
             return result;
         }
 
@@ -296,9 +285,11 @@ public sealed class AppEnricher(
             return Fail(app, now, $"Instafel API: {ex.Message}");
         }
 
-        if (release.ApkUrl == app.ApkUrl
+        var current = await PrimaryDownloadAsync(app, ct);
+        if (current is not null
+            && release.ApkUrl == current.ApkUrl
             && release.FileHash == app.EnrichEtag
-            && app.VersionCode is not null)
+            && current.VersionCode is not null)
         {
             app.LastCheckedAt = now;
             return new EnrichResult(EnrichOutcome.UpToDate, null);
@@ -340,7 +331,8 @@ public sealed class AppEnricher(
                 + $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo} has no .apk asset.");
         }
 
-        if (asset.Url == app.ApkUrl && app.VersionCode is not null)
+        var current = await PrimaryDownloadAsync(app, ct);
+        if (current is not null && asset.Url == current.ApkUrl && current.VersionCode is not null)
         {
             app.EnrichEtag = release.Etag;
             app.LastCheckedAt = now;
@@ -388,7 +380,8 @@ public sealed class AppEnricher(
         }
 
         // GitLab largely ignores If-None-Match: same recorded asset URL means nothing new.
-        if (link.Url == app.ApkUrl && app.VersionCode is not null)
+        var gitlabCurrent = await PrimaryDownloadAsync(app, ct);
+        if (gitlabCurrent is not null && link.Url == gitlabCurrent.ApkUrl && gitlabCurrent.VersionCode is not null)
         {
             app.EnrichEtag = release.Etag;
             app.LastCheckedAt = now;
@@ -399,23 +392,16 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
-    /// Rescue path for apps whose forge published no APK and that never
-    /// served a build from another source: package id from an F-Droid/Izzy
-    /// URL, else an F-Droid index lookup by the repo's forge URL. A hit
-    /// locks the app to the F-Droid source (<c>ApkSource</c>), so the
-    /// signature stays stable for future updates. Returns null when the app
-    /// is locked already or not published on F-Droid (the forge failure then
-    /// stands). Best-effort: index trouble never replaces the forge error.
+    /// Rescue path for apps whose forge published no APK: package id from an
+    /// F-Droid/Izzy URL, else an F-Droid index lookup by the repo's forge
+    /// URL. A hit becomes the app's primary download (the only candidate),
+    /// recorded in the signature-keyed downloads list like any other source.
+    /// Returns null when the app is not published on F-Droid (the forge
+    /// failure then stands). Best-effort: index trouble never replaces the
+    /// forge error.
     /// </summary>
     private async Task<EnrichResult?> TryFdroidFallbackAsync(App app, DateTimeOffset now, CancellationToken ct)
     {
-        if (app.ApkSource is not null)
-        {
-            // A build from another source may already be distributed;
-            // switching now would fail clients' signature check on update.
-            return null;
-        }
-
         if (TryParseFdroid(app.Url, app.SourceUrl, out var repoBase, out var packageId, out _))
         {
             return await EnrichFromFdroidAsync(app, repoBase, packageId, now, ct);
@@ -493,6 +479,160 @@ public sealed class AppEnricher(
         }
     }
 
+    private sealed record DownloadCandidate(
+        SourceKind Source,
+        string? SourceRef,
+        string ApkUrl,
+        string? ArchiveEntry,
+        long? VersionCode,
+        string? VersionName,
+        long? SizeBytes,
+        string? Sha256,
+        string? SigSha256,
+        string? SigMd5,
+        int? MinSdk);
+
+    /// <summary>
+    /// Signing identity of a candidate: the first SHA-256 token, else the
+    /// first MD5 token, else a URL-derived fallback for fingerprintless rows.
+    /// The downloads snapshot keeps one row per identity (newest build only).
+    /// </summary>
+    private static string ComputeSigKey(string? sigSha256, string? sigMd5, string apkUrl)
+    {
+        var key = FirstFingerprint(sigSha256) ?? FirstFingerprint(sigMd5);
+        return key ?? "url:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(apkUrl)));
+    }
+
+    private static string? FirstFingerprint(string? value) =>
+        value?.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.ToLowerInvariant();
+
+    // IzzyOnDroid hosts the developers' own upstream builds (same signing key
+    // as forge releases); only f-droid.org rebuilds use a different key.
+    private static bool IsForgeSource(SourceKind kind) => kind != SourceKind.FDroid;
+
+    private static int SourceOrder(SourceKind kind) => kind switch
+    {
+        SourceKind.GitHub => 0,
+        SourceKind.GitLab => 1,
+        SourceKind.Izzy => 2,
+        SourceKind.Codeberg => 3,
+        SourceKind.Other => 4,
+        SourceKind.FDroid => 5,
+        _ => 6,
+    };
+
+    private async Task<List<AppDownload>> LoadDownloadsAsync(App app, CancellationToken ct)
+    {
+        var rows = await db.Downloads.Where(d => d.AppId == app.Id).ToListAsync(ct);
+        foreach (var local in db.Downloads.Local)
+        {
+            if (local.AppId == app.Id && !rows.Contains(local))
+            {
+                rows.Add(local);
+            }
+        }
+
+        return rows;
+    }
+
+    private async Task<AppDownload?> PrimaryDownloadAsync(App app, CancellationToken ct) =>
+        (await LoadDownloadsAsync(app, ct)).FirstOrDefault(d => d.IsPrimary);
+
+    private async Task<bool> HasDownloadsAsync(App app, CancellationToken ct) =>
+        await db.Downloads.AnyAsync(d => d.AppId == app.Id, ct);
+
+    /// <summary>
+    /// Upserts the row for the candidate's signing identity. Newer versions
+    /// replace older ones; on a version tie the forge source's URL wins.
+    /// An index-only row (MD5 fingerprint) is upgraded in place when the
+    /// analyzed build reveals the SHA-256 identity.
+    /// </summary>
+    private async Task UpsertDownloadAsync(App app, DownloadCandidate candidate, DateTimeOffset now, CancellationToken ct)
+    {
+        var sigKey = ComputeSigKey(candidate.SigSha256, candidate.SigMd5, candidate.ApkUrl);
+        var md5 = FirstFingerprint(candidate.SigMd5);
+        var rows = await LoadDownloadsAsync(app, ct);
+        var row = rows.FirstOrDefault(d => d.SigKey == sigKey)
+            ?? (md5 is null ? null : rows.FirstOrDefault(d => FirstFingerprint(d.SigMd5) == md5));
+        if (row is null)
+        {
+            row = new AppDownload { AppId = app.Id, SigKey = sigKey, ApkUrl = candidate.ApkUrl };
+            db.Downloads.Add(row);
+        }
+        else
+        {
+            row.SigKey = sigKey;
+            var newer = row.VersionCode is null || candidate.VersionCode is null || candidate.VersionCode > row.VersionCode;
+            var forgeWinsTie = candidate.VersionCode == row.VersionCode
+                && IsForgeSource(candidate.Source) && !IsForgeSource(row.Source);
+            if (!newer && !forgeWinsTie && candidate.Source != row.Source)
+            {
+                return;
+            }
+        }
+
+        row.Source = candidate.Source;
+        row.SourceRef = candidate.SourceRef;
+        row.ApkUrl = candidate.ApkUrl;
+        row.ArchiveEntry = candidate.ArchiveEntry;
+        row.VersionCode = candidate.VersionCode;
+        row.VersionName = candidate.VersionName;
+        row.SizeBytes = candidate.SizeBytes;
+        row.Sha256 = candidate.Sha256;
+        row.SigSha256 = candidate.SigSha256;
+        row.SigMd5 = candidate.SigMd5;
+        row.MinSdk = candidate.MinSdk;
+        row.ResolvedAt = now;
+    }
+
+    /// <summary>
+    /// Default candidate for fresh installs: forge sources beat F-Droid/Izzy,
+    /// then the newest version, then a fixed source order. Exactly one row is
+    /// primary per app (invariant enforced here, not by a DB constraint).
+    /// </summary>
+    private async Task RecomputePrimaryAsync(App app, CancellationToken ct)
+    {
+        var rows = await LoadDownloadsAsync(app, ct);
+        AppDownload? best = null;
+        foreach (var row in rows)
+        {
+            best = best is null ? row : PreferDownload(row, best);
+        }
+
+        foreach (var row in rows)
+        {
+            row.IsPrimary = ReferenceEquals(row, best);
+        }
+    }
+
+    private static AppDownload PreferDownload(AppDownload a, AppDownload b)
+    {
+        var aForge = IsForgeSource(a.Source);
+        var bForge = IsForgeSource(b.Source);
+        if (aForge != bForge)
+        {
+            return aForge ? a : b;
+        }
+
+        var av = a.VersionCode ?? -1;
+        var bv = b.VersionCode ?? -1;
+        if (av != bv)
+        {
+            return av > bv ? a : b;
+        }
+
+        return SourceOrder(a.Source) <= SourceOrder(b.Source) ? a : b;
+    }
+
+    private async Task RemoveDownloadAsync(App app, SourceKind source, CancellationToken ct)
+    {
+        var rows = await LoadDownloadsAsync(app, ct);
+        foreach (var row in rows.Where(r => r.Source == source))
+        {
+            db.Downloads.Remove(row);
+        }
+    }
+
     private async Task<EnrichResult> EnrichFromFdroidAsync(
         App app, string repoBase, string packageId, DateTimeOffset now, CancellationToken ct)
     {
@@ -518,16 +658,16 @@ public sealed class AppEnricher(
             return Fail(app, now, $"F-Droid: package {packageId} not in the {repoBase} index.");
         }
 
-        // Lock the APK download to this repo: forge releases, whether they
-        // exist now or appear later, must never replace the F-Droid-signed
-        // build (different key, updates would fail the signature check).
         var kind = repoBase == FdroidRepos.IzzyBase ? SourceKind.Izzy : SourceKind.FDroid;
         app.SourceKind = kind;
-        app.ApkSource = kind;
-        app.ApkSourceRef = packageId;
 
         var apkUrl = $"{repoBase.TrimEnd('/')}/{package.ApkName}";
-        if (apkUrl == app.ApkUrl && package.VersionCode == app.VersionCode)
+        var current = await PrimaryDownloadAsync(app, ct);
+        if (current is not null
+            && current.Source == kind
+            && current.ApkUrl == apkUrl
+            && current.VersionCode == package.VersionCode
+            && current.Sha256 is not null)
         {
             app.EnrichEtag = indexEtag;
             app.LastCheckedAt = now;
@@ -551,25 +691,29 @@ public sealed class AppEnricher(
             : await MirrorIconAsync(package.IconFile, repoBase, app.Name, ct);
         await WriteIconFileAsync(icon, ct);
 
-        app.PackageName = package.PackageName;
-        app.VersionCode = analyzed?.Badging.VersionCode ?? package.VersionCode;
-        app.VersionName = analyzed?.Badging.VersionName ?? package.VersionName;
-        app.MinSdk = analyzed?.Badging.MinSdk ?? package.MinSdk;
-        app.ApkUrl = apkUrl;
-        app.ApkSize = analyzed?.FileSize ?? package.Size;
-        // Bytes on disk win: the recorded hash describes what clients download.
-        app.ApkSha256 = analyzed?.FileSha256 ?? package.Sha256;
-        if (analyzed is not null)
-        {
-            app.SigSha256 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
-            app.SigMd5 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5;
-        }
-        else
-        {
-            app.SigSha256 = null;
-            app.SigMd5 = package.SigMd5;
-        }
+        var versionCode = analyzed?.Badging.VersionCode ?? package.VersionCode;
+        var versionName = analyzed?.Badging.VersionName ?? package.VersionName;
+        var minSdk = analyzed?.Badging.MinSdk ?? package.MinSdk;
+        var sigSha256 = analyzed is null ? null : CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
+        var sigMd5 = analyzed is null
+            ? package.SigMd5
+            : CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5;
 
+        await UpsertDownloadAsync(app, new DownloadCandidate(
+            kind,
+            packageId,
+            apkUrl,
+            null,
+            versionCode,
+            versionName,
+            analyzed?.FileSize ?? package.Size,
+            analyzed?.FileSha256 ?? package.Sha256,
+            sigSha256,
+            sigMd5,
+            minSdk), now, ct);
+        await RecomputePrimaryAsync(app, ct);
+
+        app.PackageName = package.PackageName;
         app.IconHash = icon.Sha256;
         app.IconAdaptive = icon.Adaptive;
         app.Availability = Availability.DirectApk;
@@ -578,27 +722,29 @@ public sealed class AppEnricher(
         app.LastCheckedAt = now;
         app.LastError = null;
 
-        await AddVersionRowAsync(app, app.VersionCode, app.VersionName, apkUrl, now, ct);
+        await AddVersionRowAsync(app, versionCode, versionName, apkUrl, now, ct);
         await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
+        await ResolveForgeCandidateFromSourceAsync(app, package.SourceUrl, now, ct);
+        if (kind == SourceKind.Izzy)
+        {
+            // Izzy builds come from the developers, F-Droid rebuilds are a
+            // distinct source; record the f-droid.org candidate as well.
+            await ResolveFdroidCandidateAsync(app, now, ct);
+        }
+
         return new EnrichResult(EnrichOutcome.Enriched, null);
     }
 
     /// <summary>
-    /// F-Droid alternate variant for forge-primary apps: when the same
-    /// package is published on F-Droid, record its build next to the primary
-    /// forge build. Only runs after a fresh primary enrich (never on
-    /// <c>SkippedFresh</c>); variant problems are best-effort and never
+    /// F-Droid candidate for forge-primary apps: when the same package is
+    /// published on F-Droid, record its build next to the primary forge
+    /// build. Only runs after a fresh primary enrich (never on
+    /// <c>SkippedFresh</c>); candidate problems are best-effort and never
     /// change the primary outcome.
     /// </summary>
-    private async Task ResolveFdroidVariantAsync(App app, EnrichOutcome primary, DateTimeOffset now, CancellationToken ct)
+    private async Task ResolveFdroidCandidateAsync(App app, DateTimeOffset now, CancellationToken ct)
     {
-        if (app.ApkSource is SourceKind.FDroid or SourceKind.Izzy)
-        {
-            return; // Primary is already the F-Droid build; a variant would duplicate it.
-        }
-
-        if (primary is not (EnrichOutcome.Enriched or EnrichOutcome.UpToDate)
-            || string.IsNullOrWhiteSpace(app.PackageName))
+        if (string.IsNullOrWhiteSpace(app.PackageName))
         {
             return;
         }
@@ -616,64 +762,117 @@ public sealed class AppEnricher(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return; // Best-effort sidecar: index trouble never fails the primary.
+            return; // Best-effort candidate: index trouble never fails the primary.
         }
 
         if (package is null)
         {
-            ClearVariant(app);
+            RemoveDownloadAsync(app, SourceKind.FDroid, ct);
+            await RecomputePrimaryAsync(app, ct);
             return;
         }
 
         var apkUrl = $"{FdroidRepos.FDroidBase.TrimEnd('/')}/{package.ApkName}";
-        if (apkUrl == app.FdroidApkUrl
-            && package.VersionCode == app.FdroidVersionCode
-            && app.FdroidApkSha256 is not null)
+        var existing = (await LoadDownloadsAsync(app, ct))
+            .FirstOrDefault(d => d.Source == SourceKind.FDroid
+                && d.ApkUrl == apkUrl
+                && d.VersionCode == package.VersionCode
+                && d.Sha256 is not null);
+        if (existing is not null)
         {
             if (package.SigMd5 is not null)
             {
-                app.FdroidSigMd5 = package.SigMd5;
+                existing.SigMd5 = package.SigMd5;
+                existing.ResolvedAt = now;
             }
 
             return;
         }
 
         using var analyzed = await TryAnalyzeDownloadAsync(apkUrl, ct);
-        if (analyzed is null || analyzed.Badging.PackageName != package.PackageName)
+        var candidate = analyzed is not null && analyzed.Badging.PackageName == package.PackageName
+            ? new DownloadCandidate(
+                SourceKind.FDroid,
+                package.PackageName,
+                apkUrl,
+                null,
+                analyzed.Badging.VersionCode,
+                analyzed.Badging.VersionName,
+                analyzed.FileSize,
+                analyzed.FileSha256,
+                CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256)),
+                CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5,
+                analyzed.Badging.MinSdk)
+            : new DownloadCandidate(
+                SourceKind.FDroid,
+                package.PackageName,
+                apkUrl,
+                null,
+                package.VersionCode,
+                package.VersionName,
+                package.Size,
+                package.Sha256,
+                null,
+                package.SigMd5,
+                package.MinSdk);
+        await UpsertDownloadAsync(app, candidate, now, ct);
+        await RecomputePrimaryAsync(app, ct);
+    }
+
+    /// <summary>
+    /// Exposes the forge build alongside an F-Droid-primary app when the index
+    /// names a forge repo (<c>&lt;application&gt;&lt;source&gt;</c>). Candidate-only:
+    /// presentation stays with the F-Droid build and every failure is swallowed.
+    /// </summary>
+    private async Task ResolveForgeCandidateFromSourceAsync(App app, string? sourceUrl, DateTimeOffset now, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sourceUrl))
         {
-            RecordVariantIndexOnly(app, package, apkUrl);
             return;
         }
 
-        app.FdroidApkUrl = apkUrl;
-        app.FdroidVersionCode = analyzed.Badging.VersionCode;
-        app.FdroidVersionName = analyzed.Badging.VersionName;
-        app.FdroidApkSize = analyzed.FileSize;
-        app.FdroidApkSha256 = analyzed.FileSha256;
-        app.FdroidSigSha256 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
-        app.FdroidSigMd5 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5;
-    }
+        try
+        {
+            if (SourceClassifier.TryParseGitHubRepo(sourceUrl, out var owner, out var repo))
+            {
+                var release = await github.GetLatestReleaseAsync(owner, repo, null, ct);
+                if (release is null)
+                {
+                    return;
+                }
 
-    private static void RecordVariantIndexOnly(App app, FdroidPackageInfo package, string apkUrl)
-    {
-        app.FdroidApkUrl = apkUrl;
-        app.FdroidVersionCode = package.VersionCode;
-        app.FdroidVersionName = package.VersionName;
-        app.FdroidApkSize = package.Size;
-        app.FdroidApkSha256 = package.Sha256;
-        app.FdroidSigSha256 = null;
-        app.FdroidSigMd5 = package.SigMd5;
-    }
+                var asset = ApkAssetSelector.PickApk(release.Assets);
+                if (asset is not null)
+                {
+                    await RunArtifactAsync(app, asset.BrowserDownloadUrl, null, release.Etag, SourceKind.GitHub, now, ct, asPrimary: false);
+                }
+                else if (ApkAssetSelector.PickZip(release.Assets, a => a.Name, a => a.Size) is { } zip)
+                {
+                    await TryEnrichFromZipAsync(app, zip.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct, asPrimary: false);
+                }
 
-    private static void ClearVariant(App app)
-    {
-        app.FdroidApkUrl = null;
-        app.FdroidVersionCode = null;
-        app.FdroidVersionName = null;
-        app.FdroidApkSize = null;
-        app.FdroidApkSha256 = null;
-        app.FdroidSigSha256 = null;
-        app.FdroidSigMd5 = null;
+                return;
+            }
+
+            if (SourceClassifier.TryParseGitLabRepo(sourceUrl, out var projectPath))
+            {
+                var release = await gitlab.GetLatestReleaseAsync(projectPath, null, ct);
+                if (release is null)
+                {
+                    return;
+                }
+
+                var link = ApkAssetSelector.PickApk(release.Assets, l => l.Name, _ => 0L, l => l.Url);
+                if (link is not null)
+                {
+                    await RunArtifactAsync(app, link.Url, null, release.Etag, SourceKind.GitLab, now, ct, asPrimary: false);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogDebug(ex, "Forge candidate resolution failed for {Slug}.", app.Slug);
+        }
     }
 
     /// <summary>
@@ -708,7 +907,8 @@ public sealed class AppEnricher(
     /// to the next source).
     /// </summary>
     private async Task<EnrichResult?> TryEnrichFromZipAsync(
-        App app, string zipUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct)
+        App app, string zipUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
+        bool asPrimary = true)
     {
         var tempZip = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.zip");
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
@@ -723,7 +923,7 @@ public sealed class AppEnricher(
             }
 
             entry.ExtractToFile(tempApk, overwrite: true);
-            return await AnalyzeTempApkAsync(app, zipUrl, entry.FullName, tempZip, tempApk, etag, lockSource, now, ct);
+            return await AnalyzeTempApkAsync(app, zipUrl, entry.FullName, tempZip, tempApk, etag, lockSource, now, ct, asPrimary);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -739,17 +939,22 @@ public sealed class AppEnricher(
     }
 
     private async Task<EnrichResult> RunArtifactAsync(
-        App app, string url, string? archiveEntry, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct)
+        App app, string url, string? archiveEntry, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
+        bool asPrimary = true)
     {
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
         try
         {
             await DownloadAsync(url, tempApk, ct);
-            return await AnalyzeTempApkAsync(app, url, archiveEntry, tempApk, tempApk, etag, lockSource, now, ct);
+            return await AnalyzeTempApkAsync(app, url, archiveEntry, tempApk, tempApk, etag, lockSource, now, ct, asPrimary);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Fail(app, now, $"Download: {ex.Message}");
+            // Candidate-only resolutions must not mark the app failed.
+            var message = $"Download: {ex.Message}";
+            return asPrimary
+                ? Fail(app, now, message)
+                : new EnrichResult(EnrichOutcome.Failed, message);
         }
         finally
         {
@@ -761,11 +966,13 @@ public sealed class AppEnricher(
     /// Shared analysis tail: badging, artifact hash/size, icon, signatures
     /// and the recorded fields. <paramref name="apkPath"/> is the APK that
     /// gets analyzed, <paramref name="artifactPath"/> the file clients
-    /// download (same file unless the APK came out of an archive).
+    /// download (same file unless the APK came out of an archive). The build
+    /// is always upserted as a signature-keyed download candidate; app-level
+    /// presentation is only written when <paramref name="asPrimary"/> is set.
     /// </summary>
     private async Task<EnrichResult> AnalyzeTempApkAsync(
         App app, string artifactUrl, string? archiveEntry, string artifactPath, string apkPath,
-        string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct)
+        string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct, bool asPrimary = true)
     {
         BadgingInfo badging;
         try
@@ -774,7 +981,8 @@ public sealed class AppEnricher(
         }
         catch (Exception ex) when (ex is Aapt2Exception or BadgingParseException)
         {
-            return Fail(app, now, $"aapt2: {ex.Message}");
+            var message = $"aapt2: {ex.Message}";
+            return asPrimary ? Fail(app, now, message) : new EnrichResult(EnrichOutcome.Failed, message);
         }
 
         string artifactSha256;
@@ -790,7 +998,30 @@ public sealed class AppEnricher(
         }
         catch (IOException ex)
         {
-            return Fail(app, now, $"APK unreadable: {ex.Message}");
+            var message = $"APK unreadable: {ex.Message}";
+            return asPrimary ? Fail(app, now, message) : new EnrichResult(EnrichOutcome.Failed, message);
+        }
+
+        var signers = await TryExtractSignersAsync(apkPath, ct);
+        var sigSha256 = CertFingerprint.Join(signers.Select(s => s.Sha256));
+        var sigMd5 = CertFingerprint.Join(signers.Select(s => s.Md5));
+        await UpsertDownloadAsync(app, new DownloadCandidate(
+            lockSource, null, artifactUrl, archiveEntry, badging.VersionCode, badging.VersionName,
+            artifactSize, artifactSha256, sigSha256, sigMd5, badging.MinSdk), now, ct);
+        await RecomputePrimaryAsync(app, ct);
+
+        if (!asPrimary)
+        {
+            return new EnrichResult(EnrichOutcome.Enriched, null);
+        }
+
+        // An older analysis must not overwrite a newer primary's presentation.
+        var primary = await PrimaryDownloadAsync(app, ct);
+        if (primary is null
+            || primary.ApkUrl != artifactUrl
+            || primary.SigKey != ComputeSigKey(sigSha256, sigMd5, artifactUrl))
+        {
+            return new EnrichResult(EnrichOutcome.UpToDate, null);
         }
 
         var icon = await launcherIcons.ResolveAsync(apkPath, badging, ct)
@@ -798,21 +1029,7 @@ public sealed class AppEnricher(
         await WriteIconFileAsync(icon, ct);
 
         var oldIcon = app.IconHash;
-        var signers = await TryExtractSignersAsync(apkPath, ct);
         app.PackageName = badging.PackageName;
-        app.VersionCode = badging.VersionCode;
-        app.VersionName = badging.VersionName;
-        app.MinSdk = badging.MinSdk;
-        app.ApkUrl = artifactUrl;
-        // Lock: this build is now the one clients install; future passes
-        // must keep updating from the same kind of source.
-        app.ApkSource = lockSource;
-        app.ApkSourceRef = null;
-        app.ApkArchiveEntry = archiveEntry;
-        app.ApkSize = artifactSize;
-        app.ApkSha256 = artifactSha256;
-        app.SigSha256 = CertFingerprint.Join(signers.Select(s => s.Sha256));
-        app.SigMd5 = CertFingerprint.Join(signers.Select(s => s.Md5));
         app.IconHash = icon.Sha256;
         app.IconAdaptive = icon.Adaptive;
         app.Availability = Availability.DirectApk;
@@ -838,7 +1055,10 @@ public sealed class AppEnricher(
     public async Task<PrepareIconResult> PrepareIconRefreshAsync(
         App app, string batchWorkDir, string prefix, CancellationToken ct = default, bool force = false)
     {
-        if (app.Availability != Availability.DirectApk || string.IsNullOrWhiteSpace(app.ApkUrl))
+        var primary = await PrimaryDownloadAsync(app, ct);
+        if (app.Availability != Availability.DirectApk
+            || primary is null
+            || string.IsNullOrWhiteSpace(primary.ApkUrl))
         {
             // Store-only listings carry letter-avatars (see
             // EnrichFallbackAsync); heal a deleted avatar file when the
@@ -871,7 +1091,7 @@ public sealed class AppEnricher(
 
         try
         {
-            using var analyzed = await TryAnalyzeDownloadAsync(app.ApkUrl, ct);
+            using var analyzed = await TryAnalyzeDownloadAsync(primary.ApkUrl, ct);
             if (analyzed is null)
             {
                 return new PrepareIconResult(EnrichOutcome.Failed,

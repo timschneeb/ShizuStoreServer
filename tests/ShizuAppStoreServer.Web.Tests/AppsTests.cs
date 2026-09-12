@@ -172,9 +172,6 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
             db.Categories.AddRange(vendor, miui);
             var parent = Seeds.NewApp("ashell", miui, availability: Availability.DirectApk);
             parent.PackageName = "com.example.ashell";
-            parent.VersionCode = 42;
-            parent.VersionName = "1.2.3";
-            parent.ApkUrl = "https://github.com/example/ashell/releases/a.apk";
             db.Apps.Add(parent);
             db.Apps.Add(Seeds.NewApp("ashell-you", miui, parent: parent));
         });
@@ -194,7 +191,7 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
-    public async Task DetailExposesSignaturesAndFdroidVariant()
+    public async Task DetailExposesSignatureKeyedDownloads()
     {
         await factory.ResetAsync(db =>
         {
@@ -202,17 +199,33 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
             db.Categories.Add(audio);
             var app = Seeds.NewApp("dual", audio, availability: Availability.DirectApk);
             app.PackageName = "com.example.dual";
-            app.VersionCode = 42;
             app.IconAdaptive = true;
-            app.SigSha256 = "980c";
-            app.SigMd5 = "c7b1";
-            app.FdroidApkUrl = "https://f-droid.org/repo/com.example.dual_40.apk";
-            app.FdroidVersionCode = 40;
-            app.FdroidVersionName = "4.0";
-            app.FdroidApkSize = 1234;
-            app.FdroidApkSha256 = "aaaa";
-            app.FdroidSigSha256 = "1111";
-            app.FdroidSigMd5 = "b10a";
+            app.Downloads.Add(new AppDownload
+            {
+                Source = SourceKind.GitHub,
+                ApkUrl = "https://github.com/example/dual/releases/dual_42.apk",
+                VersionCode = 42,
+                VersionName = "4.2",
+                SigSha256 = "980c",
+                SigMd5 = "c7b1",
+                SigKey = "980c",
+                IsPrimary = true,
+                ResolvedAt = app.UpdatedAt,
+            });
+            app.Downloads.Add(new AppDownload
+            {
+                Source = SourceKind.FDroid,
+                ApkUrl = "https://f-droid.org/repo/com.example.dual_40.apk",
+                VersionCode = 40,
+                VersionName = "4.0",
+                SizeBytes = 1234,
+                Sha256 = "aaaa",
+                SigSha256 = "1111",
+                SigMd5 = "b10a",
+                SigKey = "1111",
+                IsPrimary = false,
+                ResolvedAt = app.UpdatedAt,
+            });
             db.Apps.Add(app);
         });
 
@@ -220,16 +233,20 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var detail = (await response.Content.ReadFromJsonAsync<AppDetailDto>(Json))!;
 
-        Assert.Equal("980c", detail.SigSha256);
-        Assert.Equal("c7b1", detail.SigMd5);
         Assert.True(detail.IconAdaptive);
-        Assert.NotNull(detail.FdroidVariant);
-        var variant = detail.FdroidVariant!;
+        Assert.Equal(42, detail.VersionCode); // top-level version comes from the primary download
+        Assert.Equal(2, detail.Downloads.Count);
+        var primary = detail.Downloads.Single(d => d.Primary);
+        Assert.Equal("github", primary.Source);
+        Assert.Equal("980c", primary.SigSha256);
+        Assert.Equal("c7b1", primary.SigMd5);
+        Assert.Equal(42, primary.VersionCode);
+        var variant = detail.Downloads.Single(d => d.Source == "fdroid");
         Assert.Equal("https://f-droid.org/repo/com.example.dual_40.apk", variant.ApkUrl);
         Assert.Equal(40, variant.VersionCode);
         Assert.Equal("4.0", variant.VersionName);
-        Assert.Equal(1234, variant.ApkSize);
-        Assert.Equal("aaaa", variant.ApkSha256);
+        Assert.Equal(1234, variant.Size);
+        Assert.Equal("aaaa", variant.Sha256);
         Assert.Equal("1111", variant.SigSha256);
         Assert.Equal("b10a", variant.SigMd5);
     }

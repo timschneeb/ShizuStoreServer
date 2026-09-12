@@ -27,23 +27,27 @@ public sealed record AppSummaryDto(
     string? SigMd5);
 
 /// <summary>
-/// F-Droid alternate build of a forge-primary app (null when the package is
-/// not on F-Droid). Clients compare the installed signing cert against the
-/// fingerprints and pick this URL when the F-Droid build is installed.
+/// One installable candidate of an app, keyed by signing identity. Clients
+/// compare the installed signing cert against the fingerprints, then compare
+/// that candidate's <c>VersionCode</c>; the <c>Primary</c> entry is the
+/// default offer for fresh installs (non-F-Droid builds preferred).
 /// </summary>
-public sealed record FdroidVariantDto(
+public sealed record DownloadDto(
+    string Source,
     string ApkUrl,
+    string? ArchiveEntry,
     long? VersionCode,
     string? VersionName,
-    long? ApkSize,
-    string? ApkSha256,
+    long? Size,
+    string? Sha256,
     string? SigSha256,
-    string? SigMd5);
+    string? SigMd5,
+    int? MinSdk,
+    bool Primary);
 
 /// <summary>
-/// Full app detail: summary fields flattened plus URLs and relations.
-/// <c>ApkArchiveEntry</c> is set when <c>ApkUrl</c> is a zip archive and
-/// names the APK entry inside it (case-insensitive match).
+/// Full app detail: summary fields flattened plus URLs, relations and every
+/// installable candidate (<c>Downloads</c>, primary first).
 /// </summary>
 public sealed record AppDetailDto(
     string Slug,
@@ -70,19 +74,13 @@ public sealed record AppDetailDto(
     string Url,
     string? SourceUrl,
     string SourceKind,
-    string? ApkUrl,
-    long? ApkSize,
-    string? ApkSha256,
-    string? ApkArchiveEntry,
+    IReadOnlyList<DownloadDto> Downloads,
     string? StoreUrl,
     string? ExcludedReason,
     IReadOnlyList<CategoryPathDto> CategoryPath,
     string? ParentSlug,
     DateTimeOffset AddedAt,
-    DateTimeOffset? LastCheckedAt,
-    string? SigSha256,
-    string? SigMd5,
-    FdroidVariantDto? FdroidVariant);
+    DateTimeOffset? LastCheckedAt);
 
 public sealed record CategoryPathDto(string Slug, string Name);
 

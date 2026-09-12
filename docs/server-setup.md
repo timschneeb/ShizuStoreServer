@@ -53,7 +53,7 @@ GitHub PAT (higher Releases-API rate limits for the ~350-repo backfill):
 SHIZU_GITHUB_TOKEN=github_pat_…
 ```
 
-Anonymous works but is limited to 60 requests/hour — the initial backfill
+Anonymous works but is limited to 60 requests/hour - the initial backfill
 needs the PAT; nightly re-checks (ETag-conditioned) are cheap either way.
 
 Admin webhook secret (`POST /v1/admin/sync` authenticates with
@@ -65,7 +65,7 @@ the endpoint fail-closes with 503):
 SHIZU_ADMIN_SECRET=$(openssl rand -hex 32)
 ```
 
-(The `Admin:HmacSecret` config key works too, but env is preferred — never
+(The `Admin:HmacSecret` config key works too, but env is preferred - never
 commit the secret to appsettings.json.)
 
 ## aapt2 (icon extraction)
@@ -87,7 +87,7 @@ sudo -u shizu /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager "build-tools;
 
 Then point `Enrichment:Aapt2Path` at
 `/opt/android-sdk/build-tools/34.0.0/aapt2` (verified locally with
-build-tools 35.0.0 — the `dump badging` format is stable across 30–36).
+build-tools 35.0.0 - the `dump badging` format is stable across 30–36).
 
 Notes:
 
@@ -103,24 +103,24 @@ Notes:
 
 ## apksigner (signing-cert fingerprints)
 
-F-Droid builds are delayed and — unless reproducible — signed with a
-different key than the developer's forge releases. The server is
-therefore **forge-first** (a GitHub/GitLab link anywhere in the entry
-wins the primary APK) and records **both** signers, so clients can
-detect which build is installed locally and offer the matching download:
+Installable builds are keyed by signing identity: each `app_downloads`
+row carries the fingerprints of one build candidate. f-droid.org hosts
+F-Droid community rebuilds (a different key than the developer's unless
+the build is reproducible); IzzyOnDroid (`apt.izzysoft.de`) hosts the
+developers' own upstream builds (normally crawled from GitHub/GitLab),
+so Izzy builds are signature-compatible with forge releases.
+Fingerprints per candidate:
 
-- `sig_sha256` / `sig_md5` — primary APK fingerprints, read by
-  `apksigner verify --print-certs` (SHA-256 + MD5 lines; rotation-aware,
-  space-joined sets).
-- `fdroid_variant { apk_url, version, sha256, sig_sha256, sig_md5 }` —
-  the same package's F-Droid build, resolved by package name in the
-  F-Droid main index and analyzed on change (nullable when the package
-  is not on F-Droid).
+- `sig_sha256` / `sig_md5` - read by `apksigner verify --print-certs`
+  (SHA-256 + MD5 lines; rotation-aware, space-joined sets), or the
+  F-Droid index `<sig>` 32-hex MD5 for index-only rows.
 
-Client matching: hash the installed app's signing cert (SHA-256 and
-MD5) and compare against all four fingerprints; when an
-`fdroid_variant` fingerprint matches, offer `fdroid_variant.apk_url`
-instead of the primary `apk_url`.
+Client matching: hash the installed app's signing cert and filter
+`downloads[]` to candidates whose `sigSha256`/`sigMd5` match
+(membership match against the space-joined sets). Among matches,
+compare the candidate's `versionCode` against the installed version;
+offer the primary download for a fresh install. There is no
+server-side source lock and clients never switch signatures.
 
 `apksigner` ships with the same build-tools package as `aapt2` but
 needs a JRE:
@@ -133,8 +133,9 @@ Then point `Enrichment:ApksignerPath` at
 `/opt/android-sdk/build-tools/34.0.0/apksigner` (verified locally with
 35.0.0, which prints SHA-256 + SHA-1 + MD5 digests per signer).
 Signature extraction is best-effort: without Java/apksigner the
-`sig_*` columns stay null and enrichment still succeeds (the F-Droid
-`<sig>` MD5 from the index is always recorded).
+`sig_sha256`/`sig_md5` values stay null and enrichment still succeeds
+(the F-Droid `<sig>` MD5 from the index is always recorded for
+F-Droid/Izzy rows).
 
 ## Icon rendering (Gradle + Paparazzi)
 
@@ -168,13 +169,13 @@ iterating. Production renders run batched: one `renderIconBatch
 Gradle invocation pays a full task graph + test-JVM + LayoutLib
 boot (~2.5min per icon unbatched). If the batch task fails for
 every icon at once, check that `app/build.gradle` forwards the
-`-Pbatch` value as the `iconBatch` test sysprop — a missing forward
+`-Pbatch` value as the `iconBatch` test sysprop - a missing forward
 silently runs single-icon mode against a nonexistent drawable.)
 
 ## Startup tool check
 
 All three binaries are verified at startup (`aapt2 version`,
-`apksigner --version`, `gradle --version` must exit 0) — the server logs the detected
+`apksigner --version`, `gradle --version` must exit 0) - the server logs the detected
 versions and **refuses to boot** without them instead of serving a
 catalog that never enriches. Only the `Testing` environment used by
 the integration suite skips the check.
@@ -215,7 +216,7 @@ bundle as `shizu`, and restarts the service.
 
 First boot is the initial backfill: `Sync:RunOnStartup` defaults to
 `true`, so the worker parses the list clone, upserts the catalog, and
-enriches all ~350 apps (slow one-time pass over the Releases APIs —
+enriches all ~350 apps (slow one-time pass over the Releases APIs -
 this is what the PAT is for). Watch it via
 `journalctl -u shizuappstore -f` and `sync_runs` rows; later passes are
 cheap (HEAD-gated fast loop every 15 min + nightly full re-check at

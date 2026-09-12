@@ -1,8 +1,10 @@
 namespace ShizuAppStoreServer.Core.Data;
 
 /// <summary>
-/// One awesome-list entry (table <c>apps</c>). Enrichment columns
-/// (<c>PackageName</c>, <c>ApkUrl</c>, …) are filled by the resolvers (M3/M4);
+/// One awesome-list entry (table <c>apps</c>). Installable download
+/// candidates live in <see cref="Downloads"/>; enrichment keeps identity
+/// (<c>PackageName</c>), presentation (<c>IconHash</c>) and link state
+/// (<c>Availability</c>, <c>StoreUrl</c>) on the row itself.
 /// <c>AddedAt</c>/<c>UpdatedAt</c> come from the git-history backfill (M2).
 /// </summary>
 public sealed class App
@@ -49,36 +51,8 @@ public sealed class App
     /// </summary>
     public bool ExcludeOverride { get; set; }
 
+    /// <summary>Android package id (identity for F-Droid and Play lookups).</summary>
     public string? PackageName { get; set; }
-    public long? VersionCode { get; set; }
-    public string? VersionName { get; set; }
-    public string? ApkUrl { get; set; }
-    public long? ApkSize { get; set; }
-    public string? ApkSha256 { get; set; }
-
-    /// <summary>
-    /// Entry path of the APK inside <see cref="ApkUrl"/> when clients
-    /// download a release archive (zip) instead of a bare APK; null for
-    /// plain APK URLs. <see cref="ApkSize"/> and <see cref="ApkSha256"/>
-    /// describe the downloaded archive in that case.
-    /// </summary>
-    public string? ApkArchiveEntry { get; set; }
-    public int? MinSdk { get; set; }
-    /// <summary>
-    /// Source that supplied the currently served APK, locked once clients
-    /// have seen it. F-Droid rebuilds carry a different signing key (unless
-    /// reproducible), so enrichment must never switch the APK download
-    /// between a forge and F-Droid/Izzy (update would fail the signature
-    /// check). Null until the first APK is recorded.
-    /// </summary>
-    public SourceKind? ApkSource { get; set; }
-
-    /// <summary>
-    /// Identity inside <see cref="ApkSource"/> for deterministic re-resolution:
-    /// the F-Droid/Izzy package id; null for forge locks (repo re-derived from
-    /// the entry URLs).
-    /// </summary>
-    public string? ApkSourceRef { get; set; }
 
     public string? StoreUrl { get; set; }
     public string? IconHash { get; set; }
@@ -91,31 +65,6 @@ public sealed class App
     /// carry their own shape and go into a squircle box instead.
     /// </summary>
     public bool IconAdaptive { get; set; }
-
-    /// <summary>
-    /// Primary APK signing-cert fingerprints: SHA-256 (+ MD5) from
-    /// <c>apksigner</c>, or the index <c>&lt;sig&gt;</c> MD5 for
-    /// index-only F-Droid/Izzy primaries. Space-joined sets when the APK
-    /// carries rotated keys; null while unanalyzed. Clients match the
-    /// locally installed cert against these + the F-Droid variant below.
-    /// </summary>
-    public string? SigSha256 { get; set; }
-    public string? SigMd5 { get; set; }
-
-    /// <summary>
-    /// F-Droid alternate variant: recorded when the primary APK comes from a
-    /// forge (GitHub/GitLab) but the same package is also published on
-    /// F-Droid (different signer, delayed builds). The forge build stays
-    /// primary; clients offer this URL when the installed cert matches the
-    /// variant fingerprints instead.
-    /// </summary>
-    public string? FdroidApkUrl { get; set; }
-    public long? FdroidVersionCode { get; set; }
-    public string? FdroidVersionName { get; set; }
-    public long? FdroidApkSize { get; set; }
-    public string? FdroidApkSha256 { get; set; }
-    public string? FdroidSigSha256 { get; set; }
-    public string? FdroidSigMd5 { get; set; }
 
     public long CategoryId { get; set; }
     public Category? Category { get; set; }
@@ -132,4 +81,7 @@ public sealed class App
     public string? EnrichEtag { get; set; }
 
     public List<AppVersion> Versions { get; } = [];
+
+    /// <summary>Installable build candidates: one row per signing identity.</summary>
+    public List<AppDownload> Downloads { get; } = [];
 }

@@ -1,4 +1,4 @@
-# ShizuAppStoreServer — Implementation & Design Spec
+# ShizuAppStoreServer - Implementation & Design Spec
 
 Server backend for a Shizuku-app store. It syncs the `awesome-shizuku`
 awesome-list (README Apps section) into a Postgres catalog,
@@ -51,7 +51,7 @@ Request pipeline order matters: `UseOutputCache` runs **before**
 `UseRateLimiter`, so cache hits don't consume rate-limit permits.
 All `/v1/*` controllers carry `[EnableRateLimiting("api")]` except
 `/healthz`, which is unlimited and uncached. The `api` policy is a
-per-IP (fallback `"unknown"`) fixed window: 100 req/min by default, no queue —
+per-IP (fallback `"unknown"`) fixed window: 100 req/min by default, no queue -
 excess gets 429. `ApiOptions` is resolved per request (not captured),
 so tests can swap the registration per suite.
 
@@ -59,7 +59,7 @@ Startup gate: after `builder.Build()`, the host probes
 `aapt2 version`, `apksigner --version` (30s/60s timeouts), and
 `gradle --version` (2min) and **refuses to boot**
 (`InvalidOperationException`) when any is missing or exits
-non-zero — a server without its toolchain would serve a catalog
+non-zero - a server without its toolchain would serve a catalog
 that never enriches. Skipped only when the host
 environment is `Testing` (the integration-test host sets it).
 
@@ -69,9 +69,9 @@ Tables are snake_case, `bigint` identity PKs, enums stored as
 strings. Migrations live next to the context; `dotnet ef migrations
 bundle` is rebuilt per deploy, never committed.
 
-- **categories** — `slug` unique; self-referencing `parent_id`
+- **categories** - `slug` unique; self-referencing `parent_id`
   (max depth 2 in real data); `section` (`apps|libraries|misc`).
-- **apps** — one awesome-list entry. `slug` globally unique and
+- **apps** - one awesome-list entry. `slug` globally unique and
   **stable across renames**. `url` is deliberately **non-unique**:
   real data lists the same URL in several categories, so identity is
   `(listing, url, category)`, never the URL alone.
@@ -80,33 +80,47 @@ bundle` is rebuilt per deploy, never committed.
     (`is_recommended`, `has_paid`, `has_iap`, `has_ads`,
     `trial_days`, `requires_root`), `parent_id` (nested entries),
     `url`, `source_url`, `source_kind`, `availability`, `store_url`.
-  - Enrichment fields: `package_name`, `version_code`,
-    `version_name`, `apk_url`, `apk_size`, `apk_sha256`,
-    `apk_archive_entry` (APK path inside `apk_url` when that is a
-    zip; §5), `min_sdk`,
-    `icon_hash`, `icon_adaptive`, `apk_source` / `apk_source_ref`
-    (APK source lock, §5), `enrich_etag` (conditional-request ETag
-    reuse), `last_checked_at`, `last_error` (trimmed to 500 chars).
-  - Signatures + F-Droid variant (§6): `sig_sha256`, `sig_md5`,
-    `fdroid_apk_url`, `fdroid_version_code`,
-    `fdroid_version_name`, `fdroid_apk_size`, `fdroid_apk_sha256`,
-    `fdroid_sig_sha256`, `fdroid_sig_md5` (all nullable).
+  - Enrichment fields: `package_name`, `icon_hash`, `icon_adaptive`,
+    `enrich_etag` (conditional-request ETag reuse), `last_checked_at`,
+    `last_error` (trimmed to 500 chars).
   - `exclude_override` (operator flag, never touched by the
     upserter), `excluded_reason`, `added_at`/`updated_at` (git
     history, §4).
   - Indexes on `url`, `updated_at`, `availability`, `category_id`.
-- **app_versions** — (`app_id`, `version_code`, `version_name`,
+- **app_downloads** - one row per signing identity of an app's
+  installable builds. Replaces the removed per-candidate `apps`
+  columns (`version_code`, `version_name`, `apk_url`, `apk_size`,
+  `apk_sha256`, `apk_archive_entry`, `min_sdk`, `sig_sha256`,
+  `sig_md5`, `apk_source`, `apk_source_ref`, and the 7 `fdroid_*`
+  columns). Columns: `id`, `app_id` (FK cascade), `source`
+  (`GitHub|GitLab|Codeberg|FDroid|Izzy|Play|Other`), `source_ref`,
+  `apk_url`, `archive_entry`, `version_code`, `version_name`,
+  `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `min_sdk`,
+  `sig_key`, `is_primary`, `resolved_at`.
+  - `sig_key` = lowercased first space-token of `sig_sha256`, else of
+    `sig_md5`, else `url:<apk_url>`; unique `(app_id, sig_key)`, so
+    same-signature candidates (reproducible F-Droid builds, Izzy
+    mirrors of forge builds) collapse into one row.
+  - Upsert: same `sig_key` updates in place only when the new
+    `version_code` is higher; on an equal `version_code` the preferred
+    source's URL is kept; lower versions are ignored.
+  - `is_primary` = fresh-install/no-match default. Selection prefers
+    non-F-Droid sources (GitHub/GitLab/Izzy/Codeberg/Other count as
+    forge-like), then higher `version_code`, then a fixed source
+    order. Exactly one primary per app (partial unique index on
+    `app_id` where `is_primary`).
+- **app_versions** - (`app_id`, `version_code`, `version_name`,
   `apk_url`, `detected_at`); a row is appended only when the
-  (code, name) pair is unseen for the app.
-- **sync_runs** — audit log of passes: `trigger`, `head_commit`,
+  (code, name) pair is unseen for the app (append-only history).
+- **sync_runs** - audit log of passes: `trigger`, `head_commit`,
   per-bucket counts (added/updated/removed/enriched/up-to-date/
   failed, drained requests, parse warnings, archived changes),
   `skipped` flag, `error`. A `Skipped` pass
   writes **no row** (clean audit log, not a heartbeat table).
-- **sync_requests** — webhook queue (`reason`, `processed`); rows
+- **sync_requests** - webhook queue (`reason`, `processed`); rows
   are marked processed only on pass success, so a failed pass never
   loses its trigger.
-- **removed_apps** — tombstones closing the delete path:
+- **removed_apps** - tombstones closing the delete path:
   `slug` unique + `removed_at` index. Written (add-or-refresh) on
   stale delete, cleared on re-add (resurrection).
 
@@ -136,7 +150,7 @@ bundle` is rebuilt per deploy, never committed.
   listed URLs (entry + source links, recursive incl. children) are
   marked `Excluded` with a fixed reason; un-listed apps are
   un-marked (reason cleared, check fields nulled). An emptied file
-  still clears — emptiness is meaningful, there is no early return.
+  still clears - emptiness is meaningful, there is no early return.
 
 ## 5. Enrichment pipeline (`Enrichment/`, `Sources/`)
 
@@ -146,19 +160,25 @@ or failure backoff (12h) return `SkippedFresh` with no work.
 
 Resolution is **forge-first, always**: GitHub → GitLab →
 F-Droid/Izzy → fallback. A forge link anywhere in the entry (primary
-or source URL) wins the primary APK; F-Droid is never primary when a
+or source URL) wins the primary APK; F-Droid is never primary while a
 forge source exists. Play + forge combos keep Play as `store_url`.
 
 When a forge fails with no usable APK (no release, no `.apk` asset
 and no archive carrying one), the app falls back to the F-Droid main
 index: the `<application>` whose `<source>` URL matches the entry's
-forge repo. The source that supplied an APK is recorded (`apk_source`,
-`apk_source_ref`) and **locked**: enrichment never switches an app
-between forge and F-Droid afterwards, because the signing keys differ
-and installed clients would reject the update. A locked F-Droid app
-skips the forge entirely and re-resolves through the index; a locked
-forge app never falls back. Apps without any served APK are not
-locked, so later enrichment can still rescue them.
+forge repo. There is **no source lock**: candidates resolve
+symmetrically. A forge primary also records the f-droid.org candidate
+(best-effort), and an F-Droid/Izzy primary also tries a forge
+candidate. Every resolved build lands as a signature-keyed
+`app_downloads` row (§6); failure of the candidate side never changes
+the primary outcome.
+
+f-droid.org hosts F-Droid community **rebuilds** (a different signing
+key than the developer unless the build is reproducible).
+IzzyOnDroid (`apt.izzysoft.de`) hosts the **developers' own upstream
+builds** (normally crawled from GitHub/GitLab), so Izzy builds are
+signature-compatible with forge releases; `is_primary` preference
+therefore treats Izzy as forge-like.
 
 - **GitHub** (`GitHubReleaseClient`, raw HttpClient + PAT from
   config or `SHIZU_GITHUB_TOKEN`): newest non-draft of the first
@@ -169,8 +189,8 @@ locked, so later enrichment can still rescue them.
   largest `.apk`. If the release ships no `.apk`, a `.zip` asset is
   downloaded and the APK inside it is analyzed (some projects attach
   only a release bundle): `apk_url` stays the archive download,
-  `apk_size`/`apk_sha256` describe the archive, and
-  `apk_archive_entry` names the APK inside. An unusable archive with
+  `size_bytes`/`sha256` describe the archive, and `archive_entry`
+  names the APK inside. An unusable archive with
   no APK falls through to the F-Droid fallback, else `Failed`.
 - **GitLab** (`GitLabReleaseClient`, `PRIVATE-TOKEN` from config or
   `SHIZU_GITLAB_TOKEN`): skips `upcoming` releases, prefers
@@ -196,18 +216,17 @@ locked, so later enrichment can still rescue them.
   and fully analyzed like a forge build (§5.1); unparseable files
   fall back to the index-only record, a package-name mismatch
   fails the pass (index row and file disagree), a package missing
-  from the index fails with `not in`. A hit locks the app to this
-  repo (`apk_source` = FDroid/Izzy, `apk_source_ref` = package id)
-  so updates keep coming from the same signing source. Index
-  lookups by source URL (`FindPackageBySourceAsync`) power the
-  forge fallback.
+  from the index fails with `not in`. A hit upserts a signature-keyed
+  `app_downloads` row (`source` = FDroid/Izzy, `source_ref` = package
+  id, §6). Index lookups by source URL (`FindPackageBySourceAsync`)
+  power the forge fallback.
 - **Fallback** (no forge/F-Droid source): letter-avatar icon,
   `LinkOnly` - or `PlayRedirect` with `StoreUrl` for Play entries.
   When a Play listing is linked (including on apps whose forge has no
   APK at all), the real icon is scraped from the listing's `og:image`
-  and used instead of the avatar; `apk_url` stays null and the client
-  shows an open-in-Play-store / open-externally button based on the
-  entry URL.
+  and used instead of the avatar; no download row is recorded and the
+  client shows an open-in-Play-store / open-externally button based on
+  the entry URL.
   Play-sole-source apps (no usable source link, no override) are
   `Excluded` with a reason and hidden from every endpoint.
 
@@ -276,7 +295,8 @@ Outcomes: `Enriched`, `UpToDate`, `AvatarFallback`, `Excluded`,
 cancellation propagates.
 
 `--refresh-icons [--force]` is a one-shot that re-resolves every
-`DirectApk` icon without touching versions: byte-identical renders
+`DirectApk` icon from the primary download's URL without touching
+versions: byte-identical renders
 stay `UpToDate` (missing files are still rewritten), changed
 renders adopt the new hash. `--force` additionally recounts
 identical renders as refreshed, which surfaces self-consistent
@@ -293,30 +313,37 @@ framing); plain vectors render full-bleed too but stay false, as do
 decoded rasters and avatars (framed in a squircle box). Refresh
 passes re-sync the flag without icon churn.
 
-## 6. Signatures & F-Droid alternate variant
+## 6. Signature-keyed downloads
 
-F-Droid builds are delayed and (unless reproducible) signed with a
-different key, so both signers are recorded:
+Each `app_downloads` row is one signing identity. `sig_key` is the
+lowercased first space-token of `sig_sha256`, else of `sig_md5`, else
+`url:<apk_url>`; unique `(app_id, sig_key)`, so same-signature
+candidates (reproducible F-Droid builds, Izzy mirrors of forge
+builds) collapse into one row. Fingerprints come from `apksigner`
+(every `Signer #N certificate … digest` line is collected - key
+rotation yields space-joined sets matched by membership; MD5 is
+optional for old build-tools) or the index `<sig>` MD5 for
+index-only F-Droid/Izzy rows.
 
-- `sig_sha256` / `sig_md5`: primary-APK fingerprints from
-  `apksigner` (every `Signer #N certificate … digest` line is
-  collected — key rotation yields space-joined sets matched by
-  membership; MD5 is optional for old build-tools), or the index
-  `<sig>` MD5 for index-only F-Droid/Izzy primaries.
-- `fdroid_*`: the same package's F-Droid main-repo build, resolved
-  by package name after every fresh forge enrich (never on
-  `SkippedFresh`, and skipped when the primary is already
-  F-Droid-locked: a variant would duplicate it). Downloaded +
-  analyzed on change, recorded
-  index-only when the file can't be fetched, refreshed MD5 on the
-  up-to-date short-circuit, cleared when F-Droid drops the package.
-  The sidecar is strictly additive and broadly caught — it never
-  changes the primary outcome.
+Upsert rule: a candidate with the same `sig_key` updates the row in
+place only when its `version_code` is higher; on an equal
+`version_code` the preferred source's URL is kept; a lower version is
+ignored. An index-only row (MD5 identity) upgrades in place when the
+analyzed build reveals the SHA-256 identity.
 
-Client contract: hash the installed app's signing cert (SHA-256 and
-MD5) and compare against `sig_*` + `fdroid_variant` fingerprints;
-when a variant fingerprint matches, offer
-`fdroid_variant.apk_url` instead of the primary `apk_url`.
+`is_primary` marks the default candidate for fresh installs / clients
+with no fingerprint match. Selection: non-F-Droid sources first
+(GitHub/GitLab/Izzy/Codeberg/Other all count as forge-like), then
+higher `version_code`, then a fixed source order. Exactly one primary
+per app (partial unique index on `app_id` where `is_primary`).
+
+Client contract: hash the installed app's signing cert and filter
+`downloads[]` to candidates whose `sigSha256`/`sigMd5` match
+(membership match; fingerprints may be space-joined sets). Among
+matches, compare the candidate's `versionCode` against the installed
+version (do not compare against other candidates). With no match,
+offer the primary for a fresh install. Never switch a user between
+different signatures.
 
 ## 7. Sync engine
 
@@ -346,7 +373,7 @@ Workers (`Web/Sync/`): `SyncWorker` runs one pass at startup
 `PeriodicTimer` (`FastLoopMinutes`, floored at 1); `NightlyWorker`
 sleeps until the next strictly-future `NightlyTimeUtc` (HH:mm UTC,
 default 03:00; invalid values disable it with a log) and triggers
-full re-checks. `SyncGate` single-flights passes — a contested tick
+full re-checks. `SyncGate` single-flights passes - a contested tick
 skips.
 
 ## 8. API behavior (`/v1/*`)
@@ -354,17 +381,19 @@ skips.
 Snake_case wire format (`main|closed_source`, `app|library|flow`,
 `apps|libraries|misc`, `github|gitlab|codeberg|fdroid|izzy|play|
 other`, `direct_apk|play_redirect|link_only|excluded`). `excluded`
-rows are never returned (detail reads them as 404).
+rows are never returned (detail reads them as 404). Summary/list DTOs
+source `versionCode`/`versionName`/`minSdk`/`sigSha256`/`sigMd5` from
+the primary download.
 
 | Endpoint | Behavior |
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `listing`/`availability`/`type` (parse or 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, sigs + nullable `fdroid_variant`. When `apkUrl` is a zip, `apkArchiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts (excluded omitted). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
-| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) — all oldest-first, excluded hidden. Output-cached 30s, `VaryByQuery(*)`. |
+| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
-| `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-year `Cache-Control` (no output-cache attribute — its filter would overwrite the header). |
+| `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-year `Cache-Control` (no output-cache attribute - its filter would overwrite the header). |
 | `POST /v1/admin/sync` | Webhook: secret from `Admin:HmacSecret` or `SHIZU_ADMIN_SECRET`, else fail-closed 503. `X-Shizu-Signature` must be hex `HMAC-SHA256(raw body)` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row → 202 `{queued:true}`. |
 
 Rate limit: fixed window, 100 req/min/IP, no queue (→ 429).
@@ -395,14 +424,19 @@ is served in all environments; Scalar UI is development-only.
 
 ## 10. Invariants & gotchas (do not break)
 
-- Forge-first is policy: no change may make F-Droid primary while
-  a forge link exists; the variant sidecar may only add data, never
-  alter the primary outcome.
-- Source lock is the exception to forge-first: an app already
-  served from F-Droid/Izzy stays there even when a forge APK
-  appears later (and vice versa), or clients fail the update
-  signature check. `apk_source` is written on every APK lock.
-- `apps.url` is not an identity — always key on
+- Forge-first is policy: no change may make F-Droid primary while a
+  forge link exists. Izzy is forge-like (it hosts the developers'
+  own builds); only f-droid.org community rebuilds rank below forge.
+- One row per signing identity: `(app_id, sig_key)` is unique; a
+  candidate never creates a second row for the same signature.
+- Candidates never alter which source is primary other than through
+  the `is_primary` rule (forge-like first, then higher
+  `version_code`, then fixed source order); exactly one primary per
+  app.
+- Signatures govern client choice: clients filter `downloads[]` by
+  the installed cert's fingerprint, compare that candidate's version,
+  and never switch a user between signatures.
+- `apps.url` is not an identity - always key on
   `(listing, url, category)`.
 - Tombstone closure: every stale-delete path must write, every
   re-add path must clear, or `/v1/changes removed[]` drifts.
@@ -417,7 +451,7 @@ is served in all environments; Scalar UI is development-only.
   reach `Program.cs`); output cache has no request-driven bypass
   (tests re-register no-op policies); never put `[ResponseCache]`
   on the icons action; no `ORDER BY`/`Max`/`Where` over
-  `DateTimeOffset` in LINQ shared with SQLite tests — sort and
+  `DateTimeOffset` in LINQ shared with SQLite tests - sort and
   filter those in memory (Npgsql translates the same LINQ fine).
 - Npgsql writes `DateTimeOffset` to timestamptz only with Offset=0
   (Postgres stores UTC instants, no offsets) while SQLite accepts

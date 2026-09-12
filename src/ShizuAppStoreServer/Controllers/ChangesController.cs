@@ -42,6 +42,7 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
         var all = await db.Apps.AsNoTracking()
             .Where(a => a.Availability != Availability.Excluded)
             .Include(a => a.Category)
+            .Include(a => a.Downloads)
             .ToListAsync(ct);
 
         var added = all

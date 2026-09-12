@@ -139,7 +139,7 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
         // LINQ fine. The catalog is tiny (~hundreds of rows), so this costs
         // nothing and keeps both providers green.
         var total = await query.CountAsync(ct);
-        var rows = await query.Include(a => a.Category).ToListAsync(ct);
+        var rows = await query.Include(a => a.Category).Include(a => a.Downloads).ToListAsync(ct);
 
         var ordered = (sortKey, descending.Value) switch
         {
@@ -174,6 +174,7 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
         var app = await db.Apps.AsNoTracking()
             .Include(a => a.Category).ThenInclude(c => c!.Parent)
             .Include(a => a.Parent)
+            .Include(a => a.Downloads)
             .FirstOrDefaultAsync(a => a.Slug == slug && a.Availability != Availability.Excluded, ct);
 
         if (app is null)

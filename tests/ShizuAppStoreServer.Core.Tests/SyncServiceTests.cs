@@ -436,8 +436,17 @@ public sealed class SyncServiceTests : IDisposable
         foreach (var app in _db.Apps)
         {
             app.Availability = Availability.DirectApk;
-            app.ApkUrl = "https://example.com/" + app.Slug + ".apk";
             app.IconHash = "old";
+            _db.Downloads.Add(new AppDownload
+            {
+                AppId = app.Id,
+                Source = SourceKind.GitHub,
+                ApkUrl = "https://example.com/" + app.Slug + ".apk",
+                VersionCode = 1,
+                SigKey = "url:https://example.com/" + app.Slug + ".apk",
+                IsPrimary = true,
+                ResolvedAt = T0,
+            });
         }
 
         _db.SaveChanges();

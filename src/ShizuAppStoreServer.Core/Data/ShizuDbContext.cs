@@ -7,6 +7,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<Category> Categories => Set<Category>();
     public DbSet<App> Apps => Set<App>();
     public DbSet<AppVersion> AppVersions => Set<AppVersion>();
+    public DbSet<AppDownload> Downloads => Set<AppDownload>();
     public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
     public DbSet<RemovedApp> RemovedApps => Set<RemovedApp>();
@@ -96,27 +97,9 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.ExcludedReason).HasColumnName("excluded_reason");
             e.Property(x => x.ExcludeOverride).HasColumnName("exclude_override");
             e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(256);
-            e.Property(x => x.VersionCode).HasColumnName("version_code");
-            e.Property(x => x.VersionName).HasColumnName("version_name").HasMaxLength(64);
-            e.Property(x => x.ApkUrl).HasColumnName("apk_url").HasMaxLength(2000);
-            e.Property(x => x.ApkSource).HasColumnName("apk_source").HasConversion<string>().HasMaxLength(32);
-            e.Property(x => x.ApkSourceRef).HasColumnName("apk_source_ref").HasMaxLength(256);
-            e.Property(x => x.ApkSize).HasColumnName("apk_size");
-            e.Property(x => x.ApkSha256).HasColumnName("apk_sha256").HasMaxLength(128);
-            e.Property(x => x.ApkArchiveEntry).HasColumnName("apk_archive_entry").HasMaxLength(256);
-            e.Property(x => x.MinSdk).HasColumnName("min_sdk");
             e.Property(x => x.StoreUrl).HasColumnName("store_url").HasMaxLength(2000);
             e.Property(x => x.IconHash).HasColumnName("icon_hash").HasMaxLength(128);
             e.Property(x => x.IconAdaptive).HasColumnName("icon_adaptive");
-            e.Property(x => x.SigSha256).HasColumnName("sig_sha256").HasMaxLength(512);
-            e.Property(x => x.SigMd5).HasColumnName("sig_md5").HasMaxLength(512);
-            e.Property(x => x.FdroidApkUrl).HasColumnName("fdroid_apk_url").HasMaxLength(2000);
-            e.Property(x => x.FdroidVersionCode).HasColumnName("fdroid_version_code");
-            e.Property(x => x.FdroidVersionName).HasColumnName("fdroid_version_name").HasMaxLength(64);
-            e.Property(x => x.FdroidApkSize).HasColumnName("fdroid_apk_size");
-            e.Property(x => x.FdroidApkSha256).HasColumnName("fdroid_apk_sha256").HasMaxLength(128);
-            e.Property(x => x.FdroidSigSha256).HasColumnName("fdroid_sig_sha256").HasMaxLength(512);
-            e.Property(x => x.FdroidSigMd5).HasColumnName("fdroid_sig_md5").HasMaxLength(512);
             e.Property(x => x.CategoryId).HasColumnName("category_id");
             e.HasOne(x => x.Category).WithMany(x => x.Apps).HasForeignKey(x => x.CategoryId).OnDelete(DeleteBehavior.Restrict);
             e.Property(x => x.AddedAt).HasColumnName("added_at").IsRequired();
@@ -127,6 +110,32 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.HasIndex(x => x.CategoryId);
             e.HasIndex(x => x.UpdatedAt);
             e.HasIndex(x => x.Availability);
+        });
+
+        b.Entity<AppDownload>(e =>
+        {
+            e.ToTable("app_downloads");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.AppId).HasColumnName("app_id");
+            e.HasOne(x => x.App).WithMany(x => x.Downloads).HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Source).HasColumnName("source").HasConversion<string>().HasMaxLength(32).IsRequired();
+            e.Property(x => x.SourceRef).HasColumnName("source_ref").HasMaxLength(256);
+            e.Property(x => x.ApkUrl).HasColumnName("apk_url").HasMaxLength(2000).IsRequired();
+            e.Property(x => x.ArchiveEntry).HasColumnName("archive_entry").HasMaxLength(256);
+            e.Property(x => x.VersionCode).HasColumnName("version_code");
+            e.Property(x => x.VersionName).HasColumnName("version_name").HasMaxLength(64);
+            e.Property(x => x.SizeBytes).HasColumnName("size_bytes");
+            e.Property(x => x.Sha256).HasColumnName("sha256").HasMaxLength(128);
+            e.Property(x => x.SigSha256).HasColumnName("sig_sha256").HasMaxLength(512);
+            e.Property(x => x.SigMd5).HasColumnName("sig_md5").HasMaxLength(512);
+            e.Property(x => x.MinSdk).HasColumnName("min_sdk");
+            e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
+            e.Property(x => x.IsPrimary).HasColumnName("is_primary");
+            e.Property(x => x.ResolvedAt).HasColumnName("resolved_at").IsRequired();
+            e.HasIndex(x => new { x.AppId, x.SigKey }).IsUnique();
+            // At most one primary candidate per app; recomputed on every upsert.
+            e.HasIndex(x => x.AppId).IsUnique().HasFilter("is_primary");
         });
 
         b.Entity<AppVersion>(e =>

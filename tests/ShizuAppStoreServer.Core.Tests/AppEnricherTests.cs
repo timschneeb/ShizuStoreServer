@@ -224,6 +224,58 @@ public sealed class AppEnricherTests : IDisposable
 
     private void Age(App app) => app.LastCheckedAt = T0 - TimeSpan.FromDays(2);
 
+    /// <summary>Primary download candidate: the build clients install by default.</summary>
+    private AppDownload Primary(App app) =>
+        _db.Downloads.Local.Single(d => d.AppId == app.Id && d.IsPrimary);
+
+    private bool HasDownloads(App app) => _db.Downloads.Local.Any(d => d.AppId == app.Id);
+
+    private AppDownload AddDownload(
+        App app,
+        SourceKind source,
+        string url,
+        long? versionCode = null,
+        string? sigSha256 = null,
+        string? sigMd5 = null,
+        string? sha256 = null,
+        long? size = null,
+        string? sourceRef = null,
+        bool primary = true)
+    {
+        var row = new AppDownload
+        {
+            AppId = app.Id,
+            Source = source,
+            SourceRef = sourceRef,
+            ApkUrl = url,
+            VersionCode = versionCode,
+            SigSha256 = sigSha256,
+            SigMd5 = sigMd5,
+            Sha256 = sha256,
+            SizeBytes = size,
+            SigKey = SigKeyFor(sigSha256, sigMd5, url),
+            IsPrimary = primary,
+            ResolvedAt = T0,
+        };
+        _db.Downloads.Add(row);
+        _db.SaveChanges();
+        return row;
+    }
+
+    private static string SigKeyFor(string? sigSha256, string? sigMd5, string url)
+    {
+        var sha = sigSha256?.Split(' ')[0].ToLowerInvariant();
+        if (!string.IsNullOrEmpty(sha))
+        {
+            return sha;
+        }
+
+        var md5 = sigMd5?.Split(' ')[0].ToLowerInvariant();
+        return !string.IsNullOrEmpty(md5)
+            ? md5
+            : "url:" + Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(url)));
+    }
+
     [Fact]
     public async Task EnrichesGitHubAppEndToEnd()
     {
@@ -237,18 +289,20 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(1, aapt2.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
         Assert.Equal(SourceKind.GitHub, app.SourceKind);
-        Assert.Equal(SourceKind.GitHub, app.ApkSource);
-        Assert.Null(app.ApkSourceRef);
         Assert.Equal("com.example.app", app.PackageName);
-        Assert.Equal(42, app.VersionCode);
-        Assert.Equal("1.2.3", app.VersionName);
-        Assert.Equal(24, app.MinSdk);
-        Assert.Equal("https://cdn.example/app.apk", app.ApkUrl);
-        Assert.Equal(zip.Length, app.ApkSize);
-        Assert.Equal(Sha256(zip), app.ApkSha256);
         Assert.Equal("\"rel-etag\"", app.EnrichEtag);
         Assert.Equal(T0, app.LastCheckedAt);
         Assert.Null(app.LastError);
+
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.GitHub, primary.Source);
+        Assert.Null(primary.SourceRef);
+        Assert.Equal(42, primary.VersionCode);
+        Assert.Equal("1.2.3", primary.VersionName);
+        Assert.Equal(24, primary.MinSdk);
+        Assert.Equal("https://cdn.example/app.apk", primary.ApkUrl);
+        Assert.Equal(zip.Length, primary.SizeBytes);
+        Assert.Equal(Sha256(zip), primary.Sha256);
 
         var iconPath = Path.Combine(_iconDir, $"{app.IconHash}.png");
         Assert.True(File.Exists(iconPath));
@@ -299,12 +353,13 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(1, downloads.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
-        Assert.Equal(SourceKind.GitHub, app.ApkSource);
-        Assert.Equal("https://cdn.example/appcontrolx.zip", app.ApkUrl);
-        Assert.Equal("AppControlX-release-generated-signed.apk", app.ApkArchiveEntry);
-        Assert.Equal(7, app.VersionCode);
-        Assert.Equal(zipBytes.Length, app.ApkSize);
-        Assert.Equal(Sha256(zipBytes), app.ApkSha256);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.GitHub, primary.Source);
+        Assert.Equal("https://cdn.example/appcontrolx.zip", primary.ApkUrl);
+        Assert.Equal("AppControlX-release-generated-signed.apk", primary.ArchiveEntry);
+        Assert.Equal(7, primary.VersionCode);
+        Assert.Equal(zipBytes.Length, primary.SizeBytes);
+        Assert.Equal(Sha256(zipBytes), primary.Sha256);
         Assert.NotNull(app.IconHash);
         Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
     }
@@ -327,7 +382,7 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Failed, result.Outcome);
         Assert.Contains("no .apk asset", app.LastError);
-        Assert.Null(app.ApkUrl);
+        Assert.False(HasDownloads(app));
     }
 
     [Fact]
@@ -388,7 +443,7 @@ public sealed class AppEnricherTests : IDisposable
         Age(app);
         var (third, _, _, _, _) = HappyPath(tag: "v1.1", versionCode: "43", iconColor: Color.Red);
         Assert.Equal(EnrichOutcome.Enriched, (await third.EnrichAsync(app, T0)).Outcome);
-        Assert.Equal(43, app.VersionCode);
+        Assert.Equal(43, Primary(app).VersionCode);
         Assert.False(File.Exists(oldIcon));
         await _db.SaveChangesAsync();
         Assert.Equal(2, await _db.AppVersions.CountAsync());
@@ -430,7 +485,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Contains("404", app.LastError);
         Assert.Equal(T0, app.LastCheckedAt);
         Assert.Equal(Availability.LinkOnly, app.Availability);
-        Assert.Null(app.ApkUrl);
+        Assert.False(HasDownloads(app));
 
         // Immediate retry is skipped (backoff); after the window it retries.
         Assert.Equal(EnrichOutcome.SkippedFresh, (await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0)).Outcome);
@@ -492,7 +547,7 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
         Assert.Equal(Availability.LinkOnly, app.Availability);
-        Assert.Null(app.ApkUrl);
+        Assert.False(HasDownloads(app));
         Assert.Null(app.LastError);
         Assert.Equal(1, play.Calls);
         Assert.NotEqual(LetterAvatarGenerator.Generate("Play Only").Sha256, app.IconHash);
@@ -563,7 +618,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Excluded, result.Outcome);
         Assert.Equal(Availability.Excluded, app.Availability);
         Assert.Contains("no APK available", app.ExcludedReason);
-        Assert.Null(app.ApkUrl);
+        Assert.False(HasDownloads(app));
         Assert.Equal(1, play.Calls);
     }
 
@@ -708,13 +763,14 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(1, aapt2.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
         Assert.Equal(SourceKind.GitLab, app.SourceKind);
-        Assert.Equal(SourceKind.GitLab, app.ApkSource);
-        Assert.Null(app.ApkSourceRef);
         Assert.Equal("com.example.app", app.PackageName);
-        Assert.Equal(42, app.VersionCode);
-        Assert.Equal("https://cdn.example/app.apk", app.ApkUrl);
-        Assert.Equal(zip.Length, app.ApkSize);
-        Assert.Equal(Sha256(zip), app.ApkSha256);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.GitLab, primary.Source);
+        Assert.Null(primary.SourceRef);
+        Assert.Equal(42L, primary.VersionCode);
+        Assert.Equal("https://cdn.example/app.apk", primary.ApkUrl);
+        Assert.Equal((long)zip.Length, primary.SizeBytes);
+        Assert.Equal(Sha256(zip), primary.Sha256);
         Assert.Equal("\"gl-etag\"", app.EnrichEtag);
         Assert.Null(app.LastError);
         Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
@@ -807,17 +863,18 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(2, downloads.Calls); // APK attempt (404 → index-only) + icon
         Assert.Equal(Availability.DirectApk, app.Availability);
         Assert.Equal(SourceKind.FDroid, app.SourceKind);
-        Assert.Equal(SourceKind.FDroid, app.ApkSource);
-        Assert.Equal("com.example.app", app.ApkSourceRef);
         Assert.Equal("com.example.app", app.PackageName);
-        Assert.Equal(20, app.VersionCode);
-        Assert.Equal("2.0", app.VersionName);
-        Assert.Equal(26, app.MinSdk);
-        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
-        Assert.Equal(1234567, app.ApkSize);
-        Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", app.ApkSha256);
-        Assert.Null(app.SigSha256); // no APK analyzed: SHA-256 unknown
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.SigMd5); // index <sig>
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal("com.example.app", primary.SourceRef);
+        Assert.Equal(20L, primary.VersionCode);
+        Assert.Equal("2.0", primary.VersionName);
+        Assert.Equal(26, primary.MinSdk);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", primary.ApkUrl);
+        Assert.Equal(1234567L, primary.SizeBytes);
+        Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", primary.Sha256);
+        Assert.Null(primary.SigSha256); // no APK analyzed: SHA-256 unknown
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", primary.SigMd5); // index <sig>
         Assert.Null(app.LastError);
         // Icon is the mirrored repo PNG, normalized to 192px.
         Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
@@ -848,7 +905,7 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(SourceKind.Izzy, app.SourceKind);
-        Assert.StartsWith("https://apt.izzysoft.de/fdroid/repo/", app.ApkUrl);
+        Assert.StartsWith("https://apt.izzysoft.de/fdroid/repo/", Primary(app).ApkUrl);
     }
 
     [Fact]
@@ -880,7 +937,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Contains("not in", app.LastError);
     }
 
-    // ---- F-Droid source fallback + APK source lock ----
+    // ---- F-Droid source fallback + symmetric candidates ----
 
     [Fact]
     public async Task FallsBackToFdroidWhenGitHubHasNoApk()
@@ -898,9 +955,10 @@ public sealed class AppEnricherTests : IDisposable
         // regular package fetch revalidates it (the stub never sends 304).
         Assert.Equal(2, fdroid.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
-        Assert.Equal(SourceKind.FDroid, app.ApkSource);
-        Assert.Equal("com.example.app", app.ApkSourceRef);
-        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal("com.example.app", primary.SourceRef);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", primary.ApkUrl);
     }
 
     [Fact]
@@ -915,8 +973,9 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Equal(SourceKind.FDroid, app.ApkSource);
-        Assert.Equal("com.example.app", app.ApkSourceRef);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal("com.example.app", primary.SourceRef);
     }
 
     [Fact]
@@ -935,55 +994,52 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Equal(SourceKind.FDroid, app.ApkSource);
-        Assert.Equal("com.example.app", app.ApkSourceRef);
-        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal("com.example.app", primary.SourceRef);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", primary.ApkUrl);
     }
 
     [Fact]
-    public async Task LockedFdroidAppIgnoresForge()
+    public async Task FdroidEnrichRecordsForgeCandidate()
     {
-        // Once a build was served from F-Droid, later forge releases must not
-        // replace it (different signing key): the lock branch never calls GitHub.
-        var (enricher, _, _) = FdroidHappyPath(); // GitHub stub throws
-        var app = NewApp("locked-fd", "Locked", "https://github.com/example/aod");
-        app.ApkSource = SourceKind.FDroid;
-        app.ApkSourceRef = "com.example.app";
-        await _db.SaveChangesAsync();
+        // Symmetric candidates: an F-Droid primary never suppresses a forge
+        // release; clients pick by installed signature.
+        var forgeZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Green)));
+        var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v9.9", "app-release.apk", "https://cdn.example/forge.apk", forgeZip.Length)));
+        var downloads = new StubHandler(request =>
+        {
+            var url = request.RequestUri!.ToString();
+            if (url.Contains("/icons"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(iconBytes) };
+            }
 
-        var result = await enricher.EnrichAsync(app, T0);
+            if (url.Contains("forge.apk"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(forgeZip) };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(FdroidIndexXml),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var app = NewApp("fd-plus-forge", "Both", "https://f-droid.org/packages/com.example.app");
+
+        var result = await BuildEnricher(github, downloads, aapt2, fdroid: fdroid).EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Equal(SourceKind.FDroid, app.ApkSource);
-        Assert.Equal("com.example.app", app.ApkSourceRef);
-        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
-    }
-
-    [Fact]
-    public async Task LockedForgeAppDoesNotFallBackToFdroid()
-    {
-        // A forge build was already distributed: even when GitHub fails, the
-        // app must not switch to F-Droid (clients' signature check would fail).
-        var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
-        {
-            Content = new StringContent("""{"message":"Not Found"}"""),
-        });
-        var app = NewApp("locked-gh", "LockedForge", "https://github.com/example/aod");
-        app.ApkSource = SourceKind.GitHub;
-        app.ApkUrl = "https://cdn.example/old.apk";
-        await _db.SaveChangesAsync();
-
-        var result = await BuildEnricher(
-            github,
-            new StubHandler(_ => throw new InvalidOperationException("must not download")),
-            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
-            fdroid: new StubHandler(_ => throw new InvalidOperationException("must not fetch index")))
-            .EnrichAsync(app, T0);
-
-        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
-        Assert.Contains("GitHub", app.LastError);
-        Assert.Equal(SourceKind.GitHub, app.ApkSource);
-        Assert.Equal("https://cdn.example/old.apk", app.ApkUrl);
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Equal(2, rows.Count);
+        Assert.Contains(rows, d => d.Source == SourceKind.FDroid);
+        Assert.Contains(rows, d => d.Source == SourceKind.GitHub && d.ApkUrl == "https://cdn.example/forge.apk");
+        Assert.Equal(SourceKind.GitHub, rows.Single(d => d.IsPrimary).Source);
     }
 
     // ---- Special cases: instafel API + GitCode mirror ----
@@ -1012,9 +1068,10 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(1, instafel.Calls);
         Assert.Equal(1, downloads.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
-        Assert.Equal(SourceKind.GitHub, app.ApkSource);
         Assert.Equal("1b44b19f", app.EnrichEtag);
-        Assert.Equal("https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", app.ApkUrl);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.GitHub, primary.Source);
+        Assert.Equal("https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", primary.ApkUrl);
         Assert.NotNull(app.IconHash);
     }
 
@@ -1026,9 +1083,9 @@ public sealed class AppEnricherTests : IDisposable
         var instafel = new FakeInstafelClient(() => new InstafelRelease(
             "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", "same-hash"));
         var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
-        app.ApkUrl = "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk";
         app.EnrichEtag = "same-hash";
-        app.VersionCode = 807;
+        AddDownload(app, SourceKind.GitHub,
+            "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", versionCode: 807);
 
         var result = await BuildEnricher(github, downloads,
             new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
@@ -1082,10 +1139,11 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(1, gitcode.Calls);
+        var primary = Primary(app);
         Assert.Equal(
             "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
-            app.ApkUrl);
-        Assert.Equal(SourceKind.Other, app.ApkSource);
+            primary.ApkUrl);
+        Assert.Equal(SourceKind.Other, primary.Source);
         Assert.Equal("\"gc-etag\"", app.EnrichEtag);
         Assert.NotNull(app.IconHash);
     }
@@ -1100,8 +1158,9 @@ public sealed class AppEnricherTests : IDisposable
                 "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk"),
         ]));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
-        app.ApkUrl = "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk";
-        app.VersionCode = 205;
+        AddDownload(app, SourceKind.Other,
+            "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
+            versionCode: 205);
 
         var result = await BuildEnricher(github,
             new StubHandler(_ => throw new InvalidOperationException("must not download")),
@@ -1188,23 +1247,28 @@ public sealed class AppEnricherTests : IDisposable
         var primaryZip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
         var variantZip = new byte[] { 1, 2, 3, 4, 5 };
+        var call = 0;
         var (enricher, downloads) = ForgeWithVariant(primaryZip, variantZip,
-            new FakeSignerRunner(_ => SignerOutputA));
+            new FakeSignerRunner(_ => call++ == 0 ? SignerOutputA : SignerOutputB));
         var app = NewApp("dual", "Dual", "https://github.com/example/app");
 
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(2, downloads.Calls); // primary + variant APK
-        Assert.Equal("980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9", app.SigSha256);
-        Assert.Equal("c7b19fa46b32caa0fc9a49b6c8789253", app.SigMd5);
-        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", app.FdroidApkUrl);
-        Assert.Equal(42, app.FdroidVersionCode);
-        Assert.Equal("1.2.3", app.FdroidVersionName); // file truth wins (canned badging, index says 4.2)
-        Assert.Equal(variantZip.Length, app.FdroidApkSize);
-        Assert.Equal(Sha256(variantZip), app.FdroidApkSha256); // bytes win over the index hash
-        Assert.Equal("980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9", app.FdroidSigSha256);
-        Assert.Equal("c7b19fa46b32caa0fc9a49b6c8789253", app.FdroidSigMd5); // file truth wins over index <sig>
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        var primary = rows.Single(d => d.IsPrimary);
+        Assert.Equal(SourceKind.GitHub, primary.Source);
+        Assert.Equal("980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9", primary.SigSha256);
+        Assert.Equal("c7b19fa46b32caa0fc9a49b6c8789253", primary.SigMd5);
+        var variant = rows.Single(d => d.Source == SourceKind.FDroid);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", variant.ApkUrl);
+        Assert.Equal(42L, variant.VersionCode);
+        Assert.Equal("1.2.3", variant.VersionName); // file truth wins (canned badging, index says 4.2)
+        Assert.Equal((long)variantZip.Length, variant.SizeBytes);
+        Assert.Equal(Sha256(variantZip), variant.Sha256); // bytes win over the index hash
+        Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", variant.SigSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5); // file truth wins over index <sig>
     }
 
     [Fact]
@@ -1219,11 +1283,14 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Null(app.SigSha256);
-        Assert.Null(app.SigMd5);
-        Assert.Null(app.FdroidSigSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.FdroidSigMd5); // index <sig> still recorded
-        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", app.FdroidApkUrl);
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        var primary = rows.Single(d => d.IsPrimary);
+        Assert.Null(primary.SigSha256);
+        Assert.Null(primary.SigMd5);
+        var variant = rows.Single(d => d.Source == SourceKind.FDroid);
+        Assert.Null(variant.SigSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5); // index <sig> still recorded
+        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", variant.ApkUrl);
     }
 
     [Fact]
@@ -1233,17 +1300,16 @@ public sealed class AppEnricherTests : IDisposable
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
         var (enricher, downloads) = ForgeWithVariant(primaryZip, new byte[] { 9 });
         var app = NewApp("cached-var", "CachedVar", "https://github.com/example/cached");
-        app.FdroidApkUrl = "https://f-droid.org/repo/com.example.app_42.apk";
-        app.FdroidVersionCode = 42;
-        app.FdroidApkSha256 = "unchanged";
-        await _db.SaveChangesAsync();
+        AddDownload(app, SourceKind.FDroid,
+            "https://f-droid.org/repo/com.example.app_42.apk", versionCode: 42, sha256: "unchanged", primary: false);
 
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(1, downloads.Calls); // primary only
-        Assert.Equal("unchanged", app.FdroidApkSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.FdroidSigMd5); // refreshed from the index
+        var variant = _db.Downloads.Local.Single(d => d.AppId == app.Id && d.Source == SourceKind.FDroid);
+        Assert.Equal("unchanged", variant.Sha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5); // refreshed from the index
     }
 
     [Fact]
@@ -1253,19 +1319,15 @@ public sealed class AppEnricherTests : IDisposable
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
         var (enricher, _) = ForgeWithVariant(primaryZip, new byte[] { 9 }, indexXml: EmptyIndexXml);
         var app = NewApp("dropped-var", "DroppedVar", "https://github.com/example/dropped");
-        app.FdroidApkUrl = "https://f-droid.org/repo/com.example.app_42.apk";
-        app.FdroidVersionCode = 42;
-        app.FdroidApkSha256 = "old";
-        app.FdroidSigMd5 = "old";
-        await _db.SaveChangesAsync();
+        AddDownload(app, SourceKind.FDroid,
+            "https://f-droid.org/repo/com.example.app_42.apk",
+            versionCode: 42, sha256: "old", sigMd5: "old", primary: false);
 
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Null(app.FdroidApkUrl);
-        Assert.Null(app.FdroidVersionCode);
-        Assert.Null(app.FdroidApkSha256);
-        Assert.Null(app.FdroidSigMd5);
+        await _db.SaveChangesAsync();
+        Assert.DoesNotContain(_db.Downloads.Local, d => d.AppId == app.Id && d.Source == SourceKind.FDroid);
     }
 
     [Fact]
@@ -1279,11 +1341,12 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", app.FdroidApkUrl);
-        Assert.Equal(42, app.FdroidVersionCode);
-        Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", app.FdroidApkSha256);
-        Assert.Null(app.FdroidSigSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.FdroidSigMd5);
+        var variant = _db.Downloads.Local.Single(d => d.AppId == app.Id && d.Source == SourceKind.FDroid);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", variant.ApkUrl);
+        Assert.Equal(42L, variant.VersionCode);
+        Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", variant.Sha256);
+        Assert.Null(variant.SigSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5);
     }
 
     [Fact]
@@ -1312,9 +1375,11 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(1, downloads.Calls); // APK only — its icon wins, no mirror traffic
-        Assert.Equal(Sha256(zip), app.ApkSha256); // bytes win over the index hash
-        Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", app.SigSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.SigMd5); // signer MD5 == index <sig>
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal(Sha256(zip), primary.Sha256); // bytes win over the index hash
+        Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", primary.SigSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", primary.SigMd5); // signer MD5 == index <sig>
         Assert.Equal(IconProcessor.ProcessRawImage(orangeIcon)!.Sha256, app.IconHash);
     }
 
@@ -1341,7 +1406,7 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Failed, result.Outcome);
         Assert.Contains("expected com.example.app", app.LastError);
-        Assert.Null(app.ApkUrl); // old values kept
+        Assert.False(HasDownloads(app));
     }
 
     [Fact]
@@ -1384,7 +1449,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(SourceKind.Play, app.SourceKind);
         Assert.Contains("Play", app.ExcludedReason);
         Assert.Null(app.LastError);
-        Assert.Null(app.ApkUrl);
+        Assert.False(HasDownloads(app));
     }
 
     [Fact]
@@ -1517,7 +1582,7 @@ public sealed class AppEnricherTests : IDisposable
         var (refresher, icons, oldIconHash) = await RefreshSetupAsync();
         var app = _db.Apps.Single(a => a.Slug == "refresh");
         var checkedAt = app.LastCheckedAt;
-        var versionCode = app.VersionCode;
+        var versionCode = Primary(app).VersionCode;
         var batchDir = BatchDir();
         try
         {
@@ -1532,7 +1597,7 @@ public sealed class AppEnricherTests : IDisposable
             Assert.False(app.IconAdaptive); // density raster, not XML
             Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
             Assert.False(File.Exists(Path.Combine(_iconDir, $"{oldIconHash}.png")));
-            Assert.Equal(versionCode, app.VersionCode); // icon-only: values untouched
+            Assert.Equal(versionCode, Primary(app).VersionCode); // icon-only: values untouched
             Assert.Equal(checkedAt, app.LastCheckedAt);
             Assert.Null(app.LastError);
         }
@@ -1658,7 +1723,7 @@ public sealed class AppEnricherTests : IDisposable
         var (refresher, _, oldIconHash) = await RefreshSetupAsync();
         var app = _db.Apps.Single(a => a.Slug == "refresh");
         var checkedAt = app.LastCheckedAt;
-        var versionCode = app.VersionCode;
+        var versionCode = Primary(app).VersionCode;
 
         var result = await refresher.CommitIconRefreshAsync(app, RedIcon().Png, isAdaptive: true);
 
@@ -1667,7 +1732,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.True(app.IconAdaptive); // caller-flagged adaptive root
         Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
         Assert.False(File.Exists(Path.Combine(_iconDir, $"{oldIconHash}.png")));
-        Assert.Equal(versionCode, app.VersionCode);
+        Assert.Equal(versionCode, Primary(app).VersionCode);
         Assert.Equal(checkedAt, app.LastCheckedAt);
     }
 
@@ -1781,7 +1846,7 @@ public sealed class AppEnricherTests : IDisposable
         });
         var app = NewApp("noicon", "NoIcon", "https://github.com/example/noicon");
         app.Availability = Availability.DirectApk;
-        app.ApkUrl = "https://cdn.example/noicon.apk";
+        AddDownload(app, SourceKind.GitHub, "https://cdn.example/noicon.apk", versionCode: 1);
         var refresher = BuildEnricher(
             new StubHandler(_ => throw new InvalidOperationException("no release check on refresh")),
             downloads,

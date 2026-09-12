@@ -1,4 +1,4 @@
-# HANDOFF — ShizuAppStoreServer context for a fresh agent
+# HANDOFF - ShizuAppStoreServer context for a fresh agent
 
 > Read this + `PLAN.md` before doing anything. This file is the full
 > conversation history distilled: decisions, rejected alternatives, and why.
@@ -6,14 +6,14 @@
 ## 1. People, repos, landscape
 
 - **User:** Tim (`timschneeb`), Android dev (RootlessJamesDSP, GalaxyBudsClient, …).
-- **List repo:** `/home/tim/Development/awesome-shizuku` — curated awesome-list of
+- **List repo:** `/home/tim/Development/awesome-shizuku` - curated awesome-list of
   Shizuku apps (Shizuku = ADB-privilege framework for non-root Android).
   558-line `README.md`, plus `pages/CLOSED_SOURCE.md`, `pages/ARCHIVED.md`,
   `pages/RISH.md`, each with `_cn`/`_tw` translations (parse EN only).
   Ingestion reads the README `## Apps` section only; `CLOSED_SOURCE.md`
   is intentionally ignored (Play-only proprietary entries).
   CI in `.github/workflows`, validation in `scripts/lint.py` + `scripts/check_links.py`.
-- **This repo:** `/home/tim/Development/ShizuAppStoreServer` — C# backend for the store.
+- **This repo:** `/home/tim/Development/ShizuAppStoreServer` - C# backend for the store.
   Contains `PLAN.md` (build plan, milestones) + this file.
 - **Related local repos (reference only):**
   - `../trackawesomelist-source` was claimed but **does not exist locally**; the real
@@ -23,7 +23,7 @@
     config `type: list`). Its output powers `github.com/timschneeb/changelog-awesome-shizuku`
     (daily changelogs, linked from the README). **Never copy its files (AGPL);**
     reimplementing grammar ideas is fine. Use its output as a cross-check oracle.
-  - `../app-crawler` — user's automated crawler finding new Shizuku projects on
+  - `../app-crawler` - user's automated crawler finding new Shizuku projects on
     GitHub/F-Droid (referenced in README note). Untouched so far; potential future
     enrichment source (discovery of new entries).
 
@@ -34,7 +34,7 @@
   donation tiers. Killed because:
 - **The pivot:** user will **NOT upload to Play at all**. It is a *proper* sideloaded
   app store (APK installs via `PackageInstaller`). Consequence: no Play Billing, no
-  Play policies to obey — but also no Play distribution. Monetization now =
+  Play policies to obey - but also no Play distribution. Monetization now =
   **donations/supporter links only** (website + in-app links, no payment SDKs).
   The paid-push-notifications idea was explicitly **scrapped**; the
   `/v1/changes?since=` feed is a *free* client-sync primitive.
@@ -60,7 +60,7 @@
   with only a Play link → `availability=excluded`). Play+GitHub combos (Canta,
   Inure…) → `direct_apk` via GitHub. **No Play scraping whatsoever.**
 - **DB verification (open):** asked whether to run local Postgres here for
-  integration tests or defer to the server — **unanswered, still open** (see §6).
+  integration tests or defer to the server - **unanswered, still open** (see §6).
 
 ## M3 decisions (enricher)
 
@@ -70,10 +70,10 @@
   `SHIZU_GITHUB_TOKEN`, `X-GitHub-Api-Version: 2022-11-28`.
 - **ImageSharp 2.1.11**, not 4.x: v4 needs a `sixlabors.lic` build key
   (warning breaks the 0-warning standard); 2.1.11 is pure Apache-2.0 and
-  patched for CVE-2025-54575 (GIF DoS — irrelevant to APK PNGs, but clean).
+  patched for CVE-2025-54575 (GIF DoS - irrelevant to APK PNGs, but clean).
   Revisit only if v3+ features are ever needed (<$1M grant would apply).
 - **Real-aapt2 catch:** modern build-tools emit `minSdkVersion:'NN'`, not
-  `sdkVersion:'NN'` — found by assembling a real APK locally and fixed
+  `sdkVersion:'NN'` - found by assembling a real APK locally and fixed
   before it ever reached the server. Parser accepts both; verbatim-output
   test locks the format.
 - **Orphan-icon check reads `DbSet.Local` too:** the M6 loop enriches a
@@ -81,7 +81,7 @@
 - Letter-avatars use an embedded 5×7 font (no system-font dependency →
   identical output on dev machine and server).
 
-## 3. Client (Android app) — all ideas collected
+## 3. Client (Android app) - all ideas collected
 
 - **Distribution:** sideloaded via GitHub releases. Own store app only.
 - **Template: AuroraDroid** (Aurora OSS, GitLab, FOSS F-Droid client, native Android,
@@ -92,7 +92,8 @@
   server's `/v1/*` endpoints.
 - **Sync model:** `GET /v1/changes?since=` = incremental sync (new/updated badges,
   update checks). Never full dumps.
-- **Per-availability client behavior:** `direct_apk` → download `apk_url` → system
+- **Per-availability client behavior:** `direct_apk` → download the primary
+  download's `apkUrl` → system
   installer session; `play_redirect` → open Play listing; `link_only` → source page
   in Custom Tab; `excluded` → never sent to clients.
 - **Push/update alerts:** no paywall (scrapped). FCM works sideloaded *where Play
@@ -124,11 +125,11 @@
   WeatherForecast*/`.http` deleted), `src/ShizuAppStoreServer.Core`
   (`Class1.cs` deleted; Markdig 1.3.2 installed), `tests/…Core.Tests` (xUnit).
 - M1: `Core/Parsing/{AwesomeListParser,ParsedModels,Slug}.cs`,
-  `tests/…/AwesomeListParserTests.cs` — **build 0 warnings, tests green**,
+  `tests/…/AwesomeListParserTests.cs` - **build 0 warnings, tests green**,
   incl. full real-README parse.
 - M2: `Core/Data/{Enums,Category,App,AppVersion,SyncRun,SyncRequest,ShizuDbContext,ShizuDbContextFactory}.cs`
   (snake_case tables per PLAN §3, enums as strings, `apps.url` **non-unique**:
-  real data lists the same URL in several categories — verified `fluffy`,
+  real data lists the same URL in several categories - verified `fluffy`,
   `krude`, `AlwaysOnDisplayToggle`) + `Migrations/InitialCreate` (+ SQL script
   + `efbundle` both generate cleanly) + `Core/History/GitHistoryService.cs`
   (`git log --reverse -p`, first `+* [Name](url)` sighting = `added_at`, last
@@ -136,7 +137,7 @@
   `(listing,url,category)`; same-URL rename keeps id+slug; old-location-gone =
   move-reuse; old-location-still-parsed = keep duplicate rows; stale
   `(url,category)` pairs hard-deleted). Tests: `GitHistoryServiceTests`,
-  `CatalogUpserterTests` (SQLite in-memory) — **build 0 warnings, 18/18 green**,
+  `CatalogUpserterTests` (SQLite in-memory) - **build 0 warnings, 18/18 green**,
   incl. full real-list backfill (>300 apps, hierarchy, dup URLs, git history).
 - Web host registers `ShizuDbContext` (Npgsql, `ConnectionStrings:Shizu`).
   EF package pins: `Microsoft.EntityFrameworkCore*` 10.0.12 explicit in
@@ -146,12 +147,12 @@
   + `apps.enrich_etag` migration (`AddAppEnrichEtag`) + DI wiring in Program.cs
   (`Enrichment` config section, `SHIZU_GITHUB_TOKEN` env, typed HttpClients,
   `Aapt2Runner` singleton, scoped `AppEnricher`) + `docs/server-setup.md`.
-  Tests: `SourcesTests`, `EnrichmentTests`, `AppEnricherTests` — **build
+  Tests: `SourcesTests`, `EnrichmentTests`, `AppEnricherTests` - **build
   0 warnings, 82/82 green** (all hermetic: stubbed HttpClient, fake aapt2,
   in-memory ZIP/PNG; plus env-gated `RealAapt2SmokeTests`, proven locally).
 - M4: `Core/Sources/{GitLabReleaseClient,FdroidIndex,FdroidRepoClient}.cs`
   (GitLab releases via raw `HttpClient`, `PRIVATE-TOKEN` from
-  `SHIZU_GITLAB_TOKEN`; streaming `index.xml` parser — first `<package>`
+  `SHIZU_GITLAB_TOKEN`; streaming `index.xml` parser - first `<package>`
   per app; scope-cached provider, one fetch per repo per scope, ETag in
   `apps.enrich_etag`) + generic `ApkAssetSelector.PickApk` overload (GitLab
   links carry no size → API order breaks ties) + `IconProcessor`
@@ -165,7 +166,7 @@
   (never excluded). F-Droid needs no APK download (index already has
   version/size/hash/minSdk; icon mirrored 640→legacy→avatar); same
   recorded asset/version → `UpToDate`. Tests: `SourcesTests`,
-  `FdroidTests`, `AppEnricherTests` — **build 0 warnings, 139/139 green**.
+  `FdroidTests`, `AppEnricherTests` - **build 0 warnings, 139/139 green**.
 - M5: `Core/Data/RemovedApp.cs` (table `removed_apps`, slug unique,
   `removed_at` index) + `AddRemovedApps` migration + upserter hook (stale
   delete writes/refreshes tombstone by slug; re-add clears it = resurrection)
@@ -188,9 +189,9 @@
   ordering+paging, changes filtering+ordering, categories MAX run client-side
   (catalog is tiny; Npgsql unaffected). Tests: new
   `tests/ShizuAppStoreServer.Web.Tests` (Mvc.Testing host with SQLite +
-  option swaps, `NoOutputCachePolicy`) — full suite **0 warnings, 163/163
+  option swaps, `NoOutputCachePolicy`) - full suite **0 warnings, 163/163
   green (142 Core + 21 Web)**, web suite stable across 3 runs.
-- M6: `Core/Sync/{SyncOptions,IEnrichmentRunner,SyncService}.cs` —
+- M6: `Core/Sync/{SyncOptions,IEnrichmentRunner,SyncService}.cs` -
   `SyncPassResult` (trigger/head/commit counts/drained/warnings/archived/
   skipped/error); `RunAsync` catches non-cancelled (incl.
   `ChangeTracker.Clear()` + error `SyncRun` row); `RunCoreAsync` drains
@@ -202,9 +203,9 @@
   document sweeps its old rows out), README-only git history (earliest
   added/latest updated per URL), upsert (non-Apps sections sweep out as
   stale; saves itself), `pages/ARCHIVED.md` mark/un-mark (no early return
-  on empty set — emptied file must still clear), enrich selection
+  on empty set - emptied file must still clear), enrich selection
   (full re-check: all non-excluded `force=true`; else client-side due
-  window — SQLite can't do `DateTimeOffset` arithmetic, M5 precedent),
+  window - SQLite can't do `DateTimeOffset` arithmetic, M5 precedent),
   `BulkEnricher` over ids, final save writes only requests + run row.
   `GitHistoryService.FetchAsync`, `AppEnricher.EnrichAsync(force=false)`
   opt-in, `FdroidIndexProvider` scoped→singleton (revalidating cache,
@@ -216,10 +217,10 @@
   `Sync` section. `deploy/shizuappstore.service` (hardened,
   `EnvironmentFile=/etc/shizuappstore/env`) + `deploy/deploy.sh`
   (publish → `ef migrations bundle` → rsync → migrate → restart) +
-  `linux-x64` single-file profile (framework-dependent, untrimmed —
+  `linux-x64` single-file profile (framework-dependent, untrimmed -
   EF/Npgsql reflection). Verified: profile publish yields a 12 MB
   linux-x64 ELF, bundle builds (dotnet-ef 10.0.1 warns it is older than
-  the 10.0.12 runtime — harmless), `bash -n` clean. Tests:
+  the 10.0.12 runtime - harmless), `bash -n` clean. Tests:
   `SyncServiceTests` (real temp git repo, fake runner, 9 tests incl.
   archived resurrection + failed-pass request retention),
   `NightlyDelayTests`, F-Droid singleton-concurrency tests; factory
@@ -227,33 +228,35 @@
   178/178 green (152 Core + 26 Web)**, run 2× stable.
    `docs/server-setup.md` gained the full deploy flow (`/etc/
    shizuappstore/env`, unit install, first-boot backfill notes).
-- **M8 DONE** (signatures + F-Droid variant, implemented before M7 — the
+- **M8 DONE** (signatures + F-Droid variant, implemented before M7 - the
   client needs the API): F-Droid builds are delayed + differently signed,
   so the server is forge-first and records both signers. `Core/
   CertFingerprint.cs` (normalize/join, space-joined rotation sets);
   `Core/Enrichment/{ApkSignerRunner,ApkSignerParser}.cs` (mirror of the
-  aapt2 runner; parses every `Signer #N certificate … digest` line —
+  aapt2 runner; parses every `Signer #N certificate … digest` line -
   SHA-256/SHA-1/MD5, MD5 optional for old build-tools); `EnrichmentOptions.
   ApksignerPath` (default `apksigner`, needs a JRE) + DI singleton +
   appsettings key. **M4 parser bug found by real data:** live
   `index.xml` (16 MB, 4364 apps, fetched 2026-09-12) carries
-  version/versioncode/sig as child *elements* — the attribute reads
+  version/versioncode/sig as child *elements* - the attribute reads
   always yielded 0/null (13 262 packages, zero with attributes); fixed
   with attribute-fallback + `<sig>` (32-hex cert MD5, same on Izzy);
   heals on next enrich via the version-change path. `App` gains
   `SigSha256`/`SigMd5` + 7 `Fdroid*` variant columns (`AddApkSignatures`
-  migration, clean nullable ADD COLUMNs, script-reviewed). `AppEnricher`:
+  migration, clean nullable ADD COLUMNs, script-reviewed; removed again
+  by SIGNATURE-KEYED DOWNLOADS, §5). `AppEnricher`:
   forge paths extract sigs best-effort (never fail enrichment);
   `ResolveFdroidVariantAsync` sidecar after fresh forge enriches
   (package-name lookup in F-Droid main index; download + analyze on
   change with bytes-win, index-only fallback, refresh-md5 short-circuit,
-  cleared when dropped; broad catch — sidecar never kills primary);
+  cleared when dropped; broad catch - sidecar never kills primary);
   F-Droid primaries download + analyze on change (APK icon preferred,
   package-mismatch Fails, sigs from file with index-md5 fallback,
   UpToDate short-circuit keeps zero-download steady state). DTOs:
   summary += `SigSha256`/`SigMd5`, detail += both + nullable
-  `FdroidVariantDto`. Tests: `ApkSignerTests` (verbatim real output
-  from a locally signed APK — keytool + apksigner 35.0.0 roundtrip in
+  `FdroidVariantDto` (that DTO is gone again; see SIGNATURE-KEYED
+  DOWNLOADS, §5). Tests: `ApkSignerTests` (verbatim real output
+  from a locally signed APK - keytool + apksigner 35.0.0 roundtrip in
   /tmp, plus env-gated live test proven passing), `FdroidTests` real-
   format regression, 8 new enricher tests (sigs, variant full/up-to-
   date/cleared/index-only, signer-absent, F-Droid download + mismatch),
@@ -261,7 +264,7 @@
   updated for the APK attempt (1→2, 2→3). Full suite **0 warnings,
   193/193 green (166 Core + 27 Web)**. `docs/server-setup.md` gained
   the apksigner/JRE block + client-matching contract.
-- **SPEC DONE** (`docs/SPEC.md`, post-M8): implementation & design spec —
+- **SPEC DONE** (`docs/SPEC.md`, post-M8): implementation & design spec -
   layout, pipeline/DI order, data model, ingestion, enrichment, sigs/
   variant + client contract, sync engine, full API behavior table,
   behavior-knobs table, invariants/gotchas. Every statement verified
@@ -324,7 +327,7 @@
   failed ~285 apps with 403/429s despite a PAT in env. Root cause:
   `AddHttpClient` client ctors take an optional token string that DI
   fills with its default (null), and `Program.cs` never applied
-  `enrichment.GitHubToken/GitLabToken` to the clients — every forge
+  `enrichment.GitHubToken/GitLabToken` to the clients - every forge
   call always went anonymous (also explains the untouched 5000/hr gh
   quota). Invisible to tests because they construct clients directly.
   Fix: `Program.ConfigureEnrichmentClients` applies Bearer and
@@ -473,7 +476,7 @@
      31 Web), 0 errors**.
    - **ICON_ADAPTIVE FLAG (user call, for client framing):**
      `ProcessedIcon.Adaptive` (true only for `<adaptive-icon>`
-     roots — a set staged `RootFile` is the signal; plain vectors
+     roots - a set staged `RootFile` is the signal; plain vectors
      render full-bleed but stay false) flows into the new
      `App.IconAdaptive` column (`icon_adaptive`, NOT NULL DEFAULT
      FALSE, migration applied to the live DB) and both app DTOs as
@@ -487,14 +490,14 @@
      and only adaptive roots set the flag (suite 249/249).
    - **SWAPPED SERVED ICONS (sbatterytweaks/wireless-adb-switch):**
      each row pointed at the other's render (pixel-proven: mean diff
-     0.07/0.26 on the swap pairing vs 116 cross) — fossil of the
+     0.07/0.26 on the swap pairing vs 116 cross) - fossil of the
      pre-gate era when parallel renders shared one snapshot file
      (fixed since via the C# semaphore). Fixed live by writing the
      correct bytes under true content hashes + row updates (sbatt
      52f62b90 white bg battery, wadbs 5efcf9d0 blue-gray chevrons,
      both 200, flags true); stale files deleted after a zero-referrer
      check. Lesson: hand-typed hashes bite (one 400 from a wrong
-     name) — always sha256sum. Other race-era swaps remain possible;
+     name) - always sha256sum. Other race-era swaps remain possible;
      any icon not matching the app's real icon is suspect.
    - **INSET PADDING HONORED (user report: on-device icon has more
      padding):** `NormalizeAdaptiveRoot` used to unwrap `<inset>`
@@ -520,7 +523,7 @@
      refreshed, 0 failed. 44 non-DirectApk hashes had no file
      anywhere (7 LinkOnly + 37 Excluded, all letter-avatars):
      regenerated deterministically via `LetterAvatarGenerator`
-     with hash verification — 331/331 hashes now have files.
+     with hash verification - 331/331 hashes now have files.
      Server restarted on :5110; wadbs serves the padded render
       with `iconAdaptive: true`. Flags backfilled: 273 adaptive,
       72 raster/avatar.
@@ -559,7 +562,8 @@
      AlwaysOnDisplayToggle, Insular, Smart Dock) now serve real
      F-Droid APKs and adaptive icons with locks; a re-run pass made
      zero GitHub calls for them. Suite **257/257 green (226 Core +
-     31 Web), 0 warnings**.
+     31 Web), 0 warnings**. (superseded by SIGNATURE-KEYED DOWNLOADS
+     below)
 
    - **GITLAB GENERIC-LABEL APK LINKS (user report: batt):** release
      asset links whose label is generic (`APK`) were skipped because
@@ -597,6 +601,40 @@
   listing (`show.taps` returns 404) and no forge release, so it stays
   iconless. Suite **292/292 green (261 Core + 31 Web), 0 warnings**.
 
+- **SIGNATURE-KEYED DOWNLOADS (one APK link per signature):** user
+  calls: serve one APK per signing identity (never hand a user a build
+  signed by a different key), and resolve the pins/isPrimary debate as
+  a forge-preferred primary. New `AppDownload` entity + `app_downloads`
+  table (migration `AddAppDownloads`, applied live): `id`, `app_id`
+  (FK cascade), `source` (`GitHub|GitLab|Codeberg|FDroid|Izzy|Play|
+  Other`), `source_ref`, `apk_url`, `archive_entry`, `version_code`,
+  `version_name`, `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`,
+  `min_sdk`, `sig_key`, `is_primary`, `resolved_at`. SigKey =
+  lowercased first space-token of `sig_sha256`, else of `sig_md5`, else
+  `url:<apk_url>`; unique `(app_id, sig_key)`, so same-signature
+  candidates (reproducible F-Droid builds, Izzy mirrors of forge
+  builds) collapse into one row. Upsert: same key updates in place only
+  when `version_code` is higher; equal version keeps the preferred
+  source's URL; lower versions are ignored. `is_primary` (partial
+  unique index on `app_id` where `is_primary`): non-F-Droid first
+  (GitHub/GitLab/Izzy/Codeberg/Other count as forge-like), then higher
+  `version_code`, then fixed source order. Resolution is symmetric and
+  there is no source lock: forge primaries also record the f-droid.org
+  candidate (best-effort) and F-Droid/Izzy primaries also try a forge
+  candidate; a failed candidate never changes the primary outcome.
+  `apk_source`/`apk_source_ref` and the 16 version/apk/sig/fdroid
+  columns are removed from `apps` (kept: `package_name`, `store_url`,
+  `icon_hash`, `icon_adaptive`, `enrich_etag`, `last_checked_at`,
+  `last_error` and the identity/presentation fields). CORRECTION:
+  f-droid.org hosts F-Droid community rebuilds (different signing key
+  than the developer unless reproducible); IzzyOnDroid hosts the
+  developers' own upstream builds, so Izzy is forge-like. Live DB after
+  `AddAppDownloads` + full pass: 344 `app_downloads` rows across 320
+  apps with an APK; 320 primaries; sources GitHub 307, FDroid 30,
+  GitLab 5, Other 1, Izzy 1. Live API `aurorastore`: `downloads[]` two
+  entries, gitlab primary=true and fdroid primary=false, distinct
+  `sigSha256`. Suite **291/291 green (260 Core + 31 Web), 0 warnings**.
+
 - Nothing committed (no git repo initialized in ShizuAppStoreServer).
 - Markdig gotchas (commented in code): `StringLineGroup.ToString()` does NOT
   return text → item text is sliced from source via `ParagraphBlock.Span`;
@@ -608,34 +646,40 @@
 
 AuroraDroid fork pointed at this API: keep its UI + `PackageInstaller`
 flow; replace F-Droid index sync with `/v1/changes` sync;
-`apk_url`→install, `store_url`→Play, `link_only`→Custom Tab.
-Match the installed signing cert (SHA-256 + MD5 over the cert bytes)
-against `sig_sha256`/`sig_md5`/`fdroid_variant` fingerprints and prefer
-the variant URL when the F-Droid build is installed (M8 API is ready).
+primary download `apkUrl`→install, `store_url`→Play, `link_only`→Custom
+Tab. Hash the installed app's signing cert (SHA-256 + MD5 over the cert
+bytes), filter `downloads[]` to candidates whose `sigSha256`/`sigMd5`
+match (membership match, space-joined sets), compare that candidate's
+`versionCode` against the installed version, and offer the primary for
+a fresh install. Never switch a user between signatures.
 Backend M1–M6 + M8 are done and live-tested end-to-end on real
 Postgres 18.6 (see §5 LIVE TEST: real boot, real GitHub/F-Droid).
 The system DB on :5432 holds the real catalog
   (385 apps, Paparazzi-rendered icons) plus the live-test rows.
-  Full suite now 292/292 (261 Core + 31 Web), 0 warnings.
+  Full suite now 291/291 (260 Core + 31 Web), 0 warnings.
 
 ## M8 decisions (signatures + F-Droid variant)
 
 - **Forge-first is policy, not accident:** resolution order already
   preferred GitHub/GitLab; now explicit + the F-Droid side is retained
   as data (variant) instead of being discarded when a forge link wins.
+  (superseded by SIGNATURE-KEYED DOWNLOADS: candidates now live in
+  `app_downloads`, one row per signature)
 - **Modern apksigner prints MD5** (`Signer #1 certificate MD5 digest`,
-  verified on build-tools 35.0.0) — no algorithm gap with the index
+  verified on build-tools 35.0.0) - no algorithm gap with the index
   `<sig>`; the server can compare forge vs F-Droid signers directly.
   Older build-tools lack the MD5 line → parser treats it as optional.
 - **Bytes on disk win:** file hash/version/sigs from the analyzed APK
   override index values (index skew happens; the bytes are what clients
   get). Package-name mismatch is the one hard failure (wrong file).
 - **Signer extraction never fails enrichment:** missing Java/apksigner
-  or unsigned APKs → null sigs, outcome unchanged (variant falls back
-  to index-only with the `<sig>` MD5, which covers client matching).
+  or unsigned APKs → null sigs, outcome unchanged (the index-only row
+  still carries the `<sig>` MD5, which covers client matching).
 - **Variant sidecar is strictly additive:** runs only after fresh
   forge enriches, broad-caught, clears stale rows when F-Droid drops
   the package; steady state is 304s + dict lookups, zero downloads.
+  (superseded by SIGNATURE-KEYED DOWNLOADS: the f-droid.org build is
+  now just another signature-keyed candidate row)
 - **F-Droid primaries keep zero-download steady state:** the APK is
   fetched only on version change (UpToDate short-circuit untouched).
 - **Startup tool gate (post-M8 hardening):** `Core/Enrichment/
@@ -654,27 +698,27 @@ The system DB on :5432 holds the real catalog
   due-only enrich or a `Skipped` pass that writes nothing (keeps
   `sync_runs` a clean audit log, not a heartbeat table).
 - **Fetch is best-effort:** a dead remote must not stop the API from
-  serving the last-known catalog — the pass continues off the local
+  serving the last-known catalog - the pass continues off the local
   clone (5-min timeout, then proceed).
 - **Requests drain only on success:** a failed pass leaves
   `sync_requests` unprocessed so the webhook trigger isn't lost.
 - **ARCHIVED.md emptiness is meaningful:** no early return on an empty
-  URL set — an emptied file must still *un*-mark resurrected apps
+  URL set - an emptied file must still *un*-mark resurrected apps
   (caught during implementation).
 - **Due-window filtering stays client-side** (SQLite can't do
-  `DateTimeOffset` arithmetic — M5 precedent; catalog is tiny).
+  `DateTimeOffset` arithmetic - M5 precedent; catalog is tiny).
 - **F-Droid provider is a revalidating singleton,** not scope-cached:
   every call still conditional-GETs (cached or seed ETag), so freshness
-  semantics are unchanged — the singleton only shares parsing, with
+  semantics are unchanged - the singleton only shares parsing, with
   per-repo gates against stampedes.
 - **Deploy is framework-dependent single-file, untrimmed:** the server
   already needs the .NET 10 runtime (per `server-setup.md`), and
   trimming is unsafe for EF/Npgsql reflection. `deploy.sh` builds the
-  `efbundle` fresh each time (`dotnet ef migrations bundle` — note the
+  `efbundle` fresh each time (`dotnet ef migrations bundle` - note the
   subcommand; bare `dotnet ef bundle` does not exist), so no bundle
   binary is committed.
 - **Boundary lesson from tests:** a second pass at exactly +24h makes
-  *everything* due — the no-change test passes at +1h to stay inside
+  *everything* due - the no-change test passes at +1h to stay inside
   the re-check window.
 
 ## M5 decisions (API + test host)
@@ -684,7 +728,7 @@ The system DB on :5432 holds the real catalog
   re-add → clear).
 - **Test-host config goes through DI, not `ConfigureAppConfiguration`:**
   with minimal hosting, `WebApplication.CreateBuilder` rebuilds
-  `builder.Configuration` from appsettings/env/cmdline only — host-builder
+  `builder.Configuration` from appsettings/env/cmdline only - host-builder
   in-memory values layer *under* appsettings.json and never reach Program.cs
   (cost a debugging session: icon dir + cache flag silently ignored). Per-suite
   knobs are `RemoveAll`+`AddSingleton` swaps of
@@ -692,12 +736,12 @@ The system DB on :5432 holds the real catalog
   `ShizuApiFactory`); the rate-limiter policy resolves `ApiOptions` per
   request so the swap takes effect.
 - **`OutputCacheMiddleware` has no request-driven bypass**
-  (`Cache-Control: no-cache`/`no-store` are ignored — stale `/v1/meta`
+  (`Cache-Control: no-cache`/`no-store` are ignored - stale `/v1/meta`
   reads proved it). The test host overwrites all five cache policies with
   `NoOutputCachePolicy` (re-adding a policy name wins); production caching
   is untouched. Test clients are plain (`NewClient()`).
 - **Fresh `:memory:` SQLite has no schema** until `ResetAsync`
-  (`EnsureCreated`) — symptom is endpoint 500s, not seed errors
+  (`EnsureCreated`) - symptom is endpoint 500s, not seed errors
   (caught by `RateLimitTests`).
 - **EF SQLite vs Npgsql:** covered in §5 (client-side DateTimeOffset
   ordering/comparison/MAX). Npgsql-targeted check was deferred, then
