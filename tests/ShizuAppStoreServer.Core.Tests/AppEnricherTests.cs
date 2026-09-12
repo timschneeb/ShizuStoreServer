@@ -1,0 +1,1950 @@
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Sources;
+using SixLabors.ImageSharp;
+using Xunit;
+
+namespace ShizuAppStoreServer.Core.Tests;
+
+/// <summary>Hermetic enricher tests: stubbed GitHub/download HTTP, fake aapt2, real ZIP/PNG handling.</summary>
+public sealed class AppEnricherTests : IDisposable
+{
+    private static readonly DateTimeOffset T0 = new(2024, 6, 1, 0, 0, 0, TimeSpan.Zero);
+
+    private readonly SqliteConnection _connection;
+    private readonly ShizuDbContext _db;
+    private readonly string _iconDir;
+    private readonly EnrichmentOptions _options;
+
+    public AppEnricherTests()
+    {
+        _connection = new SqliteConnection("DataSource=:memory:");
+        _connection.Open();
+        _db = new ShizuDbContext(new DbContextOptionsBuilder<ShizuDbContext>()
+            .UseSqlite(_connection)
+            .Options);
+        _db.Database.EnsureCreated();
+        _iconDir = Path.Combine(Path.GetTempPath(), $"shizu-icons-{Guid.NewGuid():N}");
+        _options = new EnrichmentOptions { IconStorePath = _iconDir };
+    }
+
+    public void Dispose()
+    {
+        _db.Dispose();
+        _connection.Dispose();
+        try { Directory.Delete(_iconDir, recursive: true); } catch { /* best effort */ }
+    }
+
+    private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
+    {
+        public int Calls;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(handler(request));
+        }
+    }
+
+    private sealed class FakeAapt2Runner(Func<string, string> handler) : IAapt2Runner
+    {
+        public int Calls;
+        public Task<string> DumpBadgingAsync(string apkPath, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(handler(apkPath));
+        }
+    }
+
+    private sealed class FakeSignerRunner(Func<string, string> handler) : IApkSignerRunner
+    {
+        public int Calls;
+        public Task<string> PrintCertsAsync(string apkPath, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(handler(apkPath));
+        }
+    }
+
+    private sealed class FakeInstafelClient(Func<InstafelRelease> handler) : IInstafelReleaseClient
+    {
+        public int Calls;
+        public Task<InstafelRelease> GetLatestAsync(CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(handler());
+        }
+    }
+
+    private sealed class FakeGitCodeClient(Func<GitCodeRelease> handler) : IGitCodeReleaseClient
+    {
+        public int Calls;
+        public Task<GitCodeRelease?> GetLatestReleaseAsync(
+            string owner, string repo, string? etag = null, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult<GitCodeRelease?>(handler());
+        }
+    }
+
+    private sealed class FakePlayClient(Func<string, string?> handler) : IPlayStoreClient
+    {
+        public int Calls;
+        public Task<string?> GetIconUrlAsync(string packageId, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(handler(packageId));
+        }
+    }
+
+    /// <summary>
+    /// Verbatim <c>apksigner verify --print-certs</c> output for a test key
+    /// (captured from build-tools 35.0.0; the MD5 line is what matches the
+    /// F-Droid index <c>&lt;sig&gt;</c>).
+    /// </summary>
+    private const string SignerOutputA = """
+        Signer #1 certificate DN: CN=SigTest, OU=Test, O=Test, C=DE
+        Signer #1 certificate SHA-256 digest: 980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9
+        Signer #1 certificate SHA-1 digest: 086d90932033f759f6be9b3a76db127910822809
+        Signer #1 certificate MD5 digest: c7b19fa46b32caa0fc9a49b6c8789253
+        """;
+
+    private const string SignerOutputB = """
+        Signer #1 certificate DN: CN=FdroidTest, OU=Test, O=Test, C=DE
+        Signer #1 certificate SHA-256 digest: 1111111111111111111111111111111111111111111111111111111111111111
+        Signer #1 certificate SHA-1 digest: 2222222222222222222222222222222222222222
+        Signer #1 certificate MD5 digest: b10a8db164e0754105b7a99be72e3fe5
+        """;
+
+    private static string ReleaseJson(string tag, string assetName, string assetUrl, long size) =>
+        new JsonArray(new JsonObject
+        {
+            ["tag_name"] = tag,
+            ["draft"] = false,
+            ["prerelease"] = false,
+            ["published_at"] = "2024-06-01T00:00:00Z",
+            ["assets"] = new JsonArray(new JsonObject
+            {
+                ["name"] = assetName,
+                ["browser_download_url"] = assetUrl,
+                ["size"] = size,
+                ["content_type"] = "application/vnd.android.package-archive",
+            }),
+        }).ToJsonString();
+
+    private static HttpResponseMessage JsonReleases(string json, string? etag = null)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) };
+        if (etag is not null)
+        {
+            response.Headers.ETag = new EntityTagHeaderValue(etag);
+        }
+
+        return response;
+    }
+
+    private App NewApp(string slug, string name, string url, string? sourceUrl = null, bool excludeOverride = false)
+    {
+        var category = new Category
+        {
+            Name = "Audio",
+            Slug = $"audio-{Guid.NewGuid():N}",
+            Section = CategorySection.Apps,
+        };
+        _db.Categories.Add(category);
+        var app = new App
+        {
+            Slug = slug,
+            Name = name,
+            Url = url,
+            SourceUrl = sourceUrl,
+            ExcludeOverride = excludeOverride,
+            Listing = Listing.Main,
+            Type = AppType.App,
+            Category = category,
+            AddedAt = T0,
+            UpdatedAt = T0,
+        };
+        _db.Apps.Add(app);
+        _db.SaveChanges();
+        _db.Entry(app).State = EntityState.Detached;
+        return _db.Apps.Include(a => a.Versions).Single(a => a.Slug == slug);
+    }
+
+    private static readonly string EmptyIndexXml = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <fdroid>
+        </fdroid>
+        """;
+
+    private AppEnricher BuildEnricher(
+        StubHandler github,
+        StubHandler downloads,
+        FakeAapt2Runner aapt2,
+        StubHandler? gitlab = null,
+        StubHandler? fdroid = null,
+        FakeSignerRunner? signer = null,
+        ILauncherIconService? launcherIcons = null,
+        IInstafelReleaseClient? instafel = null,
+        IGitCodeReleaseClient? gitcode = null,
+        IPlayStoreClient? play = null) =>
+        new(new GitHubReleaseClient(new HttpClient(github), "tok"),
+            new GitLabReleaseClient(new HttpClient(gitlab ?? new StubHandler(_ =>
+                throw new InvalidOperationException("must not call GitLab")))),
+            new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(fdroid ?? new StubHandler(_ =>
+                new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(EmptyIndexXml) })))),
+            aapt2,
+            signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
+            launcherIcons ?? new LauncherIconService(),
+            new HttpClient(downloads), _options, _db, instafel, gitcode, play);
+
+    private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+    /// <summary>Canonical happy-path wiring: stable release → APK download → badging → icon.</summary>
+    private (AppEnricher Enricher, StubHandler Github, StubHandler Downloads, FakeAapt2Runner Aapt2, byte[] Zip)
+        HappyPath(string tag = "v1.0", string versionCode = "42", Color? iconColor = null, string? etag = "\"rel-etag\"", FakeSignerRunner? signer = null)
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, iconColor ?? Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson(tag, "app-release.apk", "https://cdn.example/app.apk", zip.Length), etag));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: versionCode));
+        return (BuildEnricher(github, downloads, aapt2, signer: signer), github, downloads, aapt2, zip);
+    }
+
+    private void Age(App app) => app.LastCheckedAt = T0 - TimeSpan.FromDays(2);
+
+    [Fact]
+    public async Task EnrichesGitHubAppEndToEnd()
+    {
+        var (enricher, _, downloads, aapt2, zip) = HappyPath();
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        Assert.Equal(SourceKind.GitHub, app.SourceKind);
+        Assert.Equal(SourceKind.GitHub, app.ApkSource);
+        Assert.Null(app.ApkSourceRef);
+        Assert.Equal("com.example.app", app.PackageName);
+        Assert.Equal(42, app.VersionCode);
+        Assert.Equal("1.2.3", app.VersionName);
+        Assert.Equal(24, app.MinSdk);
+        Assert.Equal("https://cdn.example/app.apk", app.ApkUrl);
+        Assert.Equal(zip.Length, app.ApkSize);
+        Assert.Equal(Sha256(zip), app.ApkSha256);
+        Assert.Equal("\"rel-etag\"", app.EnrichEtag);
+        Assert.Equal(T0, app.LastCheckedAt);
+        Assert.Null(app.LastError);
+
+        var iconPath = Path.Combine(_iconDir, $"{app.IconHash}.png");
+        Assert.True(File.Exists(iconPath));
+        using var icon = Image.Load(iconPath);
+        Assert.Equal(192, icon.Width);
+
+        var version = Assert.Single(app.Versions);
+        Assert.Equal(42, version.VersionCode);
+        Assert.Equal("1.2.3", version.VersionName);
+        await _db.SaveChangesAsync();
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    /// <summary>Zip archive holding one entry, used to model release zips with an APK inside.</summary>
+    private static byte[] BuildZip(params (string Name, byte[] Content)[] entries)
+    {
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var (name, content) in entries)
+            {
+                using var stream = zip.CreateEntry(name).Open();
+                stream.Write(content);
+            }
+        }
+
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public async Task EnrichesFromZipAssetWhenNoDirectApk()
+    {
+        var apk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var zipBytes = BuildZip(("AppControlX-release-generated-signed.apk", apk));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v3.0.0", "AppControlX-release-generated-signed-3.0.0.zip",
+                "https://cdn.example/appcontrolx.zip", zipBytes.Length), "\"zip-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zipBytes),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "7"));
+        var enricher = BuildEnricher(github, downloads, aapt2);
+        var app = NewApp("appcontrolx", "AppControlX", "https://github.com/risunCode/AppControl-X");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        Assert.Equal(SourceKind.GitHub, app.ApkSource);
+        Assert.Equal("https://cdn.example/appcontrolx.zip", app.ApkUrl);
+        Assert.Equal("AppControlX-release-generated-signed.apk", app.ApkArchiveEntry);
+        Assert.Equal(7, app.VersionCode);
+        Assert.Equal(zipBytes.Length, app.ApkSize);
+        Assert.Equal(Sha256(zipBytes), app.ApkSha256);
+        Assert.NotNull(app.IconHash);
+        Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+    }
+
+    [Fact]
+    public async Task ZipWithoutApkFallsThroughToFdroidFallback()
+    {
+        var zipBytes = BuildZip(("release-notes.txt", "no apk here"u8.ToArray()));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v3.0.0", "AppControlX-3.0.0.zip", "https://cdn.example/appcontrolx.zip", zipBytes.Length)));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zipBytes),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var enricher = BuildEnricher(github, downloads, aapt2);
+        var app = NewApp("appcontrolx", "AppControlX", "https://github.com/risunCode/AppControl-X");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("no .apk asset", app.LastError);
+        Assert.Null(app.ApkUrl);
+    }
+
+    [Fact]
+    public async Task SkipsFreshAppsWithoutNetwork()
+    {
+        var (enricher, github, _, _, _) = HappyPath();
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(EnrichOutcome.SkippedFresh, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(1, github.Calls);
+    }
+
+    [Fact]
+    public async Task Honors304AsUpToDate()
+    {
+        var (first, _, _, _, _) = HappyPath();
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+        await first.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        var etagSeen = new List<string>();
+        var github = new StubHandler(request =>
+        {
+            etagSeen.AddRange(request.Headers.IfNoneMatch.Select(e => e.ToString()));
+            return new HttpResponseMessage(HttpStatusCode.NotModified);
+        });
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download on 304"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2 on 304"));
+        Age(app);
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(["\"rel-etag\""], etagSeen);
+        Assert.Equal(0, aapt2.Calls);
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task AppendsVersionRowOnlyOnBump()
+    {
+        var (first, _, _, _, _) = HappyPath();
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+        await first.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        // Same release again → re-enriched, but no duplicate version row.
+        Age(app);
+        var (second, _, _, _, _) = HappyPath();
+        Assert.Equal(EnrichOutcome.Enriched, (await second.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+
+        // New upstream version → second row + orphaned icon file deleted.
+        var oldIcon = Path.Combine(_iconDir, $"{app.IconHash}.png");
+        Assert.True(File.Exists(oldIcon));
+        Age(app);
+        var (third, _, _, _, _) = HappyPath(tag: "v1.1", versionCode: "43", iconColor: Color.Red);
+        Assert.Equal(EnrichOutcome.Enriched, (await third.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(43, app.VersionCode);
+        Assert.False(File.Exists(oldIcon));
+        await _db.SaveChangesAsync();
+        Assert.Equal(2, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task KeepsSharedIconWhileOtherAppUsesIt()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var appA = NewApp("appa", "App A", "https://github.com/o/ra");
+        var appB = NewApp("appb", "App B", "https://github.com/o/rb");
+        await enricher.EnrichAsync(appA, T0);
+        await enricher.EnrichAsync(appB, T0);
+        Assert.Equal(appA.IconHash, appB.IconHash);
+        var sharedIcon = Path.Combine(_iconDir, $"{appA.IconHash}.png");
+
+        Age(appA);
+        var (second, _, _, _, _) = HappyPath(tag: "v1.1", versionCode: "43", iconColor: Color.Red);
+        await second.EnrichAsync(appA, T0);
+
+        Assert.NotEqual(appA.IconHash, appB.IconHash);
+        Assert.True(File.Exists(sharedIcon));
+    }
+
+    [Fact]
+    public async Task RecordsFailureAndBacksOff()
+    {
+        var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}"""),
+        });
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var app = NewApp("gone", "Gone", "https://github.com/o/deleted");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("404", app.LastError);
+        Assert.Equal(T0, app.LastCheckedAt);
+        Assert.Equal(Availability.LinkOnly, app.Availability);
+        Assert.Null(app.ApkUrl);
+
+        // Immediate retry is skipped (backoff); after the window it retries.
+        Assert.Equal(EnrichOutcome.SkippedFresh, (await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(1, github.Calls);
+    }
+
+    [Fact]
+    public async Task ReportsAapt2Failure()
+    {
+        var (_, github, downloads, _, _) = HappyPath();
+        var aapt2 = new FakeAapt2Runner(_ => throw new Aapt2Exception("not an APK"));
+        var app = NewApp("bad", "Bad", "https://github.com/o/bad");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("aapt2", app.LastError);
+    }
+
+    [Fact]
+    public async Task FallsBackToAvatarWithoutGitHubSource()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var app = NewApp("codeberg", "Some App", "https://codeberg.org/some/app");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(SourceKind.Codeberg, app.SourceKind);
+        Assert.Equal(Availability.LinkOnly, app.Availability);
+        Assert.Null(app.LastError);
+        var iconPath = Path.Combine(_iconDir, $"{app.IconHash}.png");
+        Assert.True(File.Exists(iconPath));
+        using var icon = Image.Load(iconPath);
+        Assert.Equal(192, icon.Width);
+    }
+
+    [Fact]
+    public async Task PlayListingIconReplacesLetterAvatarForExternalOnlyApp()
+    {
+        var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}"""),
+        });
+        var iconBytes = TestAssets.SolidPng(512, 512, Color.Red);
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(iconBytes),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var play = new FakePlayClient(_ => "https://play-lh.googleusercontent.com/icon=s0-br30");
+        var app = NewApp("plays-only", "Play Only",
+            "https://play.google.com/store/apps/details?id=com.example.playonly",
+            "https://github.com/example/playonly");
+
+        var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.LinkOnly, app.Availability);
+        Assert.Null(app.ApkUrl);
+        Assert.Null(app.LastError);
+        Assert.Equal(1, play.Calls);
+        Assert.NotEqual(LetterAvatarGenerator.Generate("Play Only").Sha256, app.IconHash);
+        Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+    }
+
+    [Fact]
+    public async Task PlayListingMissingKeepsFailed()
+    {
+        var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}"""),
+        });
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var play = new FakePlayClient(_ => null);
+        var app = NewApp("plays-fail", "Play Fail",
+            "https://play.google.com/store/apps/details?id=com.example.playfail",
+            "https://github.com/example/playfail");
+
+        var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Null(app.IconHash);
+        Assert.Contains("404", app.LastError);
+        Assert.Equal(1, play.Calls);
+    }
+
+    [Fact]
+    public async Task FallbackPrefersPlayIconOverGeneratedAvatar()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var iconBytes = TestAssets.SolidPng(512, 512, Color.Red);
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(iconBytes),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var play = new FakePlayClient(_ => "https://play-lh.googleusercontent.com/icon=s0-br30");
+        var app = NewApp("play-redirect", "Play Redirect",
+            "https://play.google.com/store/apps/details?id=com.example.pr",
+            "https://example.com/page");
+
+        var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
+        Assert.Equal("https://play.google.com/store/apps/details?id=com.example.pr", app.StoreUrl);
+        Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
+        Assert.Equal(1, play.Calls);
+    }
+
+    [Fact]
+    public async Task ExcludedPlayOnlyAppStillExcluded()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(TestAssets.SolidPng(512, 512, Color.Red)),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var play = new FakePlayClient(_ => "https://play-lh.googleusercontent.com/icon=s0-br30");
+        var app = NewApp("play-only-x", "Play Excluded",
+            "https://play.google.com/store/apps/details?id=com.example.pe");
+
+        var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Excluded, result.Outcome);
+        Assert.Equal(Availability.Excluded, app.Availability);
+        Assert.Contains("no APK available", app.ExcludedReason);
+        Assert.Null(app.ApkUrl);
+        Assert.Equal(1, play.Calls);
+    }
+
+    [Theory]
+    // Play + GitHub combos: GitHub wins for the APK, Play stays as store_url.
+    [InlineData("https://play.google.com/store/apps/details?id=com.x", "https://github.com/o/r")]
+    [InlineData("https://github.com/o/r", "https://play.google.com/store/apps/details?id=com.x")]
+    public async Task KeepsPlayLinkAsStoreUrl(string url, string sourceUrl)
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("combo", "Combo", url, sourceUrl);
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal("https://play.google.com/store/apps/details?id=com.x", app.StoreUrl);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+    }
+
+    [Fact]
+    public async Task FallsBackToAvatarWhenApkHasNoRasterIcon()
+    {
+        var zip = TestAssets.BuildApk(("res/mipmap-anydpi-v26/ic.xml", "<adaptive-icon/>"u8.ToArray()));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson("v1.0", "app.apk", "https://cdn.example/app.apk", zip.Length)));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ =>
+            "package: name='com.x' versionCode='1' versionName='1'\n" +
+            "application-icon-640:'res/mipmap-anydpi-v26/ic.xml'\n");
+        var app = NewApp("adaptive", "Adaptive", "https://github.com/o/adaptive");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        using var icon = Image.Load(Path.Combine(_iconDir, $"{app.IconHash}.png"));
+        Assert.Equal(192, icon.Width);
+    }
+
+    private static string GitLabJson(string tag, string linkName, string linkUrl) =>
+        new JsonArray(new JsonObject
+        {
+            ["tag_name"] = tag,
+            ["upcoming_release"] = false,
+            ["released_at"] = "2024-06-01T00:00:00Z",
+            ["assets"] = new JsonObject
+            {
+                ["links"] = new JsonArray(new JsonObject
+                {
+                    ["name"] = linkName,
+                    ["url"] = linkUrl,
+                    ["direct_asset_url"] = linkUrl,
+                }),
+            },
+        }).ToJsonString();
+
+    private static HttpResponseMessage GitLabReleases(string json, string? etag = "\"gl-etag\"")
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) };
+        if (etag is not null)
+        {
+            response.Headers.ETag = new EntityTagHeaderValue(etag);
+        }
+
+        return response;
+    }
+
+    /// <summary>GitLab happy path: release link → APK download → badging → icon.</summary>
+    private (AppEnricher Enricher, StubHandler Gitlab, StubHandler Downloads, FakeAapt2Runner Aapt2, byte[] Zip)
+        GitLabHappyPath(string tag = "v1.0")
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var gitlab = new StubHandler(_ => GitLabReleases(
+            GitLabJson(tag, "app-release.apk", "https://cdn.example/app.apk")));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var fdroid = new StubHandler(_ => throw new InvalidOperationException("must not fetch index"));
+        return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid), gitlab, downloads, aapt2, zip);
+    }
+
+    // Real index.xml shape (element-style version/versioncode/sig —
+    // regression cover for the M4 attribute-only parser bug).
+    private const string FdroidIndexXml = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <fdroid>
+          <application id="com.example.app">
+            <name>Example</name>
+            <icon>com.example.app.png</icon>
+            <source>https://github.com/example/aod</source>
+            <package>
+              <version>2.0</version>
+              <versioncode>20</versioncode>
+              <apkname>com.example.app_20.apk</apkname>
+              <hash type="sha256">0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</hash>
+              <size>1234567</size>
+              <sdkver>26</sdkver>
+              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
+            </package>
+          </application>
+        </fdroid>
+        """;
+
+    /// <summary>F-Droid wiring: index fetch + icon mirror; the APK download is attempted but 404s, exercising the index-only fallback.</summary>
+    private (AppEnricher Enricher, StubHandler Fdroid, StubHandler Downloads)
+        FdroidHappyPath(byte[]? iconBytes = null, bool icon404 = false, Func<HttpResponseMessage>? githubResponse = null)
+    {
+        iconBytes ??= TestAssets.SolidPng(256, 256, Color.Purple);
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(FdroidIndexXml),
+        });
+        var downloads = new StubHandler(request =>
+        {
+            if (icon404 || !request.RequestUri!.ToString().Contains("/icons"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(iconBytes) };
+        });
+        var github = githubResponse is null
+            ? new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"))
+            : new StubHandler(_ => githubResponse());
+        var gitlab = new StubHandler(_ => throw new InvalidOperationException("must not call GitLab"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid), fdroid, downloads);
+    }
+
+    [Fact]
+    public async Task EnrichesGitLabAppEndToEnd()
+    {
+        var (enricher, _, downloads, aapt2, zip) = GitLabHappyPath();
+        var app = NewApp("izzy", "IzzyOnDroid", "https://gitlab.com/sunilpaulmathew/izzyondroid");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        Assert.Equal(SourceKind.GitLab, app.SourceKind);
+        Assert.Equal(SourceKind.GitLab, app.ApkSource);
+        Assert.Null(app.ApkSourceRef);
+        Assert.Equal("com.example.app", app.PackageName);
+        Assert.Equal(42, app.VersionCode);
+        Assert.Equal("https://cdn.example/app.apk", app.ApkUrl);
+        Assert.Equal(zip.Length, app.ApkSize);
+        Assert.Equal(Sha256(zip), app.ApkSha256);
+        Assert.Equal("\"gl-etag\"", app.EnrichEtag);
+        Assert.Null(app.LastError);
+        Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+        var version = Assert.Single(app.Versions);
+        Assert.Equal(42, version.VersionCode);
+    }
+
+    [Theory]
+    // Play + GitLab combos: GitLab wins for the APK, Play stays as store_url.
+    [InlineData("https://play.google.com/store/apps/details?id=com.x", "https://gitlab.com/o/r")]
+    [InlineData("https://gitlab.com/o/r", "https://play.google.com/store/apps/details?id=com.x")]
+    public async Task KeepsPlayLinkAsStoreUrlForGitLab(string url, string sourceUrl)
+    {
+        var (enricher, _, _, _, _) = GitLabHappyPath();
+        var app = NewApp("combo-gl", "Combo", url, sourceUrl);
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal("https://play.google.com/store/apps/details?id=com.x", app.StoreUrl);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+    }
+
+    [Fact]
+    public async Task TreatsSameGitLabAssetAsUpToDate()
+    {
+        var (first, _, _, _, _) = GitLabHappyPath();
+        var app = NewApp("fmd", "FindMyDevice", "https://gitlab.com/fmd-foss/fmd-android");
+        await first.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        var gitlab = new StubHandler(_ => GitLabReleases(GitLabJson("v1.0", "app-release.apk", "https://cdn.example/app.apk")));
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not re-download same asset"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        Age(app);
+
+        var result = await BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            downloads, aapt2, gitlab).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task RecordsGitLabFailure()
+    {
+        var gitlab = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"404 Project Not Found"}"""),
+        });
+        var app = NewApp("gone-gl", "Gone", "https://gitlab.com/o/deleted");
+
+        var result = await BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            gitlab).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("GitLab", app.LastError);
+        Assert.Contains("404", app.LastError);
+    }
+
+    [Fact]
+    public async Task ReportsGitLabReleaseWithoutApk()
+    {
+        var gitlab = new StubHandler(_ => GitLabReleases(GitLabJson("v1.0", "notes.txt", "https://cdn.example/notes.txt")));
+        var app = NewApp("noapk", "NoApk", "https://gitlab.com/o/noapk");
+
+        var result = await BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            gitlab).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("no .apk", app.LastError);
+    }
+
+    [Fact]
+    public async Task EnrichesFDroidAppEndToEnd()
+    {
+        var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
+        var (enricher, fdroid, downloads) = FdroidHappyPath(iconBytes);
+        var app = NewApp("catshare", "CatShare", "https://f-droid.org/packages/com.example.app/");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, fdroid.Calls);
+        Assert.Equal(2, downloads.Calls); // APK attempt (404 → index-only) + icon
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        Assert.Equal(SourceKind.FDroid, app.SourceKind);
+        Assert.Equal(SourceKind.FDroid, app.ApkSource);
+        Assert.Equal("com.example.app", app.ApkSourceRef);
+        Assert.Equal("com.example.app", app.PackageName);
+        Assert.Equal(20, app.VersionCode);
+        Assert.Equal("2.0", app.VersionName);
+        Assert.Equal(26, app.MinSdk);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
+        Assert.Equal(1234567, app.ApkSize);
+        Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", app.ApkSha256);
+        Assert.Null(app.SigSha256); // no APK analyzed: SHA-256 unknown
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.SigMd5); // index <sig>
+        Assert.Null(app.LastError);
+        // Icon is the mirrored repo PNG, normalized to 192px.
+        Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
+        using var icon = Image.Load(Path.Combine(_iconDir, $"{app.IconHash}.png"));
+        Assert.Equal(192, icon.Width);
+        var version = Assert.Single(app.Versions);
+        Assert.Equal(20, version.VersionCode);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", version.ApkUrl);
+    }
+
+    [Fact]
+    public async Task EnrichesFDroidAppFromSourceUrl()
+    {
+        var (enricher, _, _) = FdroidHappyPath();
+        var play = "https://play.google.com/store/apps/details?id=com.x";
+        var app = NewApp("combo-fd", "Combo", play, "https://f-droid.org/packages/com.example.app");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(play, app.StoreUrl);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+    }
+
+    [Fact]
+    public async Task ResolvesIzzyRepoBase()
+    {
+        var (enricher, _, _) = FdroidHappyPath();
+        var app = NewApp("amarok", "Amarok", "https://apt.izzysoft.de/fdroid/index/apk/com.example.app");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(SourceKind.Izzy, app.SourceKind);
+        Assert.StartsWith("https://apt.izzysoft.de/fdroid/repo/", app.ApkUrl);
+    }
+
+    [Fact]
+    public async Task TreatsSameFdroidVersionAsUpToDate()
+    {
+        var (first, _, _) = FdroidHappyPath();
+        var app = NewApp("hail", "Hail", "https://f-droid.org/packages/com.example.app");
+        await first.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        var (second, _, downloads) = FdroidHappyPath();
+        Age(app);
+
+        // Index re-fetched, but the recorded version is current: no icon traffic.
+        Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(0, downloads.Calls);
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task ReportsMissingFdroidPackage()
+    {
+        var (enricher, _, _) = FdroidHappyPath();
+        var app = NewApp("gone-fd", "Gone", "https://f-droid.org/packages/com.example.gone");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("not in", app.LastError);
+    }
+
+    // ---- F-Droid source fallback + APK source lock ----
+
+    [Fact]
+    public async Task FallsBackToFdroidWhenGitHubHasNoApk()
+    {
+        // Forge-first app whose releases ship no APK: the F-Droid index is
+        // matched by the application's <source> URL and locks the source.
+        var (enricher, fdroid, _) = FdroidHappyPath(githubResponse: () => JsonReleases(ReleaseJson(
+            "v1.0", "source.zip", "https://cdn.example/source.zip", 100)));
+        var app = NewApp("aod", "Always On Display", "https://github.com/example/aod");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        // Two index fetches: the source lookup fills the cache, then the
+        // regular package fetch revalidates it (the stub never sends 304).
+        Assert.Equal(2, fdroid.Calls);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        Assert.Equal(SourceKind.FDroid, app.ApkSource);
+        Assert.Equal("com.example.app", app.ApkSourceRef);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
+    }
+
+    [Fact]
+    public async Task FallsBackToFdroidWhenGitHubHasNoRelease()
+    {
+        var (enricher, _, _) = FdroidHappyPath(githubResponse: () => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}"""),
+        });
+        var app = NewApp("aod-404", "Always On Display", "https://github.com/example/aod");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(SourceKind.FDroid, app.ApkSource);
+        Assert.Equal("com.example.app", app.ApkSourceRef);
+    }
+
+    [Fact]
+    public async Task FallsBackToFdroidByUrlPackageIdWhenForgeFails()
+    {
+        // The rescue apps carry the F-Droid listing as primary URL while the
+        // forge link is only the SourceUrl: GitHub resolves first and fails,
+        // then the URL's package id is used directly.
+        var (enricher, _, _) = FdroidHappyPath(githubResponse: () => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}"""),
+        });
+        var app = NewApp("fd-primary", "Rescue", "https://f-droid.org/packages/com.example.app",
+            "https://github.com/example/aod");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(SourceKind.FDroid, app.ApkSource);
+        Assert.Equal("com.example.app", app.ApkSourceRef);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
+    }
+
+    [Fact]
+    public async Task LockedFdroidAppIgnoresForge()
+    {
+        // Once a build was served from F-Droid, later forge releases must not
+        // replace it (different signing key): the lock branch never calls GitHub.
+        var (enricher, _, _) = FdroidHappyPath(); // GitHub stub throws
+        var app = NewApp("locked-fd", "Locked", "https://github.com/example/aod");
+        app.ApkSource = SourceKind.FDroid;
+        app.ApkSourceRef = "com.example.app";
+        await _db.SaveChangesAsync();
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(SourceKind.FDroid, app.ApkSource);
+        Assert.Equal("com.example.app", app.ApkSourceRef);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", app.ApkUrl);
+    }
+
+    [Fact]
+    public async Task LockedForgeAppDoesNotFallBackToFdroid()
+    {
+        // A forge build was already distributed: even when GitHub fails, the
+        // app must not switch to F-Droid (clients' signature check would fail).
+        var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}"""),
+        });
+        var app = NewApp("locked-gh", "LockedForge", "https://github.com/example/aod");
+        app.ApkSource = SourceKind.GitHub;
+        app.ApkUrl = "https://cdn.example/old.apk";
+        await _db.SaveChangesAsync();
+
+        var result = await BuildEnricher(
+            github,
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            fdroid: new StubHandler(_ => throw new InvalidOperationException("must not fetch index")))
+            .EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("GitHub", app.LastError);
+        Assert.Equal(SourceKind.GitHub, app.ApkSource);
+        Assert.Equal("https://cdn.example/old.apk", app.ApkUrl);
+    }
+
+    // ---- Special cases: instafel API + GitCode mirror ----
+
+    [Fact]
+    public async Task EnrichesInstafelFromApi()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var downloads = new StubHandler(request =>
+        {
+            Assert.Equal(
+                "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk",
+                request.RequestUri!.ToString());
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) };
+        });
+        var instafel = new FakeInstafelClient(() => new InstafelRelease(
+            "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", "1b44b19f"));
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "807"));
+        var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
+
+        var result = await BuildEnricher(github, downloads, aapt2, instafel: instafel).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, instafel.Calls);
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        Assert.Equal(SourceKind.GitHub, app.ApkSource);
+        Assert.Equal("1b44b19f", app.EnrichEtag);
+        Assert.Equal("https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", app.ApkUrl);
+        Assert.NotNull(app.IconHash);
+    }
+
+    [Fact]
+    public async Task InstafelUnchangedHashSkipsDownload()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var instafel = new FakeInstafelClient(() => new InstafelRelease(
+            "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", "same-hash"));
+        var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
+        app.ApkUrl = "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk";
+        app.EnrichEtag = "same-hash";
+        app.VersionCode = 807;
+
+        var result = await BuildEnricher(github, downloads,
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            instafel: instafel).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(1, instafel.Calls);
+        Assert.Equal(0, downloads.Calls);
+    }
+
+    [Fact]
+    public async Task InstafelApiFailureMarksFailed()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var instafel = new FakeInstafelClient(() => throw new InstafelApiException("boom"));
+        var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
+
+        var result = await BuildEnricher(github,
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            instafel: instafel).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Equal("Instafel API: boom", app.LastError);
+    }
+
+    [Fact]
+    public async Task EnrichesHlbmergeFromGitCode()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var downloads = new StubHandler(request =>
+        {
+            Assert.Equal(
+                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
+                request.RequestUri!.ToString());
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) };
+        });
+        var gitcode = new FakeGitCodeClient(() => new GitCodeRelease("v2.0.5", "\"gc-etag\"",
+        [
+            new GitCodeAsset("app-arm64-v8a-release.apk",
+                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk"),
+            new GitCodeAsset("app-x86_64-release.apk",
+                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-x86_64-release.apk"),
+        ]));
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "205"));
+        var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
+
+        var result = await BuildEnricher(github, downloads, aapt2, gitcode: gitcode).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, gitcode.Calls);
+        Assert.Equal(
+            "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
+            app.ApkUrl);
+        Assert.Equal(SourceKind.Other, app.ApkSource);
+        Assert.Equal("\"gc-etag\"", app.EnrichEtag);
+        Assert.NotNull(app.IconHash);
+    }
+
+    [Fact]
+    public async Task GitCodeUnchangedAssetSkipsDownload()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var gitcode = new FakeGitCodeClient(() => new GitCodeRelease("v2.0.5", "\"gc-etag\"",
+        [
+            new GitCodeAsset("app-arm64-v8a-release.apk",
+                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk"),
+        ]));
+        var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
+        app.ApkUrl = "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk";
+        app.VersionCode = 205;
+
+        var result = await BuildEnricher(github,
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            gitcode: gitcode).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(1, gitcode.Calls);
+    }
+
+    [Fact]
+    public async Task GitCodeWithoutApkAssetsFails()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var gitcode = new FakeGitCodeClient(() => new GitCodeRelease("v2.0.5", null,
+        [
+            new GitCodeAsset("source.zip",
+                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/source.zip"),
+        ]));
+        var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
+
+        var result = await BuildEnricher(github,
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            gitcode: gitcode).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("no .apk asset", app.LastError);
+    }
+
+    // ---- M8: signatures + F-Droid alternate variant ----
+
+    // Element-format index matching the canned badging (com.example.app, v42).
+    private const string VariantIndexXml = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <fdroid>
+          <application id="com.example.app">
+            <name>Example</name>
+            <package>
+              <version>4.2</version>
+              <versioncode>42</versioncode>
+              <apkname>com.example.app_42.apk</apkname>
+              <hash type="sha256">aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</hash>
+              <size>7654321</size>
+              <sdkver>26</sdkver>
+              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
+            </package>
+          </application>
+        </fdroid>
+        """;
+
+    /// <summary>Forge primary + F-Droid variant, downloads routed by host.</summary>
+    private (AppEnricher Enricher, StubHandler Downloads) ForgeWithVariant(
+        byte[] primaryZip,
+        byte[] variantZip,
+        FakeSignerRunner? signer = null,
+        string indexXml = VariantIndexXml,
+        bool variantDownload404 = false)
+    {
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v4.2", "app-release.apk", "https://cdn.example/app.apk", primaryZip.Length)));
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(indexXml),
+        });
+        var downloads = new StubHandler(request =>
+        {
+            if (request.RequestUri!.ToString().Contains("f-droid.org"))
+            {
+                return variantDownload404
+                    ? new HttpResponseMessage(HttpStatusCode.NotFound)
+                    : new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(variantZip) };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(primaryZip) };
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        return (BuildEnricher(github, downloads, aapt2, signer: signer, fdroid: fdroid), downloads);
+    }
+
+    [Fact]
+    public async Task RecordsPrimarySignaturesAndFdroidVariant()
+    {
+        var primaryZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
+        var variantZip = new byte[] { 1, 2, 3, 4, 5 };
+        var (enricher, downloads) = ForgeWithVariant(primaryZip, variantZip,
+            new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("dual", "Dual", "https://github.com/example/app");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(2, downloads.Calls); // primary + variant APK
+        Assert.Equal("980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9", app.SigSha256);
+        Assert.Equal("c7b19fa46b32caa0fc9a49b6c8789253", app.SigMd5);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", app.FdroidApkUrl);
+        Assert.Equal(42, app.FdroidVersionCode);
+        Assert.Equal("1.2.3", app.FdroidVersionName); // file truth wins (canned badging, index says 4.2)
+        Assert.Equal(variantZip.Length, app.FdroidApkSize);
+        Assert.Equal(Sha256(variantZip), app.FdroidApkSha256); // bytes win over the index hash
+        Assert.Equal("980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9", app.FdroidSigSha256);
+        Assert.Equal("c7b19fa46b32caa0fc9a49b6c8789253", app.FdroidSigMd5); // file truth wins over index <sig>
+    }
+
+    [Fact]
+    public async Task MissingSignerKeepsEnrichmentWithNullSigs()
+    {
+        var primaryZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
+        // Default signer throws ApkSignerException (no apksigner/Java on the box).
+        var (enricher, _) = ForgeWithVariant(primaryZip, new byte[] { 9 });
+        var app = NewApp("nosig", "NoSig", "https://github.com/example/nosig");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Null(app.SigSha256);
+        Assert.Null(app.SigMd5);
+        Assert.Null(app.FdroidSigSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.FdroidSigMd5); // index <sig> still recorded
+        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", app.FdroidApkUrl);
+    }
+
+    [Fact]
+    public async Task SkipsVariantDownloadWhenAlreadyRecorded()
+    {
+        var primaryZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
+        var (enricher, downloads) = ForgeWithVariant(primaryZip, new byte[] { 9 });
+        var app = NewApp("cached-var", "CachedVar", "https://github.com/example/cached");
+        app.FdroidApkUrl = "https://f-droid.org/repo/com.example.app_42.apk";
+        app.FdroidVersionCode = 42;
+        app.FdroidApkSha256 = "unchanged";
+        await _db.SaveChangesAsync();
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, downloads.Calls); // primary only
+        Assert.Equal("unchanged", app.FdroidApkSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.FdroidSigMd5); // refreshed from the index
+    }
+
+    [Fact]
+    public async Task ClearsVariantWhenDroppedFromIndex()
+    {
+        var primaryZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
+        var (enricher, _) = ForgeWithVariant(primaryZip, new byte[] { 9 }, indexXml: EmptyIndexXml);
+        var app = NewApp("dropped-var", "DroppedVar", "https://github.com/example/dropped");
+        app.FdroidApkUrl = "https://f-droid.org/repo/com.example.app_42.apk";
+        app.FdroidVersionCode = 42;
+        app.FdroidApkSha256 = "old";
+        app.FdroidSigMd5 = "old";
+        await _db.SaveChangesAsync();
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Null(app.FdroidApkUrl);
+        Assert.Null(app.FdroidVersionCode);
+        Assert.Null(app.FdroidApkSha256);
+        Assert.Null(app.FdroidSigMd5);
+    }
+
+    [Fact]
+    public async Task RecordsVariantIndexOnlyWhenDownloadFails()
+    {
+        var primaryZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
+        var (enricher, _) = ForgeWithVariant(primaryZip, [], variantDownload404: true);
+        var app = NewApp("idxonly", "IdxOnly", "https://github.com/example/idxonly");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", app.FdroidApkUrl);
+        Assert.Equal(42, app.FdroidVersionCode);
+        Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", app.FdroidApkSha256);
+        Assert.Null(app.FdroidSigSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.FdroidSigMd5);
+    }
+
+    [Fact]
+    public async Task FdroidPrimaryAnalyzesApkOnVersionChange()
+    {
+        var orangeIcon = TestAssets.SolidPng(256, 256, Color.Orange);
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, orangeIcon));
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(VariantIndexXml),
+        });
+        var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
+        var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(
+                request.RequestUri!.ToString().EndsWith(".apk") ? zip : iconBytes),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var signer = new FakeSignerRunner(_ => SignerOutputB);
+        var enricher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            downloads, aapt2, signer: signer, fdroid: fdroid);
+        var app = NewApp("fdanalyzed", "FdAnalyzed", "https://f-droid.org/packages/com.example.app");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, downloads.Calls); // APK only — its icon wins, no mirror traffic
+        Assert.Equal(Sha256(zip), app.ApkSha256); // bytes win over the index hash
+        Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", app.SigSha256);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", app.SigMd5); // signer MD5 == index <sig>
+        Assert.Equal(IconProcessor.ProcessRawImage(orangeIcon)!.Sha256, app.IconHash);
+    }
+
+    [Fact]
+    public async Task FdroidPrimaryRejectsPackageMismatch()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(VariantIndexXml),
+        });
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(package: "com.other.app"));
+        var enricher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            downloads, aapt2, fdroid: fdroid);
+        var app = NewApp("mismatch", "Mismatch", "https://f-droid.org/packages/com.example.app");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("expected com.example.app", app.LastError);
+        Assert.Null(app.ApkUrl); // old values kept
+    }
+
+    [Fact]
+    public async Task FallsBackToAvatarWhenRepoIconMissing()
+    {
+        var (enricher, _, downloads) = FdroidHappyPath(icon404: true);
+        var app = NewApp("noicon", "No Icon", "https://f-droid.org/packages/com.example.app");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(3, downloads.Calls); // APK attempt + icons-640 + legacy icons/
+        Assert.Equal(LetterAvatarGenerator.Generate("No Icon").Sha256, app.IconHash);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+    }
+
+    private AppEnricher NoNetworkEnricher()
+    {
+        static HttpClient Dead() => new(new StubHandler(_ => throw new InvalidOperationException("no network")));
+        return new AppEnricher(
+            new GitHubReleaseClient(Dead()),
+            new GitLabReleaseClient(Dead()),
+            new FdroidIndexProvider(new FdroidRepoClient(Dead())),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("no network")),
+            new FakeSignerRunner(_ => throw new ApkSignerException("no network")),
+            new LauncherIconService(),
+            Dead(),
+            _options,
+            _db);
+    }
+
+    [Fact]
+    public async Task ExcludesPlaySoleSource()
+    {
+        var enricher = NoNetworkEnricher();
+        var app = NewApp("tasker", "Tasker", "https://play.google.com/store/apps/details?id=net.dinglisch.android.taskerm");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Excluded, result.Outcome);
+        Assert.Equal(Availability.Excluded, app.Availability);
+        Assert.Equal(SourceKind.Play, app.SourceKind);
+        Assert.Contains("Play", app.ExcludedReason);
+        Assert.Null(app.LastError);
+        Assert.Null(app.ApkUrl);
+    }
+
+    [Fact]
+    public async Task OverrideKeepsPlayRedirect()
+    {
+        var enricher = NoNetworkEnricher();
+        var play = "https://play.google.com/store/apps/details?id=net.dinglisch.android.taskerm";
+        var app = NewApp("tasker", "Tasker", play, excludeOverride: true);
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
+        Assert.Equal(play, app.StoreUrl);
+        Assert.Null(app.ExcludedReason);
+    }
+
+    [Fact]
+    public async Task PlayWithAltSourceIsRedirect()
+    {
+        var enricher = NoNetworkEnricher();
+        var play = "https://play.google.com/store/apps/details?id=com.x";
+        var app = NewApp("combo-cb", "Combo", play, "https://codeberg.org/some/app");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
+        Assert.Equal(play, app.StoreUrl);
+    }
+
+    [Fact]
+    public async Task RecordsTimeoutAsFailureInsteadOfGoingSilent()
+    {
+        // Live 2026-09-12: an upstream timeout escaped as an unrecorded
+        // Failed (no last_error, no backoff), hiding a whole pass.
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v4.2", "app-release.apk", "https://cdn.example/app.apk", 123)));
+        var downloads = new StubHandler(_ => throw new TaskCanceledException("simulated HttpClient timeout"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var app = NewApp("timeout", "Timeout", "https://github.com/example/timeout");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("timed out", app.LastError);
+        Assert.Equal(T0, app.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task RecordsTransportFailureInsteadOfGoingSilent()
+    {
+        // Transport errors (DNS, TLS, reset) escape every inner catch the
+        // same way timeouts did: record them with the cause attached.
+        var github = new StubHandler(_ => throw new HttpRequestException("simulated DNS failure"));
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var app = NewApp("dnsfail", "DnsFail", "https://github.com/example/dnsfail");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("Upstream error", app.LastError);
+        Assert.Equal(T0, app.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task PropagatesGenuineCancellation()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v4.2", "app-release.apk", "https://cdn.example/app.apk", 123)));
+        var downloads = new StubHandler(_ => throw new TaskCanceledException("slow upstream"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("unreached"));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            BuildEnricher(github, downloads, aapt2).EnrichAsync(
+                NewApp("cancel", "Cancel", "https://github.com/example/cancel"), T0, cts.Token));
+    }
+
+    private sealed class FakeLauncherIcons(Func<string, ProcessedIcon?> handler) : ILauncherIconService
+    {
+        public int Calls;
+        public PendingBatchIcon? Pending;
+        public Task<ProcessedIcon?> ResolveAsync(string apkPath, BadgingInfo badging, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(handler(apkPath));
+        }
+
+        public PendingBatchIcon? PrepareBatchRender(
+            ZipArchive zip, byte[]? arsc, BadgingInfo badging, string batchWorkDir, string prefix) => Pending;
+    }
+
+    private static ProcessedIcon RedIcon()
+    {
+        var png = TestAssets.SolidPng(192, 192, Color.Red);
+        return new ProcessedIcon(Sha256(png), png);
+    }
+
+    /// <summary>Enrich first (blue raster icon), then refresh with a red icon waiting.</summary>
+    private async Task<(AppEnricher Refresher, FakeLauncherIcons Icons, string OldIconHash)> RefreshSetupAsync()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("refresh", "Refresh", "https://github.com/example/refresh");
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        var oldIconHash = app.IconHash!;
+        var icons = new FakeLauncherIcons(_ => RedIcon());
+
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var refresher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("no release check on refresh")),
+            downloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging()),
+            launcherIcons: icons);
+        return (refresher, icons, oldIconHash);
+    }
+
+    private static string BatchDir() =>
+        Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"shizu-batchtest-{Guid.NewGuid():N}")).FullName;
+
+    [Fact]
+    public async Task PrepareWritesRasterImmediatelyWhenNoPending()
+    {
+        var (refresher, icons, oldIconHash) = await RefreshSetupAsync();
+        var app = _db.Apps.Single(a => a.Slug == "refresh");
+        var checkedAt = app.LastCheckedAt;
+        var versionCode = app.VersionCode;
+        var batchDir = BatchDir();
+        try
+        {
+            // Fake stages nothing (Pending null): the full resolver can only
+            // find the red raster, written like a normal refresh.
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+            Assert.Null(result.Pending);
+            Assert.Equal(1, icons.Calls);
+            Assert.Equal(RedIcon().Sha256, app.IconHash);
+            Assert.False(app.IconAdaptive); // density raster, not XML
+            Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+            Assert.False(File.Exists(Path.Combine(_iconDir, $"{oldIconHash}.png")));
+            Assert.Equal(versionCode, app.VersionCode); // icon-only: values untouched
+            Assert.Equal(checkedAt, app.LastCheckedAt);
+            Assert.Null(app.LastError);
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task PrepareStagesXmlForBatchWithoutWriting()
+    {
+        var (refresher, icons, oldIconHash) = await RefreshSetupAsync();
+        icons.Pending = new PendingBatchIcon("b9_0", null);
+        var app = _db.Apps.Single(a => a.Slug == "refresh");
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            Assert.NotNull(result.Pending);
+            Assert.Equal("b9_0", result.Pending.DrawableName);
+            Assert.Equal(0, icons.Calls); // no resolve yet: render comes later
+            Assert.Equal(oldIconHash, app.IconHash); // nothing written
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task PrepareKeepsCurrentIconWhenSame()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("sameicon", "SameIcon", "https://github.com/example/sameicon");
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        // Real service, null renderer: same blue raster resolves to the same icon.
+        var refresher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("no release check on refresh")),
+            downloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging()));
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+            Assert.Null(result.Pending);
+            Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task PrepareSkipsAppsWithoutRecordedApk()
+    {
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var app = NewApp("noapk", "NoApk", "https://example.com/noapk");
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await BuildEnricher(
+                new StubHandler(_ => throw new InvalidOperationException("no network")),
+                downloads,
+                new FakeAapt2Runner(_ => throw new InvalidOperationException("no aapt2")))
+                .PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+            Assert.Null(result.Pending);
+            Assert.Equal(0, downloads.Calls);
+            Assert.Null(app.IconHash);
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task PrepareFailsCleanlyWhenApkGone()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("gone", "Gone", "https://github.com/example/gone");
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        var iconHash = app.IconHash;
+
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var refresher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("no release check on refresh")),
+            downloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging()),
+            launcherIcons: new FakeLauncherIcons(_ => RedIcon()));
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+            Assert.Null(result.Pending);
+            Assert.Equal(iconHash, app.IconHash); // row untouched: schedule + values kept
+            Assert.Null(app.LastError);
+            Assert.True(File.Exists(Path.Combine(_iconDir, $"{iconHash}.png")));
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task CommitAdoptsBatchRender()
+    {
+        var (refresher, _, oldIconHash) = await RefreshSetupAsync();
+        var app = _db.Apps.Single(a => a.Slug == "refresh");
+        var checkedAt = app.LastCheckedAt;
+        var versionCode = app.VersionCode;
+
+        var result = await refresher.CommitIconRefreshAsync(app, RedIcon().Png, isAdaptive: true);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(RedIcon().Sha256, app.IconHash);
+        Assert.True(app.IconAdaptive); // caller-flagged adaptive root
+        Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+        Assert.False(File.Exists(Path.Combine(_iconDir, $"{oldIconHash}.png")));
+        Assert.Equal(versionCode, app.VersionCode);
+        Assert.Equal(checkedAt, app.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task CommitKeepsCurrentWhenSameRender()
+    {
+        var (refresher, _, _) = await RefreshSetupAsync();
+        var app = _db.Apps.Single(a => a.Slug == "refresh");
+
+        // Stored icon is the blue raster normalized to 192px; the same
+        // bytes back must not rewrite anything.
+        var result = await refresher.CommitIconRefreshAsync(
+            app, TestAssets.SolidPng(192, 192, Color.Blue));
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+    }
+
+    [Fact]
+    public async Task CommitCountsEqualBytesAsRefreshedWhenForced()
+    {
+        var (refresher, _, _) = await RefreshSetupAsync();
+        var app = _db.Apps.Single(a => a.Slug == "refresh");
+        var iconHash = app.IconHash;
+
+        // Same bytes back, but forced: the rewrite must count as
+        // refreshed (swap detection compares fresh bytes for every app).
+        var result = await refresher.CommitIconRefreshAsync(
+            app, TestAssets.SolidPng(192, 192, Color.Blue), force: true);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(iconHash, app.IconHash);
+    }
+
+    [Fact]
+    public async Task CommitFailsCleanlyOnUnusableRender()
+    {
+        var (refresher, _, _) = await RefreshSetupAsync();
+        var app = _db.Apps.Single(a => a.Slug == "refresh");
+        var iconHash = app.IconHash;
+
+        var result = await refresher.CommitIconRefreshAsync(app, [1, 2, 3]);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Equal(iconHash, app.IconHash);
+        Assert.True(File.Exists(Path.Combine(_iconDir, $"{iconHash}.png")));
+    }
+
+    [Fact]
+    public async Task CommitHealsMissingFileWhenSameRender()
+    {
+        var (refresher, _, _) = await RefreshSetupAsync();
+        var app = _db.Apps.Single(a => a.Slug == "refresh");
+        var iconHash = app.IconHash!;
+        File.Delete(Path.Combine(_iconDir, $"{iconHash}.png"));
+
+        // Same bytes back: the row is already correct, but the missing file
+        // must be restored (reported as Enriched so the tally shows it).
+        var result = await refresher.CommitIconRefreshAsync(
+            app, TestAssets.SolidPng(192, 192, Color.Blue));
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(iconHash, app.IconHash);
+        Assert.True(File.Exists(Path.Combine(_iconDir, $"{iconHash}.png")));
+    }
+
+    [Fact]
+    public async Task PrepareHealsMissingRasterFile()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("healicon", "HealIcon", "https://github.com/example/healicon");
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        var iconHash = app.IconHash!;
+        File.Delete(Path.Combine(_iconDir, $"{iconHash}.png"));
+
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        // Real service, null renderer: same blue raster resolves to the same icon.
+        var refresher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("no release check on refresh")),
+            downloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging()));
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            // Same bytes, missing file: restored, reported as Enriched so
+            // the tally proves the healing (same rule as the commit path).
+            Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+            Assert.Equal(iconHash, app.IconHash);
+            Assert.True(File.Exists(Path.Combine(_iconDir, $"{iconHash}.png")));
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task PrepareFallsBackToAvatarWhenApkHasNoIcon()
+    {
+        // APK declares no icon at all (the fpsviewer class): the resolver
+        // finds nothing, so refresh must record the same avatar enrich
+        // would instead of reporting UpToDate over a missing file.
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(TestAssets.BuildApk()),
+        });
+        var app = NewApp("noicon", "NoIcon", "https://github.com/example/noicon");
+        app.Availability = Availability.DirectApk;
+        app.ApkUrl = "https://cdn.example/noicon.apk";
+        var refresher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("no release check on refresh")),
+            downloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging()),
+            launcherIcons: new FakeLauncherIcons(_ => null));
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            var avatar = LetterAvatarGenerator.Generate("NoIcon");
+            Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+            Assert.Null(result.Pending);
+            Assert.Equal(avatar.Sha256, app.IconHash);
+            Assert.False(app.IconAdaptive);
+            Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task PrepareHealsAvatarFileForLinkOnly()
+    {
+        // Store-only listings carry avatars; a deleted avatar file must be
+        // rewritten without any network traffic.
+        var app = NewApp("storeonly", "StoreOnly", "https://example.com/storeonly");
+        app.Availability = Availability.LinkOnly;
+        app.IconHash = LetterAvatarGenerator.Generate("StoreOnly").Sha256;
+        var refresher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("no network")),
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("no aapt2")));
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+            Assert.False(app.IconAdaptive);
+            Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task PrepareLeavesForeignLinkOnlyIconAlone()
+    {
+        // A store-only icon that is NOT the deterministic avatar has
+        // unknown provenance: never touch it, even when the file is gone.
+        var app = NewApp("foreign", "Foreign", "https://example.com/foreign");
+        app.Availability = Availability.LinkOnly;
+        app.IconHash = new string('a', 64);
+        var refresher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("no network")),
+            new StubHandler(_ => throw new InvalidOperationException("must not download")),
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("no aapt2")));
+        var batchDir = BatchDir();
+        try
+        {
+            var result = await refresher.PrepareIconRefreshAsync(app, batchDir, "b9");
+
+            Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+            Assert.Equal(new string('a', 64), app.IconHash);
+            Assert.False(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
+        }
+        finally
+        {
+            try { Directory.Delete(batchDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+}
+
+public sealed class BulkEnricherTests
+{
+    private static App Row(string slug) => new()
+    {
+        Slug = slug,
+        Name = slug,
+        Url = "https://github.com/o/r",
+    };
+
+    [Fact]
+    public async Task PreservesInputOrder()
+    {
+        var apps = new[] { Row("a"), Row("b"), Row("c") };
+        var delays = new Dictionary<string, int> { ["a"] = 60, ["b"] = 30, ["c"] = 0 };
+
+        var results = await BulkEnricher.EnrichManyAsync(
+            apps,
+            async (app, ct) =>
+            {
+                await Task.Delay(delays[app.Slug], ct);
+                return new EnrichResult(EnrichOutcome.Enriched, null);
+            },
+            maxParallelism: 4);
+
+        Assert.Equal(["a", "b", "c"], results.Select(r => r.App.Slug));
+        Assert.All(results, r => Assert.Equal(EnrichOutcome.Enriched, r.Result.Outcome));
+    }
+
+    [Fact]
+    public async Task BoundsParallelism()
+    {
+        var apps = Enumerable.Range(0, 6).Select(i => Row($"app-{i}")).ToList();
+        var current = 0;
+        var maxObserved = 0;
+
+        await BulkEnricher.EnrichManyAsync(
+            apps,
+            async (app, ct) =>
+            {
+                var now = Interlocked.Increment(ref current);
+                Interlocked.Exchange(ref maxObserved, Math.Max(maxObserved, now));
+                try
+                {
+                    await Task.Delay(30, ct);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref current);
+                }
+
+                return new EnrichResult(EnrichOutcome.Enriched, null);
+            },
+            maxParallelism: 2);
+
+        Assert.True(maxObserved <= 2, $"max parallelism observed: {maxObserved}");
+        Assert.True(maxObserved >= 2, $"expected real parallelism, observed: {maxObserved}");
+    }
+
+    [Fact]
+    public async Task IsolatesPerAppFaults()
+    {
+        var apps = new[] { Row("ok"), Row("boom") };
+
+        var results = await BulkEnricher.EnrichManyAsync(
+            apps,
+            (app, _) => app.Slug == "boom"
+                ? throw new InvalidOperationException("kaboom")
+                : Task.FromResult(new EnrichResult(EnrichOutcome.Enriched, null)),
+            maxParallelism: 2);
+
+        Assert.Equal(EnrichOutcome.Enriched, results[0].Result.Outcome);
+        Assert.Equal(EnrichOutcome.Failed, results[1].Result.Outcome);
+        Assert.Contains("kaboom", results[1].Result.Error);
+    }
+
+    [Fact]
+    public async Task PropagatesCancellation()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            BulkEnricher.EnrichManyAsync([Row("a")],
+                (_, _) => Task.FromResult(new EnrichResult(EnrichOutcome.Enriched, null)),
+                maxParallelism: 2,
+                cts.Token));
+    }
+}

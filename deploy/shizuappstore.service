@@ -1,0 +1,28 @@
+[Unit]
+Description=Shizu App Store API + sync worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shizu
+Group=shizu
+WorkingDirectory=/opt/shizuappstore/app
+ExecStart=/opt/shizuappstore/app/ShizuAppStoreServer
+EnvironmentFile=/etc/shizuappstore/env
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5100
+Restart=on-failure
+RestartSec=10
+# The worker enriches APKs in parallel; keep some headroom, cap the blast radius.
+MemoryMax=2G
+# Hardening (the service only needs loopback HTTP + Postgres + outbound HTTPS
+# for the GitHub/GitLab/F-Droid APIs, plus write access to the icon store).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/shizuappstore/icons
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,77 @@
+// Single-icon entry point for the C# backend:
+//   gradle renderIcon -PstagedRes=<dir> -PiconName=<drawable> -PiconPx=432 -Pout=<png>
+// Stages nothing itself; the caller prepares text-XML resources. Runs the
+// Paparazzi record task (always writes a fresh snapshot, never compares).
+// The test itself writes the exact-size PNG straight to -Pout, so this task
+// only verifies the output exists; the snapshot file is deleted as hygiene
+// (a later failed render must never serve a stale PNG).
+def snapshotFile = file("app/src/test/snapshots/images/iconrender_IconRenderTest_render_icon.png")
+
+// Per-render resources change with -PstagedRes, which AGP/Paparazzi
+// incrementality does not reliably observe (stale resource artifact in the
+// test runtime). Force the resource chain plus the test to rerun.
+if (findProperty("stagedRes") != null) {
+    project(":app").tasks.matching {
+        it.name in ["mergeDebugResources", "packageDebugResources",
+                    "preparePaparazziDebugResources", "processDebugUnitTestJavaRes",
+                    "testDebugUnitTest", "recordPaparazziDebug"]
+    }.configureEach {
+        outputs.upToDateWhen { false }
+    }
+}
+
+tasks.register("renderIcon") {
+    dependsOn(":app:recordPaparazziDebug")
+    doLast {
+        def out = file(findProperty("out") ?: "icon.png")
+        if (!out.exists()) {
+            throw new GradleException("render produced no output for iconName="
+                + findProperty("iconName") + " expected at " + out)
+        }
+        // See hygiene note above.
+        snapshotFile.delete()
+    }
+}
+
+// Batch entry point for icon re-render runs:
+//   gradle renderIconBatch -PstagedRes=<sharedDir> -Pbatch=<manifest> -PiconPx=432
+// The manifest lists drawableName|rootFile|outPath per line (rootFile empty
+// for plain drawables); every staged res tree was merged beforehand, so
+// names must already be unique (the C# stager prefixes them per app). One
+// Gradle invocation renders the whole batch: per-icon cost drops to the
+// LayoutLib draw itself instead of a task graph + test JVM each. The Java
+// side never fails the build over one bad icon; this task fails only when
+// nothing at all rendered (broken tool, not a broken icon), while missing
+// per-icon outputs become caller-side fallbacks.
+tasks.register("renderIconBatch") {
+    dependsOn(":app:recordPaparazziDebug")
+    doLast {
+        def manifest = file(findProperty("batch") ?: "batch.txt")
+        if (!manifest.isFile()) {
+            throw new GradleException("batch manifest not found at " + manifest)
+        }
+        def missing = []
+        def total = 0
+        manifest.eachLine { line ->
+            if (!line.trim().isEmpty()) {
+                total++
+                def parts = line.split("\\|", -1)
+                if (parts.length != 3 || !file(parts[2]).exists()) {
+                    missing << line
+                }
+            }
+        }
+        if (total == 0) {
+            throw new GradleException("batch manifest is empty: " + manifest)
+        }
+        if (missing.size() == total) {
+            throw new GradleException("batch rendered nothing (" + total
+                + " entries, e.g. " + missing.take(3) + ")")
+        }
+        if (!missing.isEmpty()) {
+            logger.lifecycle("renderIconBatch: ${missing.size()} of ${total} icons unrendered")
+        }
+        // See hygiene note above.
+        snapshotFile.delete()
+    }
+}

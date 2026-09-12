@@ -1,0 +1,1206 @@
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Xml;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Sources;
+
+namespace ShizuAppStoreServer.Core.Enrichment;
+
+public enum EnrichOutcome
+{
+    /// <summary>APK downloaded + aapt2 parsed, row updated (possibly with letter-avatar icon).</summary>
+    Enriched,
+    /// <summary>Release feed / repo index answered 304 Not Modified (or the same asset is already recorded); only <c>last_checked_at</c> touched.</summary>
+    UpToDate,
+    /// <summary>No forge source: letter-avatar icon, source kind set, no APK fields.</summary>
+    AvatarFallback,
+    /// <summary>Play is the only source and no override is set: never sent to clients.</summary>
+    Excluded,
+    /// <summary>Something failed; <c>last_error</c> set, backoff applies. Previous good values kept.</summary>
+    Failed,
+    /// <summary>Checked recently (success or backoff window); no work done.</summary>
+    SkippedFresh,
+}
+
+public sealed record EnrichResult(EnrichOutcome Outcome, string? Error);
+
+/// <summary>
+/// Phase-A outcome of a batched icon refresh: either final already
+/// (raster written, up-to-date, failed) or a staged <c>Pending</c> entry
+/// awaiting the shared render plus a commit call.
+/// </summary>
+public sealed record PrepareIconResult(
+    EnrichOutcome Outcome, string? Error, PendingBatchIcon? Pending);
+
+/// <summary>
+/// Per-app enrichment. Resolution is forge-first: GitHub and GitLab releases
+/// resolve to an APK asset (temp download → <c>aapt2 dump badging</c> →
+/// <c>apksigner</c> fingerprints → best-density icon → fill the APK columns →
+/// delete the APK), because F-Droid builds are delayed and (unless
+/// reproducible) signed with a different key. F-Droid/Izzy packages resolve
+/// via the repo <c>index.xml</c>, downloading the APK on version change for
+/// full analysis. Whenever the primary APK comes from a forge, the same
+/// package is additionally looked up in the F-Droid main index and recorded
+/// as the alternate variant (<c>Fdroid*</c> columns), so clients can match a
+/// locally installed F-Droid build by its signing cert and offer the right
+/// download URL. When a forge has no APK at all (no releases or no `.apk`
+/// asset), the app falls back to the F-Droid main index by matching the
+/// application's `<source>` URL against the entry's forge URL. The source
+/// that supplied an APK is recorded and locked (<c>ApkSource</c>): once a
+/// build was served, enrichment never switches between forge and F-Droid
+/// (different signing keys would break updates). Two entries release
+/// outside their GitHub project and are special-cased: instafel (maintainer
+/// API at api.mamii.dev) and hlbmerge_flutter (APK builds only on the GitCode
+/// mirror gitcode.com/bigmolihuan/hlbmerge_flutter). Play-sole-source apps are
+/// excluded unless the operator override flag is set. Failures record
+/// <c>last_error</c> and keep previous good values. Does not call
+/// <c>SaveChanges</c> — the caller batches (fast loop in M6, tests).
+/// </summary>
+public sealed class AppEnricher(
+    IGitHubReleaseClient github,
+    IGitLabReleaseClient gitlab,
+    FdroidIndexProvider fdroid,
+    IAapt2Runner aapt2,
+    IApkSignerRunner signer,
+    ILauncherIconService launcherIcons,
+    HttpClient downloads,
+    EnrichmentOptions options,
+    ShizuDbContext db,
+    IInstafelReleaseClient? instafel = null,
+    IGitCodeReleaseClient? gitcode = null,
+    IPlayStoreClient? play = null,
+    ILogger<AppEnricher>? log = null)
+{
+    // Special-case release homes (user calls): the GitHub projects below
+    // publish no usable release assets on GitHub itself.
+    private const string InstafelOwner = "mamiiblt";
+    private const string InstafelRepo = "instafel";
+    private const string HlbmergeGitHubOwner = "molihuan";
+    private const string HlbmergeGitHubRepo = "hlbmerge_flutter";
+    private const string HlbmergeGitCodeOwner = "bigmolihuan";
+    private const string HlbmergeGitCodeRepo = "hlbmerge_flutter";
+
+    public async Task<EnrichResult> EnrichAsync(
+        App app, DateTimeOffset now, CancellationToken ct = default, bool force = false)
+    {
+        if (!force
+            && app.LastCheckedAt is { } checkedAt
+            && checkedAt + (app.LastError is null ? options.SuccessRecheckInterval : options.FailedRecheckInterval) > now)
+        {
+            return new EnrichResult(EnrichOutcome.SkippedFresh, null);
+        }
+
+        try
+        {
+            var result = await DispatchAsync(app, now, ct);
+
+            // External-only Play apps never get an APK; give them the real
+            // listing icon instead of a generated avatar and stop counting
+            // them as failures on every pass.
+            if (result.Outcome == EnrichOutcome.Failed
+                && app.ApkUrl is null
+                && app.IconHash is null
+                && await TryPlayIconAsync(app, now, ct))
+            {
+                app.LastError = null;
+                return new EnrichResult(EnrichOutcome.AvatarFallback, null);
+            }
+
+            return result;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Timeout (an inner HttpClient/linked-cts fired while the outer
+            // token lives): a failed upstream, not a shutdown. Record it so
+            // backoff applies and the cause stays visible — an unrecorded
+            // Failed once hid a whole pass (live 2026-09-12). Genuine
+            // cancellation still propagates to abort the pass.
+            return Fail(app, now, "Upstream timed out.");
+        }
+        catch (HttpRequestException ex)
+        {
+            // Transport failure (DNS, TLS, reset): same treatment, with the
+            // cause recorded instead of a silent Failed.
+            return Fail(app, now, $"Upstream error: {ex.Message}");
+        }
+    }
+
+    private async Task<EnrichResult> DispatchAsync(App app, DateTimeOffset now, CancellationToken ct)
+    {
+        // APK source lock: once clients have seen a build from F-Droid/Izzy,
+        // only that repo may update it. F-Droid builds are signed with a
+        // different key (unless reproducible), so a later forge release must
+        // never replace them, or updates fail the signature check.
+        if (app.ApkSource is SourceKind.FDroid or SourceKind.Izzy)
+        {
+            var kind = app.ApkSource.Value;
+            var lockedPackageId = app.ApkSourceRef;
+            if (string.IsNullOrWhiteSpace(lockedPackageId)
+                && TryParseFdroid(app.Url, app.SourceUrl, out _, out var fromUrls, out _))
+            {
+                lockedPackageId = fromUrls;
+            }
+
+            if (string.IsNullOrWhiteSpace(lockedPackageId))
+            {
+                return Fail(app, now, "APK source is locked to F-Droid but no package id is recorded.");
+            }
+
+            return await EnrichFromFdroidAsync(app, FdroidRepos.BaseFor(kind), lockedPackageId, now, ct);
+        }
+
+        var githubPrimary = SourceClassifier.TryParseGitHubRepo(app.Url, out var owner, out var repo);
+        if (githubPrimary || SourceClassifier.TryParseGitHubRepo(app.SourceUrl, out owner, out repo))
+        {
+            app.SourceKind = SourceKind.GitHub;
+            KeepPlayStoreUrl(app, githubPrimary);
+            EnrichResult result;
+            if (instafel is not null && owner == InstafelOwner && repo == InstafelRepo)
+            {
+                result = await EnrichFromInstafelAsync(app, now, ct);
+            }
+            else if (gitcode is not null && owner == HlbmergeGitHubOwner && repo == HlbmergeGitHubRepo)
+            {
+                result = await EnrichFromGitCodeAsync(app, now, ct);
+            }
+            else
+            {
+                result = await EnrichFromGitHubAsync(app, owner, repo, now, ct);
+            }
+
+            await ResolveFdroidVariantAsync(app, result.Outcome, now, ct);
+            return result;
+        }
+
+        var gitlabPrimary = SourceClassifier.TryParseGitLabRepo(app.Url, out var project);
+        if (gitlabPrimary || SourceClassifier.TryParseGitLabRepo(app.SourceUrl, out project))
+        {
+            app.SourceKind = SourceKind.GitLab;
+            KeepPlayStoreUrl(app, gitlabPrimary);
+            var result = await EnrichFromGitLabAsync(app, project, now, ct);
+            await ResolveFdroidVariantAsync(app, result.Outcome, now, ct);
+            return result;
+        }
+
+        if (TryParseFdroid(app.Url, app.SourceUrl, out var repoBase, out var packageId, out var fdroidPrimary))
+        {
+            var kind = repoBase == FdroidRepos.IzzyBase ? SourceKind.Izzy : SourceKind.FDroid;
+            app.SourceKind = kind;
+            KeepPlayStoreUrl(app, fdroidPrimary);
+            return await EnrichFromFdroidAsync(app, repoBase, packageId, now, ct);
+        }
+
+        return await EnrichFallbackAsync(app, now, ct);
+    }
+
+    private static bool TryParseFdroid(string? primary, string? secondary,
+        out string repoBase, out string packageId, out bool fromPrimary)
+    {
+        repoBase = string.Empty;
+        if (SourceClassifier.TryParseFdroidPackage(primary, out packageId))
+        {
+            repoBase = FdroidRepos.BaseFor(SourceClassifier.Classify(primary));
+            fromPrimary = true;
+            return true;
+        }
+
+        fromPrimary = false;
+        if (SourceClassifier.TryParseFdroidPackage(secondary, out packageId))
+        {
+            repoBase = FdroidRepos.BaseFor(SourceClassifier.Classify(secondary));
+            return true;
+        }
+
+        return false;
+    }
+
+    // Play + forge combos: the forge wins for the APK, Play stays as store_url.
+    private static void KeepPlayStoreUrl(App app, bool forgeFromPrimary)
+    {
+        var otherUrl = forgeFromPrimary ? app.SourceUrl : app.Url;
+        if (SourceClassifier.Classify(otherUrl) == SourceKind.Play)
+        {
+            app.StoreUrl = otherUrl;
+        }
+    }
+
+    private async Task<EnrichResult> EnrichFromGitHubAsync(
+        App app, string owner, string repo, DateTimeOffset now, CancellationToken ct)
+    {
+        GitHubRelease release;
+        try
+        {
+            var latest = await github.GetLatestReleaseAsync(owner, repo, app.EnrichEtag, ct);
+            if (latest is null)
+            {
+                app.LastCheckedAt = now;
+                return new EnrichResult(EnrichOutcome.UpToDate, null);
+            }
+
+            release = latest;
+        }
+        catch (GitHubApiException ex)
+        {
+            // No releases / unknown repo: the app may be F-Droid-only. A
+            // transient API error (rate limit, 5xx) must not lock the source.
+            if (ex.Status == HttpStatusCode.NotFound
+                && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
+            {
+                return rescued;
+            }
+
+            return Fail(app, now, $"GitHub: {ex.Message}");
+        }
+
+        var asset = ApkAssetSelector.PickApk(release.Assets);
+        if (asset is null)
+        {
+            // Some projects attach only a zip with the APK inside.
+            var zip = ApkAssetSelector.PickZip(release.Assets, a => a.Name, a => a.Size);
+            if (zip is not null
+                && await TryEnrichFromZipAsync(app, zip.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct) is { } zipped)
+            {
+                return zipped;
+            }
+
+            if (await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
+            {
+                return rescued;
+            }
+
+            return Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
+        }
+
+        return await EnrichFromApkAsync(app, asset.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct);
+    }
+
+    /// <summary>
+    /// Instafel publishes through api.mamii.dev, not GitHub. The payload's
+    /// file hash is the change signal (recorded as the etag): an unchanged
+    /// hash plus unchanged URL skips the download entirely.
+    /// </summary>
+    private async Task<EnrichResult> EnrichFromInstafelAsync(
+        App app, DateTimeOffset now, CancellationToken ct)
+    {
+        InstafelRelease release;
+        try
+        {
+            release = await instafel!.GetLatestAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return Fail(app, now, $"Instafel API: {ex.Message}");
+        }
+
+        if (release.ApkUrl == app.ApkUrl
+            && release.FileHash == app.EnrichEtag
+            && app.VersionCode is not null)
+        {
+            app.LastCheckedAt = now;
+            return new EnrichResult(EnrichOutcome.UpToDate, null);
+        }
+
+        return await EnrichFromApkAsync(app, release.ApkUrl, release.FileHash, SourceKind.GitHub, now, ct);
+    }
+
+    /// <summary>
+    /// hlbmerge_flutter's APK builds exist only on the GitCode mirror. The
+    /// asset URL embeds the tag, so an unchanged URL plus a recorded version
+    /// code skips the download.
+    /// </summary>
+    private async Task<EnrichResult> EnrichFromGitCodeAsync(
+        App app, DateTimeOffset now, CancellationToken ct)
+    {
+        GitCodeRelease release;
+        try
+        {
+            var latest = await gitcode!.GetLatestReleaseAsync(
+                HlbmergeGitCodeOwner, HlbmergeGitCodeRepo, ct: ct);
+            if (latest is null)
+            {
+                app.LastCheckedAt = now;
+                return new EnrichResult(EnrichOutcome.UpToDate, null);
+            }
+
+            release = latest;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return Fail(app, now, $"GitCode: {ex.Message}");
+        }
+
+        var asset = ApkAssetSelector.PickApk(release.Assets, a => a.Name, _ => 0L);
+        if (asset is null)
+        {
+            return Fail(app, now, $"GitCode release {release.TagName} of "
+                + $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo} has no .apk asset.");
+        }
+
+        if (asset.Url == app.ApkUrl && app.VersionCode is not null)
+        {
+            app.EnrichEtag = release.Etag;
+            app.LastCheckedAt = now;
+            return new EnrichResult(EnrichOutcome.UpToDate, null);
+        }
+
+        return await EnrichFromApkAsync(app, asset.Url, release.Etag, SourceKind.Other, now, ct);
+    }
+
+    private async Task<EnrichResult> EnrichFromGitLabAsync(
+        App app, string projectPath, DateTimeOffset now, CancellationToken ct)
+    {
+        GitLabRelease release;
+        try
+        {
+            var latest = await gitlab.GetLatestReleaseAsync(projectPath, app.EnrichEtag, ct);
+            if (latest is null)
+            {
+                app.LastCheckedAt = now;
+                return new EnrichResult(EnrichOutcome.UpToDate, null);
+            }
+
+            release = latest;
+        }
+        catch (GitLabApiException ex)
+        {
+            if (ex.Status == HttpStatusCode.NotFound
+                && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
+            {
+                return rescued;
+            }
+
+            return Fail(app, now, $"GitLab: {ex.Message}");
+        }
+
+        var link = ApkAssetSelector.PickApk(release.Assets, l => l.Name, _ => 0L, l => l.Url);
+        if (link is null)
+        {
+            if (await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
+            {
+                return rescued;
+            }
+
+            return Fail(app, now, $"GitLab release {release.TagName} of {projectPath} has no .apk asset link.");
+        }
+
+        // GitLab largely ignores If-None-Match: same recorded asset URL means nothing new.
+        if (link.Url == app.ApkUrl && app.VersionCode is not null)
+        {
+            app.EnrichEtag = release.Etag;
+            app.LastCheckedAt = now;
+            return new EnrichResult(EnrichOutcome.UpToDate, null);
+        }
+
+        return await EnrichFromApkAsync(app, link.Url, release.Etag, SourceKind.GitLab, now, ct);
+    }
+
+    /// <summary>
+    /// Rescue path for apps whose forge published no APK and that never
+    /// served a build from another source: package id from an F-Droid/Izzy
+    /// URL, else an F-Droid index lookup by the repo's forge URL. A hit
+    /// locks the app to the F-Droid source (<c>ApkSource</c>), so the
+    /// signature stays stable for future updates. Returns null when the app
+    /// is locked already or not published on F-Droid (the forge failure then
+    /// stands). Best-effort: index trouble never replaces the forge error.
+    /// </summary>
+    private async Task<EnrichResult?> TryFdroidFallbackAsync(App app, DateTimeOffset now, CancellationToken ct)
+    {
+        if (app.ApkSource is not null)
+        {
+            // A build from another source may already be distributed;
+            // switching now would fail clients' signature check on update.
+            return null;
+        }
+
+        if (TryParseFdroid(app.Url, app.SourceUrl, out var repoBase, out var packageId, out _))
+        {
+            return await EnrichFromFdroidAsync(app, repoBase, packageId, now, ct);
+        }
+
+        var repoKey = SourceClassifier.RepoKey(app.Url) ?? SourceClassifier.RepoKey(app.SourceUrl);
+        if (repoKey is null)
+        {
+            return null;
+        }
+
+        FdroidPackageInfo? package;
+        try
+        {
+            package = await fdroid.FindPackageBySourceAsync(FdroidRepos.FDroidBase, repoKey, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        return package is null
+            ? null
+            : await EnrichFromFdroidAsync(app, FdroidRepos.FDroidBase, package.PackageName, now, ct);
+    }
+
+    /// <summary>
+    /// Best-effort icon source for apps that stay external-only (no APK
+    /// anywhere): scrapes the linked Play Store listing. Never touches
+    /// apk_url; returns true only when an icon file was adopted.
+    /// </summary>
+    private async Task<bool> TryPlayIconAsync(App app, DateTimeOffset now, CancellationToken ct)
+    {
+        if (play is null)
+        {
+            return false;
+        }
+
+        var packageId = string.Empty;
+        if (!SourceClassifier.TryParsePlayPackage(app.Url, out packageId)
+            && !SourceClassifier.TryParsePlayPackage(app.SourceUrl, out packageId)
+            && !SourceClassifier.TryParsePlayPackage(app.StoreUrl, out packageId))
+        {
+            return false;
+        }
+
+        try
+        {
+            var iconUrl = await play.GetIconUrlAsync(packageId, ct);
+            if (iconUrl is null)
+            {
+                return false;
+            }
+
+            using var response = await downloads.GetAsync(iconUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            response.EnsureSuccessStatusCode();
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct);
+            var icon = IconProcessor.ProcessRawImage(bytes);
+            if (icon is null)
+            {
+                return false;
+            }
+
+            await WriteIconFileAsync(icon, ct);
+            var oldIcon = app.IconHash;
+            app.IconHash = icon.Sha256;
+            app.IconAdaptive = false;
+            await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogDebug(ex, "Play icon fetch failed for {Slug}.", app.Slug);
+            return false;
+        }
+    }
+
+    private async Task<EnrichResult> EnrichFromFdroidAsync(
+        App app, string repoBase, string packageId, DateTimeOffset now, CancellationToken ct)
+    {
+        (FdroidPackageInfo? Package, string? IndexEtag)? fetched;
+        try
+        {
+            fetched = await fdroid.GetPackageAsync(repoBase, packageId, app.EnrichEtag, ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
+        {
+            return Fail(app, now, $"F-Droid: {ex.Message}");
+        }
+
+        if (fetched is null)
+        {
+            app.LastCheckedAt = now;
+            return new EnrichResult(EnrichOutcome.UpToDate, null);
+        }
+
+        var (package, indexEtag) = fetched.Value;
+        if (package is null)
+        {
+            return Fail(app, now, $"F-Droid: package {packageId} not in the {repoBase} index.");
+        }
+
+        // Lock the APK download to this repo: forge releases, whether they
+        // exist now or appear later, must never replace the F-Droid-signed
+        // build (different key, updates would fail the signature check).
+        var kind = repoBase == FdroidRepos.IzzyBase ? SourceKind.Izzy : SourceKind.FDroid;
+        app.SourceKind = kind;
+        app.ApkSource = kind;
+        app.ApkSourceRef = packageId;
+
+        var apkUrl = $"{repoBase.TrimEnd('/')}/{package.ApkName}";
+        if (apkUrl == app.ApkUrl && package.VersionCode == app.VersionCode)
+        {
+            app.EnrichEtag = indexEtag;
+            app.LastCheckedAt = now;
+            return new EnrichResult(EnrichOutcome.UpToDate, null);
+        }
+
+        // Changed version: analyze the actual APK (same quality bar as forge
+        // builds). Anything wrong with the file falls back to the index-only
+        // record — except a package-name mismatch, which means the index row
+        // and the file disagree, so the old values are kept.
+        var oldIcon = app.IconHash;
+        using var analyzed = await TryAnalyzeDownloadAsync(apkUrl, ct);
+        if (analyzed is not null && analyzed.Badging.PackageName != package.PackageName)
+        {
+            return Fail(app, now, $"F-Droid: {apkUrl} contains {analyzed.Badging.PackageName}, expected {package.PackageName}.");
+        }
+
+        var icon = analyzed is not null
+            && await launcherIcons.ResolveAsync(analyzed.ApkPath, analyzed.Badging, ct) is { } apkIcon
+            ? apkIcon
+            : await MirrorIconAsync(package.IconFile, repoBase, app.Name, ct);
+        await WriteIconFileAsync(icon, ct);
+
+        app.PackageName = package.PackageName;
+        app.VersionCode = analyzed?.Badging.VersionCode ?? package.VersionCode;
+        app.VersionName = analyzed?.Badging.VersionName ?? package.VersionName;
+        app.MinSdk = analyzed?.Badging.MinSdk ?? package.MinSdk;
+        app.ApkUrl = apkUrl;
+        app.ApkSize = analyzed?.FileSize ?? package.Size;
+        // Bytes on disk win: the recorded hash describes what clients download.
+        app.ApkSha256 = analyzed?.FileSha256 ?? package.Sha256;
+        if (analyzed is not null)
+        {
+            app.SigSha256 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
+            app.SigMd5 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5;
+        }
+        else
+        {
+            app.SigSha256 = null;
+            app.SigMd5 = package.SigMd5;
+        }
+
+        app.IconHash = icon.Sha256;
+        app.IconAdaptive = icon.Adaptive;
+        app.Availability = Availability.DirectApk;
+        app.EnrichEtag = indexEtag;
+        app.ExcludedReason = null;
+        app.LastCheckedAt = now;
+        app.LastError = null;
+
+        await AddVersionRowAsync(app, app.VersionCode, app.VersionName, apkUrl, now, ct);
+        await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
+        return new EnrichResult(EnrichOutcome.Enriched, null);
+    }
+
+    /// <summary>
+    /// F-Droid alternate variant for forge-primary apps: when the same
+    /// package is published on F-Droid, record its build next to the primary
+    /// forge build. Only runs after a fresh primary enrich (never on
+    /// <c>SkippedFresh</c>); variant problems are best-effort and never
+    /// change the primary outcome.
+    /// </summary>
+    private async Task ResolveFdroidVariantAsync(App app, EnrichOutcome primary, DateTimeOffset now, CancellationToken ct)
+    {
+        if (app.ApkSource is SourceKind.FDroid or SourceKind.Izzy)
+        {
+            return; // Primary is already the F-Droid build; a variant would duplicate it.
+        }
+
+        if (primary is not (EnrichOutcome.Enriched or EnrichOutcome.UpToDate)
+            || string.IsNullOrWhiteSpace(app.PackageName))
+        {
+            return;
+        }
+
+        FdroidPackageInfo? package;
+        try
+        {
+            var fetched = await fdroid.GetPackageAsync(FdroidRepos.FDroidBase, app.PackageName, seedEtag: null, ct);
+            if (fetched is null)
+            {
+                return; // 304 with nothing cached: no new information.
+            }
+
+            package = fetched.Value.Package;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return; // Best-effort sidecar: index trouble never fails the primary.
+        }
+
+        if (package is null)
+        {
+            ClearVariant(app);
+            return;
+        }
+
+        var apkUrl = $"{FdroidRepos.FDroidBase.TrimEnd('/')}/{package.ApkName}";
+        if (apkUrl == app.FdroidApkUrl
+            && package.VersionCode == app.FdroidVersionCode
+            && app.FdroidApkSha256 is not null)
+        {
+            if (package.SigMd5 is not null)
+            {
+                app.FdroidSigMd5 = package.SigMd5;
+            }
+
+            return;
+        }
+
+        using var analyzed = await TryAnalyzeDownloadAsync(apkUrl, ct);
+        if (analyzed is null || analyzed.Badging.PackageName != package.PackageName)
+        {
+            RecordVariantIndexOnly(app, package, apkUrl);
+            return;
+        }
+
+        app.FdroidApkUrl = apkUrl;
+        app.FdroidVersionCode = analyzed.Badging.VersionCode;
+        app.FdroidVersionName = analyzed.Badging.VersionName;
+        app.FdroidApkSize = analyzed.FileSize;
+        app.FdroidApkSha256 = analyzed.FileSha256;
+        app.FdroidSigSha256 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
+        app.FdroidSigMd5 = CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5;
+    }
+
+    private static void RecordVariantIndexOnly(App app, FdroidPackageInfo package, string apkUrl)
+    {
+        app.FdroidApkUrl = apkUrl;
+        app.FdroidVersionCode = package.VersionCode;
+        app.FdroidVersionName = package.VersionName;
+        app.FdroidApkSize = package.Size;
+        app.FdroidApkSha256 = package.Sha256;
+        app.FdroidSigSha256 = null;
+        app.FdroidSigMd5 = package.SigMd5;
+    }
+
+    private static void ClearVariant(App app)
+    {
+        app.FdroidApkUrl = null;
+        app.FdroidVersionCode = null;
+        app.FdroidVersionName = null;
+        app.FdroidApkSize = null;
+        app.FdroidApkSha256 = null;
+        app.FdroidSigSha256 = null;
+        app.FdroidSigMd5 = null;
+    }
+
+    /// <summary>
+    /// One analyzed APK download: badging + file hash/size + (best-effort)
+    /// signer certs. Owns the temp file — dispose when done (icon extraction
+    /// via <c>IconProcessor</c> happens first, on <see cref="ApkPath"/>).
+    /// </summary>
+    private sealed record AnalyzedApk(
+        string ApkPath,
+        BadgingInfo Badging,
+        string FileSha256,
+        long FileSize,
+        IReadOnlyList<SignerCertificates> Signers) : IDisposable
+    {
+        public void Dispose()
+        {
+            try { File.Delete(ApkPath); } catch { /* best effort */ }
+        }
+    }
+
+    private Task<EnrichResult> EnrichFromApkAsync(
+        App app, string apkUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct) =>
+        RunArtifactAsync(app, apkUrl, archiveEntry: null, etag, lockSource, now, ct);
+
+    /// <summary>
+    /// Some releases attach only a zip with the APK inside (e.g.
+    /// AppControl-X v3.0.0). Downloads the archive, picks the best
+    /// <c>.apk</c> entry and analyzes it like a direct download; the
+    /// recorded URL/size/hash stay the archive's and
+    /// <see cref="App.ApkArchiveEntry"/> names the APK inside. Null when
+    /// the archive is unusable or carries no APK (caller falls through
+    /// to the next source).
+    /// </summary>
+    private async Task<EnrichResult?> TryEnrichFromZipAsync(
+        App app, string zipUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct)
+    {
+        var tempZip = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.zip");
+        var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
+        try
+        {
+            await DownloadAsync(zipUrl, tempZip, ct);
+            using var zip = ZipFile.OpenRead(tempZip);
+            var entry = ApkAssetSelector.PickApk(zip.Entries, e => e.FullName, e => e.Length);
+            if (entry is null)
+            {
+                return null;
+            }
+
+            entry.ExtractToFile(tempApk, overwrite: true);
+            return await AnalyzeTempApkAsync(app, zipUrl, entry.FullName, tempZip, tempApk, etag, lockSource, now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best effort: a broken or APK-less candidate zip must not stop
+            // the F-Droid fallback (the caller reports no .apk asset if all fail).
+            return null;
+        }
+        finally
+        {
+            try { File.Delete(tempZip); } catch { /* best effort */ }
+            try { File.Delete(tempApk); } catch { /* best effort */ }
+        }
+    }
+
+    private async Task<EnrichResult> RunArtifactAsync(
+        App app, string url, string? archiveEntry, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct)
+    {
+        var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
+        try
+        {
+            await DownloadAsync(url, tempApk, ct);
+            return await AnalyzeTempApkAsync(app, url, archiveEntry, tempApk, tempApk, etag, lockSource, now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return Fail(app, now, $"Download: {ex.Message}");
+        }
+        finally
+        {
+            try { File.Delete(tempApk); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>
+    /// Shared analysis tail: badging, artifact hash/size, icon, signatures
+    /// and the recorded fields. <paramref name="apkPath"/> is the APK that
+    /// gets analyzed, <paramref name="artifactPath"/> the file clients
+    /// download (same file unless the APK came out of an archive).
+    /// </summary>
+    private async Task<EnrichResult> AnalyzeTempApkAsync(
+        App app, string artifactUrl, string? archiveEntry, string artifactPath, string apkPath,
+        string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct)
+    {
+        BadgingInfo badging;
+        try
+        {
+            badging = BadgingParser.Parse(await aapt2.DumpBadgingAsync(apkPath, ct));
+        }
+        catch (Exception ex) when (ex is Aapt2Exception or BadgingParseException)
+        {
+            return Fail(app, now, $"aapt2: {ex.Message}");
+        }
+
+        string artifactSha256;
+        long artifactSize;
+        try
+        {
+            using var sha = SHA256.Create();
+            await using (var stream = File.OpenRead(artifactPath))
+            {
+                artifactSize = stream.Length;
+                artifactSha256 = Convert.ToHexStringLower(await sha.ComputeHashAsync(stream, ct));
+            }
+        }
+        catch (IOException ex)
+        {
+            return Fail(app, now, $"APK unreadable: {ex.Message}");
+        }
+
+        var icon = await launcherIcons.ResolveAsync(apkPath, badging, ct)
+            ?? LetterAvatarGenerator.Generate(app.Name);
+        await WriteIconFileAsync(icon, ct);
+
+        var oldIcon = app.IconHash;
+        var signers = await TryExtractSignersAsync(apkPath, ct);
+        app.PackageName = badging.PackageName;
+        app.VersionCode = badging.VersionCode;
+        app.VersionName = badging.VersionName;
+        app.MinSdk = badging.MinSdk;
+        app.ApkUrl = artifactUrl;
+        // Lock: this build is now the one clients install; future passes
+        // must keep updating from the same kind of source.
+        app.ApkSource = lockSource;
+        app.ApkSourceRef = null;
+        app.ApkArchiveEntry = archiveEntry;
+        app.ApkSize = artifactSize;
+        app.ApkSha256 = artifactSha256;
+        app.SigSha256 = CertFingerprint.Join(signers.Select(s => s.Sha256));
+        app.SigMd5 = CertFingerprint.Join(signers.Select(s => s.Md5));
+        app.IconHash = icon.Sha256;
+        app.IconAdaptive = icon.Adaptive;
+        app.Availability = Availability.DirectApk;
+        app.EnrichEtag = etag;
+        app.ExcludedReason = null;
+        app.LastCheckedAt = now;
+        app.LastError = null;
+
+        await AddVersionRowAsync(app, badging.VersionCode, badging.VersionName, artifactUrl, now, ct);
+        await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
+        return new EnrichResult(EnrichOutcome.Enriched, null);
+    }
+
+    /// <summary>
+    /// Batched icon refresh (phase A): downloads +
+    /// analyzes the recorded APK and stages its XML icon (if any) into the
+    /// shared batch dir. Raster icons resolve immediately and are written
+    /// like a normal refresh; XML icons come back as
+    /// <see cref="PrepareIconResult.Pending"/> for one shared Gradle render
+    /// (phase B) plus <see cref="CommitIconRefreshAsync"/> (phase C).
+    /// Icon-only: version/signature/check timestamps are left alone.
+    /// </summary>
+    public async Task<PrepareIconResult> PrepareIconRefreshAsync(
+        App app, string batchWorkDir, string prefix, CancellationToken ct = default, bool force = false)
+    {
+        if (app.Availability != Availability.DirectApk || string.IsNullOrWhiteSpace(app.ApkUrl))
+        {
+            // Store-only listings carry letter-avatars (see
+            // EnrichFallbackAsync); heal a deleted avatar file when the
+            // bytes still match. Anything else is left alone: unknown
+            // provenance, never touch.
+            if ((app.Availability is Availability.LinkOnly or Availability.PlayRedirect)
+                && app.IconHash is not null)
+            {
+                try
+                {
+                    var storeAvatar = LetterAvatarGenerator.Generate(app.Name);
+                    if (storeAvatar.Sha256 == app.IconHash)
+                    {
+                        app.IconAdaptive = false; // avatars are never adaptive
+                        if (!IconFileExists(storeAvatar.Sha256))
+                        {
+                            await WriteIconFileAsync(storeAvatar, ct);
+                            return new PrepareIconResult(EnrichOutcome.Enriched, null, null);
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    return new PrepareIconResult(EnrichOutcome.Failed, $"Icon refresh: {ex.Message}", null);
+                }
+            }
+
+            return new PrepareIconResult(EnrichOutcome.UpToDate, null, null);
+        }
+
+        try
+        {
+            using var analyzed = await TryAnalyzeDownloadAsync(app.ApkUrl, ct);
+            if (analyzed is null)
+            {
+                return new PrepareIconResult(EnrichOutcome.Failed,
+                    "Icon refresh: recorded APK no longer analyzable; icon kept.", null);
+            }
+
+            PendingBatchIcon? pending;
+            using (var zip = ZipFile.OpenRead(analyzed.ApkPath))
+            {
+                pending = launcherIcons.PrepareBatchRender(
+                    zip, ZipEntryReader.Read(zip, "resources.arsc"),
+                    analyzed.Badging, batchWorkDir, prefix);
+            }
+
+            if (pending is null)
+            {
+                // No XML path: resolve immediately. A null resolve means
+                // the APK declares no icon at all; enrich records an
+                // avatar for those, so refresh must too, or a deleted
+                // avatar file 404s forever while the pass reports
+                // UpToDate.
+                var icon = await launcherIcons.ResolveAsync(analyzed.ApkPath, analyzed.Badging, ct)
+                    ?? LetterAvatarGenerator.Generate(app.Name);
+                // Provenance always syncs, even when the bytes match: one
+                // pass heals stale flags without any icon churn.
+                app.IconAdaptive = icon.Adaptive;
+
+                // Write first: a missing file must heal even when the
+                // bytes still match the recorded icon (write is a no-op
+                // otherwise).
+                var healed = !IconFileExists(icon.Sha256);
+                await WriteIconFileAsync(icon, ct);
+                if (icon.Sha256 == app.IconHash)
+                {
+                    // Force re-renders everything (swap detection: a
+                    // self-consistent wrong file only surfaces when fresh
+                    // bytes are compared), so equal bytes still count.
+                    return force || healed
+                        ? new PrepareIconResult(EnrichOutcome.Enriched, null, null)
+                        : new PrepareIconResult(EnrichOutcome.UpToDate, null, null);
+                }
+
+                var oldIcon = app.IconHash;
+                app.IconHash = icon.Sha256;
+                await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
+                return new PrepareIconResult(EnrichOutcome.Enriched, null, null);
+            }
+
+            return new PrepareIconResult(EnrichOutcome.UpToDate, null, pending);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new PrepareIconResult(EnrichOutcome.Failed, $"Icon refresh: {ex.Message}", null);
+        }
+    }
+
+    /// <summary>
+    /// Batched icon refresh (phase C): normalizes
+    /// one batch-rendered PNG and adopts it when it differs. Failures keep
+    /// the current icon without touching the row.
+    /// </summary>
+    public async Task<EnrichResult> CommitIconRefreshAsync(
+        App app, byte[]? png, CancellationToken ct = default, bool force = false, bool isAdaptive = false)
+    {
+        try
+        {
+            var icon = png is null ? null : LauncherIconService.NormalizeRender(png, isAdaptive);
+            if (icon is null)
+            {
+                return new EnrichResult(EnrichOutcome.Failed, "Icon refresh: batch render produced no usable icon; kept.");
+            }
+
+            // Sync even on equal bytes to heal stale flags; the flag is
+            // the caller's true-adaptive signal (SyncService forwards the
+            // staged root kind), not a blanket XML marker.
+            app.IconAdaptive = icon.Adaptive;
+
+            // Write first: a missing file must heal even when the render
+            // still matches the recorded icon (write is a no-op otherwise).
+            var healed = !IconFileExists(icon.Sha256);
+            await WriteIconFileAsync(icon, ct);
+            if (icon.Sha256 == app.IconHash)
+            {
+                // Enriched (not UpToDate) when a file was restored, so the
+                // pass tally proves the healing happened; force counts
+                // every rewrite (swap detection needs fresh bytes).
+                return force || healed
+                    ? new EnrichResult(EnrichOutcome.Enriched, null)
+                    : new EnrichResult(EnrichOutcome.UpToDate, null);
+            }
+
+            await WriteIconFileAsync(icon, ct);
+            var oldIcon = app.IconHash;
+            app.IconHash = icon.Sha256;
+            await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
+            return new EnrichResult(EnrichOutcome.Enriched, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new EnrichResult(EnrichOutcome.Failed, $"Icon refresh: {ex.Message}");
+        }
+    }
+    private async Task<EnrichResult> EnrichFallbackAsync(App app, DateTimeOffset now, CancellationToken ct)
+    {
+        var kind = SourceClassifier.Classify(app.Url);
+        app.SourceKind = kind;
+
+        // The real Play listing icon beats a generated avatar when linked.
+        if (!await TryPlayIconAsync(app, now, ct))
+        {
+            var avatar = LetterAvatarGenerator.Generate(app.Name);
+            await WriteIconFileAsync(avatar, ct);
+            app.IconHash = avatar.Sha256;
+            app.IconAdaptive = false;
+        }
+
+        if (kind == SourceKind.Play && !HasAltSource(app) && !app.ExcludeOverride)
+        {
+            app.Availability = Availability.Excluded;
+            app.ExcludedReason = "Play Store is the only source; no APK available.";
+            app.LastCheckedAt = now;
+            app.LastError = null;
+            return new EnrichResult(EnrichOutcome.Excluded, null);
+        }
+
+        if (kind == SourceKind.Play)
+        {
+            app.Availability = Availability.PlayRedirect;
+            app.StoreUrl = app.Url;
+            app.ExcludedReason = null;
+        }
+        else
+        {
+            app.Availability = Availability.LinkOnly;
+            app.ExcludedReason = null;
+        }
+
+        app.LastCheckedAt = now;
+        app.LastError = null;
+        return new EnrichResult(EnrichOutcome.AvatarFallback, null);
+    }
+
+    private static bool HasAltSource(App app) =>
+        !string.IsNullOrWhiteSpace(app.SourceUrl)
+        && SourceClassifier.Classify(app.SourceUrl) != SourceKind.Play;
+
+    private async Task<ProcessedIcon> MirrorIconAsync(
+        string? iconFile, string repoBase, string appName, CancellationToken ct)
+    {
+        if (iconFile is not null)
+        {
+            foreach (var iconUrl in FdroidRepos.IconUrls(repoBase, iconFile))
+            {
+                try
+                {
+                    using var response = await downloads.GetAsync(iconUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+                    if (response.StatusCode == HttpStatusCode.NotFound)
+                    {
+                        continue;
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        break;
+                    }
+
+                    var bytes = await response.Content.ReadAsByteArrayAsync(ct);
+                    if (IconProcessor.ProcessRawImage(bytes) is { } icon)
+                    {
+                        return icon;
+                    }
+
+                    break; // Got bytes but undecodable — the legacy size won't decode either.
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+                {
+                    break;
+                }
+            }
+        }
+
+        return LetterAvatarGenerator.Generate(appName);
+    }
+
+    private async Task AddVersionRowAsync(
+        App app, long? versionCode, string? versionName, string apkUrl, DateTimeOffset now, CancellationToken ct)
+    {
+        if (!await db.AppVersions.AnyAsync(v =>
+            v.AppId == app.Id && v.VersionCode == versionCode && v.VersionName == versionName, ct))
+        {
+            app.Versions.Add(new AppVersion
+            {
+                VersionCode = versionCode,
+                VersionName = versionName,
+                ApkUrl = apkUrl,
+                DetectedAt = now,
+            });
+        }
+    }
+
+    private async Task DownloadAsync(string url, string tempApk, CancellationToken ct)
+    {
+        using var response = await downloads.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException($"HTTP {(int)response.StatusCode} for {url}.");
+        }
+
+        await using var file = File.Create(tempApk);
+        await response.Content.CopyToAsync(file, ct);
+    }
+
+    /// <summary>
+    /// Download → aapt2 → file hash, with best-effort signer certs. Returns
+    /// null when the file can't be fetched or parsed (callers fall back to
+    /// index metadata); never throws except on cancellation.
+    /// </summary>
+    private async Task<AnalyzedApk?> TryAnalyzeDownloadAsync(string apkUrl, CancellationToken ct)
+    {
+        var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
+        AnalyzedApk? result = null;
+        try
+        {
+            await DownloadAsync(apkUrl, tempApk, ct);
+
+            BadgingInfo badging;
+            try
+            {
+                badging = BadgingParser.Parse(await aapt2.DumpBadgingAsync(tempApk, ct));
+            }
+            catch (Exception ex) when (ex is Aapt2Exception or BadgingParseException)
+            {
+                return null;
+            }
+
+            string fileSha256;
+            long fileSize;
+            try
+            {
+                using var sha = SHA256.Create();
+                await using (var stream = File.OpenRead(tempApk))
+                {
+                    fileSize = stream.Length;
+                    fileSha256 = Convert.ToHexStringLower(await sha.ComputeHashAsync(stream, ct));
+                }
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+
+            result = new AnalyzedApk(
+                tempApk,
+                badging,
+                fileSha256,
+                fileSize,
+                await TryExtractSignersAsync(tempApk, ct));
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+        finally
+        {
+            // The success path owns the file via AnalyzedApk disposal.
+            if (result is null)
+            {
+                try { File.Delete(tempApk); } catch { /* best effort */ }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Best-effort signer fingerprints (empty when apksigner is missing, Java
+    /// is absent, or the APK is unsigned). Never fails enrichment.
+    /// </summary>
+    private async Task<IReadOnlyList<SignerCertificates>> TryExtractSignersAsync(string apkPath, CancellationToken ct)
+    {
+        try
+        {
+            return ApkSignerParser.Parse(await signer.PrintCertsAsync(apkPath, ct));
+        }
+        catch (Exception ex) when (ex is ApkSignerException or ApkSignerParseException)
+        {
+            return [];
+        }
+    }
+
+    private async Task WriteIconFileAsync(ProcessedIcon icon, CancellationToken ct)
+    {
+        var path = Path.Combine(options.IconStorePath, $"{icon.Sha256}.png");
+        if (!File.Exists(path))
+        {
+            Directory.CreateDirectory(options.IconStorePath);
+            await File.WriteAllBytesAsync(path, icon.Png, ct);
+        }
+    }
+
+    private bool IconFileExists(string sha256) =>
+        File.Exists(Path.Combine(options.IconStorePath, $"{sha256}.png"));
+
+    private async Task DeleteIconIfOrphanedAsync(App app, string? oldIcon, CancellationToken ct)
+    {
+        if (oldIcon is null || oldIcon == app.IconHash)
+        {
+            return;
+        }
+
+        // Local first: the M6 fast loop enriches a batch before saving, so
+        // other apps may reference the hash only in the change tracker.
+        var stillUsedLocal = db.Apps.Local.Any(a =>
+            a.Id != app.Id && a.IconHash == oldIcon && db.Entry(a).State != EntityState.Deleted);
+        var stillUsed = stillUsedLocal
+            || await db.Apps.AnyAsync(a => a.Id != app.Id && a.IconHash == oldIcon, ct);
+        if (!stillUsed)
+        {
+            // Warning on purpose: mass disappearance of icon files once went
+            // unnoticed because deletes are silent; the log is the audit trail.
+            log?.LogWarning("Deleting orphaned icon file {IconHash}", oldIcon);
+            try { File.Delete(Path.Combine(options.IconStorePath, $"{oldIcon}.png")); }
+            catch { /* stale file is harmless; next deploy wipes nothing, icons are content-addressed */ }
+        }
+    }
+
+    private static EnrichResult Fail(App app, DateTimeOffset now, string message)
+    {
+        app.LastCheckedAt = now;
+        app.LastError = message.Length > 500 ? message[..500] + "…" : message;
+        return new EnrichResult(EnrichOutcome.Failed, app.LastError);
+    }
+}

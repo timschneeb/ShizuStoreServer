@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ShizuAppStoreServer.Core/ShizuAppStoreServer.Core.csproj" />
+    <Project Path="src/ShizuAppStoreServer/ShizuAppStoreServer.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ShizuAppStoreServer.Core.Tests/ShizuAppStoreServer.Core.Tests.csproj" />
+    <Project Path="tests/ShizuAppStoreServer.Web.Tests/ShizuAppStoreServer.Web.Tests.csproj" />
+  </Folder>
+</Solution>

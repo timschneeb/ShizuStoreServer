@@ -1,0 +1,138 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using ShizuAppStoreServer.Api;
+
+namespace ShizuAppStoreServer.Web.Tests;
+
+public sealed class IconsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiFactory>
+{
+    private const string Sha = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    [Fact]
+    public async Task ServesPngWithImmutableCache()
+    {
+        var bytes = Convert.FromHexString("89504E470D0A1A0A"); // PNG magic, body irrelevant
+        await File.WriteAllBytesAsync(Path.Combine(factory.IconDir, Sha + ".png"), bytes);
+
+        var response = await factory.NewClient().GetAsync($"/icons/{Sha}.png");
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.OK, $"{response.StatusCode}: {body} (dir={factory.IconDir})");
+        Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
+        Assert.Contains("immutable", response.Headers.CacheControl?.ToString());
+    }
+
+    [Fact]
+    public async Task MalformedHashIs400AndMissingFileIs404()
+    {
+        var client = factory.NewClient();
+
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.GetAsync("/icons/not-hex-at-all.png")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.GetAsync("/icons/abc.png")).StatusCode);
+
+        var missing = new string('0', 64);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.GetAsync($"/icons/{missing}.png")).StatusCode);
+    }
+}
+
+public sealed class AdminTests(ShizuApiFactory factory) : IClassFixture<ShizuApiFactory>
+{
+    private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
+    private const string Secret = "test-admin-secret";
+
+    private static string Sign(string body, string secret)
+    {
+        var hash = HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(body));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static StringContent Body(string json = """{"reason":"webhook-test"}""") =>
+        new(json, Encoding.UTF8, "application/json");
+
+    [Fact]
+    public async Task ValidSignatureQueuesRequest()
+    {
+        await factory.ResetAsync(_ => { });
+        var client = factory.NewClient();
+        const string json = """{"reason":"webhook-test"}""";
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
+        request.Headers.Add("X-Shizu-Signature", Sign(json, Secret));
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var accepted = (await response.Content.ReadFromJsonAsync<SyncAcceptedDto>(Json))!;
+        Assert.True(accepted.Queued);
+        await factory.QueryAsync(async db =>
+        {
+            var row = await db.SyncRequests.SingleAsync();
+            Assert.Equal("webhook-test", row.Reason);
+            Assert.False(row.Processed);
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task MissingOrWrongSignatureIs401()
+    {
+        var client = factory.NewClient();
+
+        var missing = await client.PostAsync("/v1/admin/sync", Body());
+        Assert.Equal(HttpStatusCode.Unauthorized, missing.StatusCode);
+
+        const string json = """{"reason":"x"}""";
+        var wrong = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
+        wrong.Headers.Add("X-Shizu-Signature", Sign(json, "other-secret"));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(wrong)).StatusCode);
+
+        var garbage = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
+        garbage.Headers.Add("X-Shizu-Signature", "not-hex!!");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(garbage)).StatusCode);
+    }
+
+    [Fact]
+    public async Task NoSecretConfiguredIs503()
+    {
+        using var unconfigured = new ShizuApiFactory(100_000, adminSecret: null);
+        var client = unconfigured.NewClient();
+        const string json = """{"reason":"x"}""";
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
+        request.Headers.Add("X-Shizu-Signature", Sign(json, Secret));
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+}
+
+/// <summary>Rate limiting with its own low-limit host (3 req/min).</summary>
+public sealed class RateLimitTests : IClassFixture<ShizuApiFactory>, IDisposable
+{
+    private readonly ShizuApiFactory _factory = new(3, "test-admin-secret");
+
+    [Fact]
+    public async Task ExceedingLimitReturns429()
+    {
+        // No seed rows needed, but ResetAsync creates the schema (fresh
+        // :memory: SQLite has no tables until EnsureCreated runs).
+        await _factory.ResetAsync(_ => { });
+        var client = _factory.NewClient();
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/v1/meta")).StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.TooManyRequests,
+            (await client.GetAsync("/v1/meta")).StatusCode);
+    }
+
+    public void Dispose() => _factory.Dispose();
+}

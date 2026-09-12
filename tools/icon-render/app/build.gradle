@@ -1,0 +1,40 @@
+plugins {
+    id("com.android.library")
+    id("app.cash.paparazzi")
+}
+
+android {
+    namespace = "iconrender"
+    compileSdk = 35
+
+    defaultConfig {
+        minSdk = 26
+    }
+
+    // APK staging dir passed per render (-PstagedRes=...). Holds text-XML
+    // drawables plus copied rasters under res/drawable(-nodpi).
+    def staged = findProperty("stagedRes")
+    if (staged != null && !staged.toString().isEmpty()) {
+        sourceSets {
+            main {
+                res.srcDirs += staged.toString()
+            }
+        }
+    }
+}
+
+tasks.withType(Test).configureEach {
+    systemProperty "iconName", findProperty("iconName") ?: "spike_vector"
+    systemProperty "iconPx", findProperty("iconPx") ?: "432"
+    // Exact-size PNG path written by the test itself; defaults empty (no
+    // direct write) so plain Paparazzi snapshot runs keep working.
+    systemProperty "iconOut", findProperty("out") ?: ""
+    // Batch manifest (-Pbatch=...) for renderIconBatch; empty in single mode.
+    systemProperty "iconBatch", findProperty("batch") ?: ""
+    // Staged res root, so the test can read adaptive-icon layer refs
+    // straight from the text XML (LayoutLib getXml returns null for them).
+    systemProperty "iconResDir", findProperty("stagedRes") ?: ""
+    testLogging {
+        showStandardStreams = true
+    }
+}
