@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text.Json.Nodes;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Sources;
@@ -146,6 +147,138 @@ public sealed class SourcesTests
     }
 
     [Fact]
+    public async Task SumsDownloadCountsAcrossReleases()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonArray(
+                new JsonObject
+                {
+                    ["tag_name"] = "v2",
+                    ["draft"] = false,
+                    ["prerelease"] = false,
+                    ["assets"] = new JsonArray(
+                        new JsonObject { ["name"] = "app.apk", ["download_count"] = 40 },
+                        new JsonObject { ["name"] = "app.apk.asc", ["download_count"] = 2 }),
+                },
+                new JsonObject
+                {
+                    ["tag_name"] = "v1",
+                    ["draft"] = false,
+                    ["prerelease"] = false,
+                    ["assets"] = new JsonArray(
+                        new JsonObject { ["name"] = "app.apk", ["download_count"] = 5 }),
+                },
+                new JsonObject
+                {
+                    ["tag_name"] = "v0-draft",
+                    ["draft"] = true,
+                    ["prerelease"] = false,
+                    ["assets"] = new JsonArray(
+                        new JsonObject { ["name"] = "app.apk", ["download_count"] = 1000 }),
+                }).ToJsonString()),
+        });
+
+        var release = (await Client(stub).GetLatestReleaseAsync("o", "r", null))!;
+        Assert.Equal(47, release.TotalDownloads);
+    }
+
+    [Fact]
+    public async Task ReadsRepoStats()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"stargazers_count":4242,"owner":{"login":"octo","html_url":"https://github.com/octo"}}"""),
+        });
+
+        var stats = (await Client(stub).GetRepoStatsAsync("o", "r"))!;
+        Assert.Equal(4242, stats.Stars);
+        Assert.Equal("octo", stats.OwnerLogin);
+        Assert.Equal("https://github.com/octo", stats.OwnerUrl);
+    }
+
+    [Fact]
+    public async Task RepoStatsFailSoftToNull()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.Forbidden));
+        Assert.Null(await Client(stub).GetRepoStatsAsync("o", "r"));
+    }
+
+    [Fact]
+    public async Task ReadsReadmeMarkdown()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("# Hi\n\n```kt\nval x = 1\n```\n"),
+        });
+
+        Assert.Equal(
+            "# Hi\n\n```kt\nval x = 1\n```\n",
+            await Client(stub).GetReadmeMarkdownAsync("o", "r"));
+    }
+
+    [Fact]
+    public async Task ReadmeFailsSoftToNull()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        Assert.Null(await Client(stub).GetReadmeMarkdownAsync("o", "r"));
+    }
+
+    [Fact]
+    public async Task ReadsIzzyRollingDownloads()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"com.example":4242,"top.other":7}"""),
+        });
+
+        var stats = await new IzzyStatsClient(new HttpClient(stub)).GetRollingYearAsync(null);
+        Assert.Equal(4242, stats!.Value.Counts["com.example"]);
+    }
+
+    [Fact]
+    public async Task IzzyStatsNullOnNotModified()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotModified));
+        Assert.Null(await new IzzyStatsClient(new HttpClient(stub)).GetRollingYearAsync("\"etag\""));
+    }
+
+    [Fact]
+    public async Task ReplaysWeakIzzyEtag()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotModified));
+        Assert.Null(await new IzzyStatsClient(new HttpClient(stub)).GetRollingYearAsync("W/\"weak-2\""));
+
+        var request = Assert.Single(stub.Requests);
+        Assert.Contains("W/\"weak-2\"", request.Headers.IfNoneMatch.ToString());
+    }
+
+    [Fact]
+    public async Task IzzyStatsProviderRevalidatesAndCaches()
+    {
+        var stub = new StubHandler(request =>
+        {
+            if (request.Headers.IfNoneMatch.Count > 0)
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotModified);
+            }
+
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"com.example":5}"""),
+            };
+            response.Headers.ETag = new EntityTagHeaderValue("\"stats-etag\"");
+            return response;
+        });
+        var provider = new IzzyStatsProvider(new IzzyStatsClient(new HttpClient(stub)));
+
+        Assert.Equal(5, await provider.GetDownloadsAsync("com.example"));
+        Assert.Equal(5, await provider.GetDownloadsAsync("com.example"));
+        Assert.Null(await provider.GetDownloadsAsync("com.absent"));
+    }
+
+    [Fact]
     public async Task SendsAuthVersionAndEtagHeaders()
     {
         var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
@@ -161,6 +294,29 @@ public sealed class SourcesTests
         Assert.Contains("2022-11-28", request.Headers.GetValues("X-GitHub-Api-Version"));
         Assert.Contains("\"etag-1\"", request.Headers.IfNoneMatch.ToString());
         Assert.StartsWith("https://api.github.com/repos/o/r/releases", request.RequestUri!.ToString());
+    }
+
+    [Fact]
+    public async Task ReplaysWeakGitHubEtag()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotModified));
+        Assert.Null(await Client(stub).GetLatestReleaseAsync("o", "r", "W/\"weak-1\""));
+
+        var request = Assert.Single(stub.Requests);
+        Assert.Contains("W/\"weak-1\"", request.Headers.IfNoneMatch.ToString());
+    }
+
+    [Fact]
+    public async Task IgnoresMalformedEtag()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(ReleasesJson()),
+        });
+        await Client(stub).GetLatestReleaseAsync("o", "r", "not a valid tag");
+
+        var request = Assert.Single(stub.Requests);
+        Assert.Empty(request.Headers.IfNoneMatch);
     }
 
     [Fact]
@@ -656,6 +812,51 @@ public sealed class SourcesTests
         var ex = await Assert.ThrowsAsync<PlayStoreException>(
             () => PlayClient(stub).GetIconUrlAsync("com.example.app"));
         Assert.Contains("404", ex.Message);
+    }
+
+    [Fact]
+    public async Task PlayClientParsesAppDetails()
+    {
+        const string html = """
+            <html><body>
+            <meta property="og:image" content="https://play-lh.googleusercontent.com/icon=s0-br30">
+            <h1><span class="AfwdI" itemprop="name">HyperOS 5G Switcher</span></h1>
+            <div class="tv4jIf"><div class="Vbfug auoIOc"><a href="/store/apps/dev?id=7220530116384657977"><span>MeowBit</span></a></div></div>
+            <div class="bARER" data-g-id="description" inert>NOTE: This app only supports HyperOS &amp; MIUI system.<br><br>1. Add the toggle</div>
+            <script>var data = {"141":[[["2.6.0-new"]]],"146":[["Jul 22, 2026",[1784700806]]]};</script>
+            </body></html>
+            """;
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(html),
+        });
+
+        var details = await PlayClient(stub).GetAppDetailsAsync("com.example.app");
+
+        Assert.NotNull(details);
+        Assert.Equal("HyperOS 5G Switcher", details!.Name);
+        Assert.Equal("MeowBit", details.DeveloperName);
+        Assert.Equal("7220530116384657977", details.DeveloperId);
+        Assert.Equal(
+            "https://play.google.com/store/apps/dev?id=7220530116384657977",
+            details.DeveloperUrl);
+        Assert.Equal("2.6.0-new", details.VersionName);
+        Assert.Equal("https://play-lh.googleusercontent.com/icon=s0-br30", details.IconUrl);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-22T00:00:00Z"), details.UpdatedAt);
+        Assert.Equal(
+            "NOTE: This app only supports HyperOS & MIUI system.\n\n1. Add the toggle",
+            details.FullDescription);
+    }
+
+    [Fact]
+    public async Task PlayClientDetailsReturnNullOnPlainPage()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<html><head></head></html>"),
+        });
+
+        Assert.Null(await PlayClient(stub).GetAppDetailsAsync("com.example.app"));
     }
 
     private static string GitCodeReleasesJson() => new JsonArray(

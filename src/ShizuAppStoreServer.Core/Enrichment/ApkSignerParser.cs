@@ -12,7 +12,7 @@ public sealed class ApkSignerParseException(string message) : Exception(message)
 /// Parses <c>apksigner verify --print-certs</c> output. Collects every
 /// <c>Signer #N certificate … digest:</c> line (key rotation yields several
 /// signers); digests are normalized via <see cref="CertFingerprint"/>.
-/// Older build-tools print SHA-256 + SHA-1 only — MD5 is optional per signer.
+/// Older build-tools print SHA-256 + SHA-1 only; MD5 is optional per signer.
 /// </summary>
 public static partial class ApkSignerParser
 {

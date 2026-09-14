@@ -59,7 +59,7 @@ public sealed record PrepareIconResult(
 /// mirror gitcode.com/bigmolihuan/hlbmerge_flutter). Play-sole-source apps are
 /// excluded unless the operator override flag is set. Failures record
 /// <c>last_error</c> and keep previous good values. Does not call
-/// <c>SaveChanges</c> — the caller batches (fast loop in M6, tests).
+/// <c>SaveChanges</c>, the caller batches (fast loop in M6, tests).
 /// </summary>
 public sealed class AppEnricher(
     IGitHubReleaseClient github,
@@ -74,6 +74,7 @@ public sealed class AppEnricher(
     IInstafelReleaseClient? instafel = null,
     IGitCodeReleaseClient? gitcode = null,
     IPlayStoreClient? play = null,
+    IzzyStatsProvider? izzyStats = null,
     ILogger<AppEnricher>? log = null)
 {
     // Special-case release homes (user calls): the GitHub projects below
@@ -84,6 +85,23 @@ public sealed class AppEnricher(
     private const string HlbmergeGitHubRepo = "hlbmerge_flutter";
     private const string HlbmergeGitCodeOwner = "bigmolihuan";
     private const string HlbmergeGitCodeRepo = "hlbmerge_flutter";
+
+    // READMEs are unbounded; the full-description screen only needs a sane
+    // excerpt, so cap what we persist and send.
+    private const int MaxFullDescriptionChars = 200_000;
+
+    // GitHub's old rendered README HTML is recognizable by its wrapper tags; a
+    // refetch replaces it with markdown. The markers are rendered-only, so raw
+    // markdown (which may embed <p align="...">) never matches and is not
+    // refetched on every pass. Play descriptions arrive as plain text and never
+    // match either.
+    private static bool NeedsReadmeRefresh(string? value) =>
+        string.IsNullOrEmpty(value)
+        || value.Contains("id=\"readme\"", StringComparison.Ordinal)
+        || value.Contains("data-path=", StringComparison.Ordinal)
+        || value.Contains("class=\"markdown-body\"", StringComparison.Ordinal)
+        || value.Contains("class=\"markdown-heading\"", StringComparison.Ordinal)
+        || value.Contains("class=\"highlight", StringComparison.Ordinal);
 
     public async Task<EnrichResult> EnrichAsync(
         App app, DateTimeOffset now, CancellationToken ct = default, bool force = false)
@@ -117,7 +135,7 @@ public sealed class AppEnricher(
         {
             // Timeout (an inner HttpClient/linked-cts fired while the outer
             // token lives): a failed upstream, not a shutdown. Record it so
-            // backoff applies and the cause stays visible — an unrecorded
+            // backoff applies and the cause stays visible, an unrecorded
             // Failed once hid a whole pass (live 2026-09-12). Genuine
             // cancellation still propagates to abort the pass.
             return Fail(app, now, "Upstream timed out.");
@@ -224,12 +242,38 @@ public sealed class AppEnricher(
         try
         {
             var latest = await github.GetLatestReleaseAsync(owner, repo, app.EnrichEtag, ct);
+
+            // Popularity and developer details are best-effort and refreshed
+            // even on a 304, so they stay current without a new release.
+            var stats = await github.GetRepoStatsAsync(owner, repo, ct);
+            if (stats?.Stars is { } stars)
+            {
+                app.Stars = stars;
+            }
+
+            // The repo owner is a stable developer identity; fall back to the
+            // parsed owner when the stats call failed.
+            var ownerLogin = stats?.OwnerLogin ?? owner;
+            app.AuthorName = ownerLogin;
+            app.AuthorUrl = stats?.OwnerUrl ?? $"https://github.com/{ownerLogin}";
+            app.AuthorKey = $"github:{ownerLogin.ToLowerInvariant()}";
+
+            // Raw markdown, not rendered HTML: the client renders markdown.
+            if (NeedsReadmeRefresh(app.FullDescription)
+                && await github.GetReadmeMarkdownAsync(owner, repo, ct) is { Length: > 0 } readme)
+            {
+                app.FullDescription = readme.Length > MaxFullDescriptionChars
+                    ? readme[..MaxFullDescriptionChars]
+                    : readme;
+            }
+
             if (latest is null)
             {
                 app.LastCheckedAt = now;
                 return new EnrichResult(EnrichOutcome.UpToDate, null);
             }
 
+            app.DownloadTotal = latest.TotalDownloads;
             release = latest;
         }
         catch (GitHubApiException ex)
@@ -242,6 +286,11 @@ public sealed class AppEnricher(
                 return rescued;
             }
 
+            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
+            {
+                return play;
+            }
+
             return Fail(app, now, $"GitHub: {ex.Message}");
         }
 
@@ -251,7 +300,7 @@ public sealed class AppEnricher(
             // Some projects attach only a zip with the APK inside.
             var zip = ApkAssetSelector.PickZip(release.Assets, a => a.Name, a => a.Size);
             if (zip is not null
-                && await TryEnrichFromZipAsync(app, zip.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct) is { } zipped)
+                && await TryEnrichFromZipAsync(app, zip.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct, releasedAt: release.PublishedAt) is { } zipped)
             {
                 return zipped;
             }
@@ -261,10 +310,15 @@ public sealed class AppEnricher(
                 return rescued;
             }
 
+            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
+            {
+                return play;
+            }
+
             return Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
         }
 
-        return await EnrichFromApkAsync(app, asset.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct);
+        return await EnrichFromApkAsync(app, asset.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct, release.PublishedAt);
     }
 
     /// <summary>
@@ -345,6 +399,8 @@ public sealed class AppEnricher(
     private async Task<EnrichResult> EnrichFromGitLabAsync(
         App app, string projectPath, DateTimeOffset now, CancellationToken ct)
     {
+        ApplyGitLabAuthor(app, projectPath);
+
         GitLabRelease release;
         try
         {
@@ -365,6 +421,11 @@ public sealed class AppEnricher(
                 return rescued;
             }
 
+            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
+            {
+                return play;
+            }
+
             return Fail(app, now, $"GitLab: {ex.Message}");
         }
 
@@ -374,6 +435,11 @@ public sealed class AppEnricher(
             if (await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
             {
                 return rescued;
+            }
+
+            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
+            {
+                return play;
             }
 
             return Fail(app, now, $"GitLab release {release.TagName} of {projectPath} has no .apk asset link.");
@@ -388,7 +454,24 @@ public sealed class AppEnricher(
             return new EnrichResult(EnrichOutcome.UpToDate, null);
         }
 
-        return await EnrichFromApkAsync(app, link.Url, release.Etag, SourceKind.GitLab, now, ct);
+        return await EnrichFromApkAsync(app, link.Url, release.Etag, SourceKind.GitLab, now, ct, release.ReleasedAt);
+    }
+
+    /// <summary>
+    /// The top-level GitLab namespace (group or user) is a stable developer
+    /// identity, so it can be read from the project path without a call.
+    /// </summary>
+    private static void ApplyGitLabAuthor(App app, string projectPath)
+    {
+        var group = projectPath.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        if (string.IsNullOrEmpty(group))
+        {
+            return;
+        }
+
+        app.AuthorName = group;
+        app.AuthorUrl = $"https://gitlab.com/{group}";
+        app.AuthorKey = $"gitlab:{group.ToLowerInvariant()}";
     }
 
     /// <summary>
@@ -451,11 +534,24 @@ public sealed class AppEnricher(
         try
         {
             var iconUrl = await play.GetIconUrlAsync(packageId, ct);
-            if (iconUrl is null)
-            {
-                return false;
-            }
+            return iconUrl is not null && await TryAdoptPlayIconAsync(app, iconUrl, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogDebug(ex, "Play icon fetch failed for {Slug}.", app.Slug);
+            return false;
+        }
+    }
 
+    /// <summary>
+    /// Downloads and adopts an already resolved Play icon URL; shared by the
+    /// plain icon lookup and the richer details scrape so the page is fetched
+    /// only once per enrich pass.
+    /// </summary>
+    private async Task<bool> TryAdoptPlayIconAsync(App app, string iconUrl, CancellationToken ct)
+    {
+        try
+        {
             using var response = await downloads.GetAsync(iconUrl, HttpCompletionOption.ResponseHeadersRead, ct);
             response.EnsureSuccessStatusCode();
             var bytes = await response.Content.ReadAsByteArrayAsync(ct);
@@ -633,6 +729,31 @@ public sealed class AppEnricher(
         }
     }
 
+    /// <summary>
+    /// Best-effort IzzyOnDroid rolling download count for an Izzy-primary app
+    /// (the only F-Droid-compatible repo that publishes counts). Never fails
+    /// an enrich: stats trouble leaves the previous value untouched.
+    /// </summary>
+    private async Task ApplyIzzyDownloadsAsync(App app, string packageName, CancellationToken ct)
+    {
+        if (izzyStats is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (await izzyStats.GetDownloadsAsync(packageName, ct) is { } downloads)
+            {
+                app.DownloadTotal = downloads;
+            }
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            // Popularity is best-effort; the enrich outcome must not depend on it.
+        }
+    }
+
     private async Task<EnrichResult> EnrichFromFdroidAsync(
         App app, string repoBase, string packageId, DateTimeOffset now, CancellationToken ct)
     {
@@ -661,6 +782,12 @@ public sealed class AppEnricher(
         var kind = repoBase == FdroidRepos.IzzyBase ? SourceKind.Izzy : SourceKind.FDroid;
         app.SourceKind = kind;
 
+        // f-droid.org publishes no download counts; only the Izzy repo does.
+        if (kind == SourceKind.Izzy)
+        {
+            await ApplyIzzyDownloadsAsync(app, package.PackageName, ct);
+        }
+
         var apkUrl = $"{repoBase.TrimEnd('/')}/{package.ApkName}";
         var current = await PrimaryDownloadAsync(app, ct);
         if (current is not null
@@ -676,7 +803,7 @@ public sealed class AppEnricher(
 
         // Changed version: analyze the actual APK (same quality bar as forge
         // builds). Anything wrong with the file falls back to the index-only
-        // record — except a package-name mismatch, which means the index row
+        // record, except a package-name mismatch, which means the index row
         // and the file disagree, so the old values are kept.
         var oldIcon = app.IconHash;
         using var analyzed = await TryAnalyzeDownloadAsync(apkUrl, ct);
@@ -723,6 +850,10 @@ public sealed class AppEnricher(
         app.LastError = null;
 
         await AddVersionRowAsync(app, versionCode, versionName, apkUrl, now, ct);
+
+        // F-Droid publishes no release dates, so VersionUpdatedAt stays unknown
+        // and the app sorts last under "recently updated".
+
         await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
         await ResolveForgeCandidateFromSourceAsync(app, package.SourceUrl, now, ct);
         if (kind == SourceKind.Izzy)
@@ -767,7 +898,7 @@ public sealed class AppEnricher(
 
         if (package is null)
         {
-            RemoveDownloadAsync(app, SourceKind.FDroid, ct);
+            await RemoveDownloadAsync(app, SourceKind.FDroid, ct);
             await RecomputePrimaryAsync(app, ct);
             return;
         }
@@ -877,7 +1008,7 @@ public sealed class AppEnricher(
 
     /// <summary>
     /// One analyzed APK download: badging + file hash/size + (best-effort)
-    /// signer certs. Owns the temp file — dispose when done (icon extraction
+    /// signer certs. Owns the temp file; dispose when done (icon extraction
     /// via <c>IconProcessor</c> happens first, on <see cref="ApkPath"/>).
     /// </summary>
     private sealed record AnalyzedApk(
@@ -894,8 +1025,9 @@ public sealed class AppEnricher(
     }
 
     private Task<EnrichResult> EnrichFromApkAsync(
-        App app, string apkUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct) =>
-        RunArtifactAsync(app, apkUrl, archiveEntry: null, etag, lockSource, now, ct);
+        App app, string apkUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
+        DateTimeOffset? releasedAt = null) =>
+        RunArtifactAsync(app, apkUrl, archiveEntry: null, etag, lockSource, now, ct, releasedAt: releasedAt);
 
     /// <summary>
     /// Some releases attach only a zip with the APK inside (e.g.
@@ -908,7 +1040,7 @@ public sealed class AppEnricher(
     /// </summary>
     private async Task<EnrichResult?> TryEnrichFromZipAsync(
         App app, string zipUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
-        bool asPrimary = true)
+        bool asPrimary = true, DateTimeOffset? releasedAt = null)
     {
         var tempZip = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.zip");
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
@@ -923,7 +1055,7 @@ public sealed class AppEnricher(
             }
 
             entry.ExtractToFile(tempApk, overwrite: true);
-            return await AnalyzeTempApkAsync(app, zipUrl, entry.FullName, tempZip, tempApk, etag, lockSource, now, ct, asPrimary);
+            return await AnalyzeTempApkAsync(app, zipUrl, entry.FullName, tempZip, tempApk, etag, lockSource, now, ct, asPrimary, releasedAt);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -940,13 +1072,13 @@ public sealed class AppEnricher(
 
     private async Task<EnrichResult> RunArtifactAsync(
         App app, string url, string? archiveEntry, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
-        bool asPrimary = true)
+        bool asPrimary = true, DateTimeOffset? releasedAt = null)
     {
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
         try
         {
             await DownloadAsync(url, tempApk, ct);
-            return await AnalyzeTempApkAsync(app, url, archiveEntry, tempApk, tempApk, etag, lockSource, now, ct, asPrimary);
+            return await AnalyzeTempApkAsync(app, url, archiveEntry, tempApk, tempApk, etag, lockSource, now, ct, asPrimary, releasedAt);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -972,7 +1104,8 @@ public sealed class AppEnricher(
     /// </summary>
     private async Task<EnrichResult> AnalyzeTempApkAsync(
         App app, string artifactUrl, string? archiveEntry, string artifactPath, string apkPath,
-        string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct, bool asPrimary = true)
+        string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct, bool asPrimary = true,
+        DateTimeOffset? releasedAt = null)
     {
         BadgingInfo badging;
         try
@@ -1030,6 +1163,7 @@ public sealed class AppEnricher(
 
         var oldIcon = app.IconHash;
         app.PackageName = badging.PackageName;
+        app.Permissions = badging.Permissions.ToList();
         app.IconHash = icon.Sha256;
         app.IconAdaptive = icon.Adaptive;
         app.Availability = Availability.DirectApk;
@@ -1039,6 +1173,15 @@ public sealed class AppEnricher(
         app.LastError = null;
 
         await AddVersionRowAsync(app, badging.VersionCode, badging.VersionName, artifactUrl, now, ct);
+
+        // Only a real release date moves the app up "recently updated"; metadata
+        // refreshes never touch this, and sources without dates stay unknown.
+        if (releasedAt is not null &&
+            (app.VersionUpdatedAt is null || releasedAt > app.VersionUpdatedAt))
+        {
+            app.VersionUpdatedAt = releasedAt;
+        }
+
         await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
         return new EnrichResult(EnrichOutcome.Enriched, null);
     }
@@ -1199,8 +1342,17 @@ public sealed class AppEnricher(
         var kind = SourceClassifier.Classify(app.Url);
         app.SourceKind = kind;
 
+        // Play listings carry the only metadata external-only apps have.
+        var playDetails = kind == SourceKind.Play
+            ? await FetchPlayDetailsAsync(app, ct)
+            : null;
+        ApplyPlayDetails(app, playDetails);
+
         // The real Play listing icon beats a generated avatar when linked.
-        if (!await TryPlayIconAsync(app, now, ct))
+        var hasIcon = playDetails?.IconUrl is { Length: > 0 } remoteIcon
+            ? await TryAdoptPlayIconAsync(app, remoteIcon, ct)
+            : await TryPlayIconAsync(app, now, ct);
+        if (!hasIcon)
         {
             var avatar = LetterAvatarGenerator.Generate(app.Name);
             await WriteIconFileAsync(avatar, ct);
@@ -1211,7 +1363,7 @@ public sealed class AppEnricher(
         if (kind == SourceKind.Play && !HasAltSource(app) && !app.ExcludeOverride)
         {
             app.Availability = Availability.Excluded;
-            app.ExcludedReason = "Play Store is the only source; no APK available.";
+            app.ExcludedReason = "Play Store is the only source; no APK available, no source code link";
             app.LastCheckedAt = now;
             app.LastError = null;
             return new EnrichResult(EnrichOutcome.Excluded, null);
@@ -1237,6 +1389,92 @@ public sealed class AppEnricher(
     private static bool HasAltSource(App app) =>
         !string.IsNullOrWhiteSpace(app.SourceUrl)
         && SourceClassifier.Classify(app.SourceUrl) != SourceKind.Play;
+
+    /// <summary>
+    /// Resolves the linked Play listing and returns its scraped details.
+    /// Best effort: a missing page or an unparseable package id leaves the
+    /// app untouched, so a Play redirect can still fall back to the avatar.
+    /// </summary>
+    private async Task<PlayAppDetails?> FetchPlayDetailsAsync(App app, CancellationToken ct)
+    {
+        if (play is null)
+        {
+            return null;
+        }
+
+        var packageId = string.Empty;
+        if (!SourceClassifier.TryParsePlayPackage(app.Url, out packageId)
+            && !SourceClassifier.TryParsePlayPackage(app.SourceUrl, out packageId)
+            && !SourceClassifier.TryParsePlayPackage(app.StoreUrl, out packageId))
+        {
+            return null;
+        }
+
+        // The listing URL is the authoritative package identity for Play apps.
+        app.PackageName = packageId;
+
+        try
+        {
+            return await play.GetAppDetailsAsync(packageId, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogDebug(ex, "Play details fetch failed for {Slug}.", app.Slug);
+            return null;
+        }
+    }
+
+    private static void ApplyPlayDetails(App app, PlayAppDetails? details)
+    {
+        if (details is null)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(details.DeveloperName))
+        {
+            app.AuthorName = details.DeveloperName;
+            app.AuthorUrl = details.DeveloperUrl;
+            app.AuthorKey = string.IsNullOrWhiteSpace(details.DeveloperId)
+                ? $"play:{details.DeveloperName.ToLowerInvariant()}"
+                : $"play:{details.DeveloperId}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(details.VersionName))
+        {
+            app.VersionName = details.VersionName;
+        }
+
+        // Play publishes a real last-update date, unlike a detection time.
+        if (details.UpdatedAt is { } updated
+            && (app.VersionUpdatedAt is null || updated > app.VersionUpdatedAt))
+        {
+            app.VersionUpdatedAt = updated;
+        }
+
+        if (!string.IsNullOrWhiteSpace(details.FullDescription))
+        {
+            app.FullDescription = details.FullDescription.Length > MaxFullDescriptionChars
+                ? details.FullDescription[..MaxFullDescriptionChars]
+                : details.FullDescription;
+        }
+    }
+
+    /// <summary>
+    /// A source repo without an APK is not a dead end when the list entry
+    /// points at a Play listing: run the normal source fallback so the app
+    /// becomes a Play redirect instead of a bare link.
+    /// </summary>
+    private async Task<EnrichResult?> TryPlayRedirectFallbackAsync(
+        App app, DateTimeOffset now, CancellationToken ct)
+    {
+        if (SourceClassifier.Classify(app.Url) != SourceKind.Play)
+        {
+            return null;
+        }
+
+        return await EnrichFallbackAsync(app, now, ct);
+    }
 
     private async Task<ProcessedIcon> MirrorIconAsync(
         string? iconFile, string repoBase, string appName, CancellationToken ct)
@@ -1264,7 +1502,7 @@ public sealed class AppEnricher(
                         return icon;
                     }
 
-                    break; // Got bytes but undecodable — the legacy size won't decode either.
+                    break; // Got bytes but undecodable; the legacy size won't decode either.
                 }
                 catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
                 {
@@ -1401,7 +1639,7 @@ public sealed class AppEnricher(
             return;
         }
 
-        // Local first: the M6 fast loop enriches a batch before saving, so
+        // Local first: fast loop enriches a batch before saving, so
         // other apps may reference the hash only in the change tracker.
         var stillUsedLocal = db.Apps.Local.Any(a =>
             a.Id != app.Id && a.IconHash == oldIcon && db.Entry(a).State != EntityState.Deleted);

@@ -2,12 +2,10 @@ namespace ShizuAppStoreServer.Core.Enrichment;
 
 /// <summary>
 /// Parallel fan-out over items, bounded by a <see cref="SemaphoreSlim"/>
-/// (PLAN §5: max ~4 parallel enrichments). Order-preserving, fault-isolating:
+/// Order-preserving, fault-isolating:
 /// one item's crash becomes a <c>Failed</c> result, never a lost batch.
 /// The M6 hosted service fans out over app <em>ids</em> (entities can't
 /// cross the per-item DI scopes the loop enriches in); tests pass lambdas.
-/// The tuple element is still named <c>App</c> for history (it used to be
-/// <c>App</c>-typed before the M6 generalization).
 /// </summary>
 public static class BulkEnricher
 {

@@ -1,6 +1,6 @@
 namespace ShizuAppStoreServer.Api;
 
-/// <summary>Public-API behavior knobs (config section <c>Api</c>).</summary>
+/// <summary>Public-API behavior settings (config section <c>Api</c>).</summary>
 public sealed class ApiOptions
 {
     /// <summary>Fixed-window rate limit, requests/minute/client IP.</summary>

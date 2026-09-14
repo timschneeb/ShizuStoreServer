@@ -27,10 +27,17 @@ public static class Seeds
         Availability availability = Availability.LinkOnly,
         DateTimeOffset? addedAt = null,
         DateTimeOffset? updatedAt = null,
+        DateTimeOffset? listUpdatedAt = null,
         bool recommended = false,
         string? license = null,
         string? packageName = null,
-        App? parent = null) => new()
+        App? parent = null,
+        string? authorKey = null,
+        string? authorName = null,
+        string? authorUrl = null,
+        List<string>? permissions = null,
+        string? fullDescription = null,
+        string? versionName = null) => new()
         {
             Slug = slug,
             Name = name ?? slug,
@@ -42,9 +49,16 @@ public static class Seeds
             Availability = availability,
             IsRecommended = recommended,
             PackageName = packageName,
+            AuthorKey = authorKey,
+            AuthorName = authorName,
+            AuthorUrl = authorUrl,
+            Permissions = permissions ?? [],
+            FullDescription = fullDescription,
+            VersionName = versionName,
             Category = category,
             Parent = parent,
             AddedAt = addedAt ?? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            ListUpdatedAt = listUpdatedAt,
             UpdatedAt = updatedAt ?? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
         };
 }

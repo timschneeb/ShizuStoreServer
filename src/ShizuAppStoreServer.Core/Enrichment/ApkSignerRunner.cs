@@ -13,8 +13,7 @@ public interface IApkSignerRunner
 }
 
 /// <summary>
-/// Runs the <c>apksigner</c> binary from the Android SDK build-tools (needs a
-/// JRE — see <c>docs/server-setup.md</c>). Same one-shot pattern as
+/// Runs the <c>apksigner</c> binary from the Android SDK build-tools. Same one-shot pattern as
 /// <see cref="Aapt2Runner"/>; callers treat failures as best-effort (sigs
 /// stay null, enrichment still succeeds).
 /// </summary>

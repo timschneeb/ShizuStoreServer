@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 
 namespace ShizuAppStoreServer.Core.Data;
 
@@ -14,24 +15,62 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
 
     public override int SaveChanges()
     {
+        BumpUpdatedAtForSummaryChanges();
         NormalizeDateTimeOffsets();
         return base.SaveChanges();
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken ct = default)
     {
+        BumpUpdatedAtForSummaryChanges();
         NormalizeDateTimeOffsets();
         return base.SaveChangesAsync(ct);
     }
 
     /// <summary>
-    /// Npgsql writes DateTimeOffset to timestamptz only with Offset=0
-    /// (Postgres stores UTC instants, no offsets), while SQLite accepts
-    /// anything — so a stray local offset passes every test and then
-    /// crashes the production save (seen live 2026-09-12 via git-history
-    /// dates). Normalizing here loses nothing and closes the divergence
-    /// for all current and future producers at one choke point.
+    /// Icon hashes, stars, download totals, the served APK version, and the
+    /// list-change date are part of the summary clients cache and reach them
+    /// through /v1/changes, which is keyed on UpdatedAt. Enrichment rewrites
+    /// those columns without touching UpdatedAt, so bump it here for every
+    /// producer at once.
     /// </summary>
+    private void BumpUpdatedAtForSummaryChanges()
+    {
+        ChangeTracker.DetectChanges();
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var entry in ChangeTracker.Entries<App>())
+        {
+            if (entry.State != EntityState.Modified)
+            {
+                continue;
+            }
+
+            var isRelevant = entry.Property(nameof(App.IconHash)).IsModified
+                || entry.Property(nameof(App.Stars)).IsModified
+                || entry.Property(nameof(App.DownloadTotal)).IsModified
+                || entry.Property(nameof(App.VersionUpdatedAt)).IsModified
+                || entry.Property(nameof(App.ListUpdatedAt)).IsModified
+                || entry.Property(nameof(App.AuthorName)).IsModified
+                || entry.Property(nameof(App.AuthorUrl)).IsModified
+                || entry.Property(nameof(App.AuthorKey)).IsModified
+                || entry.Property(nameof(App.VersionName)).IsModified;
+            if (!isRelevant)
+            {
+                continue;
+            }
+
+            var updatedAt = entry.Property(nameof(App.UpdatedAt));
+            if (updatedAt.IsModified)
+            {
+                continue;
+            }
+
+            updatedAt.CurrentValue = now;
+            updatedAt.IsModified = true;
+        }
+    }
+    
     private void NormalizeDateTimeOffsets()
     {
         foreach (var entry in ChangeTracker.Entries())
@@ -88,7 +127,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.ParentId).HasColumnName("parent_id");
             e.HasOne(x => x.Parent).WithMany(x => x.Children).HasForeignKey(x => x.ParentId).OnDelete(DeleteBehavior.Restrict);
             e.Property(x => x.Url).HasColumnName("url").HasMaxLength(2000).IsRequired();
-            // NOTE: non-unique on purpose — the real list contains the same URL
+            // NOTE: non-unique on purpose: the real list contains the same URL
             // in several categories (e.g. fluffy, krude, AlwaysOnDisplayToggle).
             e.HasIndex(x => x.Url);
             e.Property(x => x.SourceUrl).HasColumnName("source_url").HasMaxLength(2000);
@@ -97,13 +136,37 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.ExcludedReason).HasColumnName("excluded_reason");
             e.Property(x => x.ExcludeOverride).HasColumnName("exclude_override");
             e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(256);
+            // Permissions are a plain string list; store newline-joined so the
+            // column stays readable and the schema is identical on Postgres and
+            // the SQLite test provider. The comparer makes mutations detectable.
+            e.Property(x => x.Permissions)
+                .HasColumnName("permissions")
+                .HasConversion(
+                    v => string.Join('\n', v),
+                    v => v.Length == 0
+                        ? new List<string>()
+                        : v.Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList(),
+                    new ValueComparer<List<string>>(
+                        (a, b) => a!.SequenceEqual(b!),
+                        v => v.Aggregate(0, (hash, item) => HashCode.Combine(hash, item.GetHashCode())),
+                        v => v.ToList()))
+                .IsRequired();
+            e.Property(x => x.AuthorName).HasColumnName("author_name").HasMaxLength(200);
+            e.Property(x => x.AuthorUrl).HasColumnName("author_url").HasMaxLength(2000);
+            e.Property(x => x.AuthorKey).HasColumnName("author_key").HasMaxLength(200);
+            e.Property(x => x.FullDescription).HasColumnName("full_description");
             e.Property(x => x.StoreUrl).HasColumnName("store_url").HasMaxLength(2000);
+            e.Property(x => x.VersionName).HasColumnName("version_name").HasMaxLength(200);
             e.Property(x => x.IconHash).HasColumnName("icon_hash").HasMaxLength(128);
             e.Property(x => x.IconAdaptive).HasColumnName("icon_adaptive");
+            e.Property(x => x.Stars).HasColumnName("stars");
+            e.Property(x => x.DownloadTotal).HasColumnName("download_total");
             e.Property(x => x.CategoryId).HasColumnName("category_id");
             e.HasOne(x => x.Category).WithMany(x => x.Apps).HasForeignKey(x => x.CategoryId).OnDelete(DeleteBehavior.Restrict);
             e.Property(x => x.AddedAt).HasColumnName("added_at").IsRequired();
+            e.Property(x => x.ListUpdatedAt).HasColumnName("list_updated_at");
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+            e.Property(x => x.VersionUpdatedAt).HasColumnName("version_updated_at");
             e.Property(x => x.LastCheckedAt).HasColumnName("last_checked_at");
             e.Property(x => x.LastError).HasColumnName("last_error");
             e.Property(x => x.EnrichEtag).HasColumnName("enrich_etag").HasMaxLength(256);

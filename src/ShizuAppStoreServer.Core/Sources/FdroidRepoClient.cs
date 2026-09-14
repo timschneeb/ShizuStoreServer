@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Net;
-using System.Net.Http.Headers;
 
 namespace ShizuAppStoreServer.Core.Sources;
 
@@ -19,10 +18,7 @@ public sealed class FdroidRepoClient(HttpClient http)
     {
         var url = $"{repoBase.TrimEnd('/')}/index.xml";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        if (etag is not null)
-        {
-            request.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(etag));
-        }
+        request.ApplyIfNoneMatch(etag);
 
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode == HttpStatusCode.NotModified)
@@ -61,7 +57,7 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
 
     /// <returns>
     /// Package entry (null when absent from the index) + index ETag, or
-    /// null when the index answered 304 with nothing cached — the index is
+    /// null when the index answered 304 with nothing cached, the index is
     /// then unchanged since the app's last enrich, so the caller treats the
     /// app as up-to-date.
     /// </returns>

@@ -5,7 +5,7 @@ namespace ShizuAppStoreServer.Core.Data;
 /// candidates live in <see cref="Downloads"/>; enrichment keeps identity
 /// (<c>PackageName</c>), presentation (<c>IconHash</c>) and link state
 /// (<c>Availability</c>, <c>StoreUrl</c>) on the row itself.
-/// <c>AddedAt</c>/<c>UpdatedAt</c> come from the git-history backfill (M2).
+/// <c>AddedAt</c>/<c>UpdatedAt</c> come from the git-history backfill.
 /// </summary>
 public sealed class App
 {
@@ -18,7 +18,6 @@ public sealed class App
 
     public string Description { get; set; } = string.Empty;
 
-    /// <summary>Normalized license tag (<c>Propietary</c> typo fixed by the parser).</summary>
     public string? License { get; set; }
 
     public Listing Listing { get; set; }
@@ -47,14 +46,51 @@ public sealed class App
     /// <summary>
     /// Operator override: keep a Play-sole-source app as
     /// <c>PlayRedirect</c> instead of excluding it. Never touched by the
-    /// upserter — set via admin tooling (M5/M6).
+    /// upserter, set via admin tooling.
     /// </summary>
     public bool ExcludeOverride { get; set; }
 
     /// <summary>Android package id (identity for F-Droid and Play lookups).</summary>
     public string? PackageName { get; set; }
 
+    /// <summary>
+    /// Permissions declared by the served APK (aapt2 badging), in declaration
+    /// order. Empty when unknown; extracted from the APK only, never from
+    /// F-Droid metadata.
+    /// </summary>
+    public List<string> Permissions { get; set; } = [];
+
+    /// <summary>
+    /// Display name of the source owner (GitHub login, GitLab namespace, or
+    /// F-Droid author). Shown under the app title and in the developer section.
+    /// </summary>
+    public string? AuthorName { get; set; }
+
+    /// <summary>Profile URL of the source owner, when known.</summary>
+    public string? AuthorUrl { get; set; }
+
+    /// <summary>
+    /// Stable grouping key for "more from this dev" (<c>github:owner</c>,
+    /// <c>gitlab:group</c>). Null when the owner cannot be identified
+    /// confidently; clients only show the row when it is set.
+    /// </summary>
+    public string? AuthorKey { get; set; }
+
+    /// <summary>
+    /// README markdown (or scraped plain-text Play description) for the
+    /// full-description subscreen. Server-only: sent on the detail endpoint,
+    /// never in summaries or the change feed.
+    /// </summary>
+    public string? FullDescription { get; set; }
+
     public string? StoreUrl { get; set; }
+
+    /// <summary>
+    /// Version name of an external-only listing (for example a Play build),
+    /// used when the app has no APK download to read a version from.
+    /// </summary>
+    public string? VersionName { get; set; }
+
     public string? IconHash { get; set; }
 
     /// <summary>
@@ -66,11 +102,39 @@ public sealed class App
     /// </summary>
     public bool IconAdaptive { get; set; }
 
+    /// <summary>GitHub stargazers of the source repo, for popularity sorting. Null when not GitHub.</summary>
+    public int? Stars { get; set; }
+
+    /// <summary>
+    /// Total <c>download_count</c> over the source's release assets (GitHub).
+    /// Null when unknown; refreshed whenever the release feed changes.
+    /// </summary>
+    public long? DownloadTotal { get; set; }
+
     public long CategoryId { get; set; }
     public Category? Category { get; set; }
 
     public DateTimeOffset AddedAt { get; set; }
+
+    /// <summary>
+    /// When the awesome-list entry was last added or edited (git history,
+    /// <c>[silent]</c> commits excluded). Mirrors the published changelog and
+    /// drives "recently added" ordering; never touched by enrichment.
+    /// </summary>
+    public DateTimeOffset? ListUpdatedAt { get; set; }
+
+    /// <summary>
+    /// Change clock: bumped by any summary-visible change (icon, popularity,
+    /// list metadata). Drives <c>/v1/changes</c>, not "recently updated".
+    /// </summary>
     public DateTimeOffset UpdatedAt { get; set; }
+
+    /// <summary>
+    /// Release date of the currently served APK version (detection time when
+    /// the source publishes none). Drives "recently updated" ordering and is
+    /// never touched by metadata refreshes.
+    /// </summary>
+    public DateTimeOffset? VersionUpdatedAt { get; set; }
     public DateTimeOffset? LastCheckedAt { get; set; }
     public string? LastError { get; set; }
 

@@ -40,7 +40,7 @@ public sealed record IconRefreshResult(
     public IReadOnlyList<string> Errors { get; init; } = [];
 }
 /// <summary>
-/// One list-sync pass (PLAN §7 fast loop / nightly). Scoped: resolved fresh
+/// One list-sync pass. Scoped: resolved fresh
 /// per pass by the workers, sharing one <see cref="ShizuDbContext"/> with
 /// the injected <see cref="CatalogUpserter"/>.
 /// </summary>
@@ -62,7 +62,7 @@ public sealed record IconRefreshResult(
 /// the final bookkeeping <c>SaveChanges</c> only writes request flags + the
 /// <c>sync_runs</c> row (enrichment runs in per-app scopes via
 /// <see cref="IEnrichmentRunner"/>). Never throws except on
-/// <c>OperationCanceledException</c> or an unwritable DB — failures become
+/// <c>OperationCanceledException</c> or an unwritable DB, failures become
 /// error results + error run rows.
 /// </remarks>
 public sealed class SyncService(
@@ -74,7 +74,7 @@ public sealed class SyncService(
     SyncOptions options,
     EnrichmentOptions enrichment)
 {
-    /// <summary>Exclusion reason for apps listed in <c>pages/ARCHIVED.md</c> (PLAN §0).</summary>
+    /// <summary>Exclusion reason for apps listed in <c>pages/ARCHIVED.md</c>.</summary>
     public const string ArchivedReason = "Archived in the upstream list.";
 
     private const string ReadmePath = "README.md";
@@ -125,11 +125,11 @@ public sealed class SyncService(
             }
             catch (InvalidOperationException)
             {
-                // No remote / offline — continue off local clone state.
+                // No remote / offline, continue off local clone state.
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                // Fetch timed out — same fallback.
+                // Fetch timed out, same fallback.
             }
         }
 
@@ -237,7 +237,7 @@ public sealed class SyncService(
     }
 
     /// <summary>
-    /// <c>pages/ARCHIVED.md</c> is an exclusion list (PLAN §0): entries found
+    /// <c>pages/ARCHIVED.md</c> is an exclusion list: entries found
     /// there are hidden from clients; entries that reappear upstream have the
     /// flag cleared and are forced through re-enrichment.
     /// </summary>

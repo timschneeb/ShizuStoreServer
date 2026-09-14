@@ -3,11 +3,9 @@ using ShizuAppStoreServer.Core.Sync;
 namespace ShizuAppStoreServer.Sync;
 
 /// <summary>
-/// Runs one sync pass inside the gate (shared by both workers so the logic
-/// — scope, service resolution, logging — lives in exactly one place).
+/// Runs one sync pass inside the gate (shared by both workers so the logic lives in exactly one place).
 /// Never throws except on shutdown cancellation: <see cref="SyncService"/>
-/// already converts pass failures into error results + error run rows, and
-/// anything else (e.g. DB down) is logged here.
+/// already converts pass failures into error results + error run rows, and anything else is logged here.
 /// </summary>
 public sealed class SyncPassRunner(
     IServiceScopeFactory scopes, SyncGate gate, ILogger<SyncPassRunner> logger)

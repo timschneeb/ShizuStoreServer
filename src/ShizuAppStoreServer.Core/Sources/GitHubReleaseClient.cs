@@ -6,23 +6,36 @@ using System.Text.Json.Serialization;
 namespace ShizuAppStoreServer.Core.Sources;
 
 /// <summary>One release asset from the GitHub Releases API.</summary>
-public sealed record GitHubAsset(string Name, string BrowserDownloadUrl, long Size, string? ContentType);
+public sealed record GitHubAsset(
+    string Name, string BrowserDownloadUrl, long Size, string? ContentType, long DownloadCount = 0);
 
 /// <summary>
 /// Latest release of a repo. <c>Etag</c> is the response ETag, stored
 /// on the app row for conditional requests on the next pass.
+/// <c>TotalDownloads</c> sums <c>download_count</c> over every non-draft
+/// release's assets (newest first is not required for the sum).
 /// </summary>
 public sealed record GitHubRelease(
     string TagName,
     DateTimeOffset? PublishedAt,
     string? Etag,
-    IReadOnlyList<GitHubAsset> Assets);
+    IReadOnlyList<GitHubAsset> Assets,
+    long TotalDownloads = 0);
 
 /// <summary>Non-success response from the GitHub API (4xx/5xx, e.g. 404 unknown repo, 403 rate limit).</summary>
 public sealed class GitHubApiException(HttpStatusCode status, string message) : Exception(message)
 {
     public HttpStatusCode Status { get; } = status;
 }
+
+/// <summary>
+/// Subset of <c>GET /repos/{owner}/{repo}</c> used by enrichment: popularity
+/// (stars) plus the owner profile for developer details.
+/// </summary>
+public sealed record GitHubRepoStats(
+    int? Stars,
+    string? OwnerLogin,
+    string? OwnerUrl);
 
 public interface IGitHubReleaseClient
 {
@@ -31,14 +44,32 @@ public interface IGitHubReleaseClient
     /// <c>304 Not Modified</c> for <paramref name="etag"/>.
     /// Prereleases count: many Shizuku apps ship only prereleases.
     /// </returns>
-    /// <exception cref="GitHubApiException">Repo has no published release yet (404 on the list endpoint never happens — empty list), unknown repo, rate limit, …</exception>
+    /// <exception cref="GitHubApiException">Repo has no published release yet (404 on the list endpoint never happens; empty list), unknown repo, rate limit, …</exception>
     Task<GitHubRelease?> GetLatestReleaseAsync(
         string owner, string repo, string? etag, CancellationToken ct = default);
+
+    /// <summary>
+    /// Repo metadata via <c>GET /repos/{owner}/{repo}</c>. Null on any
+    /// failure; popularity and developer details are best-effort and never
+    /// fail an enrich. Default impl keeps test doubles that only care about
+    /// releases simple.
+    /// </summary>
+    Task<GitHubRepoStats?> GetRepoStatsAsync(string owner, string repo, CancellationToken ct = default) =>
+        Task.FromResult<GitHubRepoStats?>(null);
+
+    /// <summary>
+    /// Raw README markdown via <c>GET /repos/{owner}/{repo}/readme</c>
+    /// (<c>application/vnd.github.raw</c>). The client renders markdown, so the
+    /// server ships the source, not GitHub's rendered HTML. Null on any failure.
+    /// Default impl keeps test doubles simple.
+    /// </summary>
+    Task<string?> GetReadmeMarkdownAsync(string owner, string repo, CancellationToken ct = default) =>
+        Task.FromResult<string?>(null);
 }
 
 /// <summary>
 /// Minimal GitHub Releases client over <see cref="HttpClient"/> +
-/// <c>System.Text.Json</c> — deliberately <i>not</i> Octokit: the plan
+/// <c>System.Text.Json</c>; deliberately <i>not</i> Octokit: the plan
 /// requires resolver tests with a stubbed <c>HttpClient</c> (no network),
 /// which a hand-rolled client supports directly with zero extra deps.
 /// PAT (optional, raises rate limits) comes from <c>SHIZU_GITHUB_TOKEN</c>.
@@ -78,10 +109,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
             HttpMethod.Get,
             $"https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
         request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
-        if (etag is not null)
-        {
-            request.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(etag));
-        }
+        request.ApplyIfNoneMatch(etag);
 
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode == HttpStatusCode.NotModified)
@@ -109,12 +137,110 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         }
 
         var responseEtag = response.Headers.ETag?.ToString();
+        var totalDownloads = releases
+            .Where(r => !r.Draft)
+            .Sum(r => r.Assets.Sum(a => a.DownloadCount));
         return new GitHubRelease(
             release.TagName,
             release.PublishedAt,
             responseEtag,
-            release.Assets.Select(a => new GitHubAsset(a.Name, a.BrowserDownloadUrl, a.Size, a.ContentType)).ToList());
+            release.Assets.Select(a => new GitHubAsset(
+                a.Name, a.BrowserDownloadUrl, a.Size, a.ContentType, a.DownloadCount)).ToList(),
+            totalDownloads);
     }
+
+    public async Task<GitHubRepoStats?> GetRepoStatsAsync(string owner, string repo, CancellationToken ct = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"https://api.github.com/repos/{owner}/{repo}");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            using var document = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            int? stars = root.TryGetProperty("stargazers_count", out var starsElement)
+                && starsElement.TryGetInt32(out var starsValue)
+                    ? starsValue
+                    : null;
+
+            string? ownerLogin = null;
+            string? ownerUrl = null;
+            if (root.TryGetProperty("owner", out var ownerElement)
+                && ownerElement.ValueKind == JsonValueKind.Object)
+            {
+                ownerLogin = ReadString(ownerElement, "login");
+                ownerUrl = ReadString(ownerElement, "html_url");
+            }
+
+            return new GitHubRepoStats(
+                stars,
+                ownerLogin,
+                ownerUrl);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or JsonException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
+
+    public async Task<string?> GetReadmeMarkdownAsync(string owner, string repo, CancellationToken ct = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"https://api.github.com/repos/{owner}/{repo}/readme");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+            request.Headers.Accept.Clear();
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.raw"));
+
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content.ReadAsStringAsync(ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
+
+    private static string? ReadString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private static async Task<string> ReadBodySafe(HttpResponseMessage response, CancellationToken ct)
     {
@@ -160,5 +286,8 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
 
         [JsonPropertyName("content_type")]
         public string? ContentType { get; set; }
+
+        [JsonPropertyName("download_count")]
+        public long DownloadCount { get; set; }
     }
 }

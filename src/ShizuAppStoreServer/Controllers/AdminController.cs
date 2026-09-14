@@ -59,7 +59,7 @@ public sealed class AdminController(ShizuDbContext db, AdminOptions adminOptions
         }
         catch (JsonException)
         {
-            // Non-JSON bodies are fine — the HMAC already authenticated them.
+            // Non-JSON bodies are fine, the HMAC already authenticated them.
         }
 
         db.SyncRequests.Add(new SyncRequest

@@ -3,8 +3,8 @@ using ShizuAppStoreServer.Core.Sync;
 namespace ShizuAppStoreServer.Sync;
 
 /// <summary>
-/// Nightly full re-check (PLAN §7): every app (except excluded) is
-/// re-resolved with <c>force</c> — release feeds answer 304 when nothing
+/// Nightly full re-check: every app (except excluded) is
+/// re-resolved with <c>force</c>, release feeds answer 304 when nothing
 /// changed, version bumps append to <c>app_versions</c>.
 /// </summary>
 public sealed class NightlyWorker(

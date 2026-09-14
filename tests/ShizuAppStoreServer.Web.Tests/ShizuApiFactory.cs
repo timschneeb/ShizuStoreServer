@@ -19,7 +19,7 @@ namespace ShizuAppStoreServer.Web.Tests;
 /// <see cref="ResetAsync"/> for full isolation.
 /// </summary>
 /// <remarks>
-/// Per-suite knobs go through DI swaps here, NOT
+/// Per-suite settings go through DI swaps here, NOT
 /// <c>ConfigureAppConfiguration</c>: with minimal hosting,
 /// <c>WebApplication.CreateBuilder</c> rebuilds
 /// <c>builder.Configuration</c> from appsettings/env/cmdline only, so
@@ -99,7 +99,7 @@ public sealed class ShizuApiFactory : WebApplicationFactory<Program>
     /// <summary>
     /// Test HTTP client. Cross-test isolation comes from
     /// <see cref="NoOutputCachePolicy"/> (the production output cache is
-    /// fully disabled in this host), not from request headers — the
+    /// fully disabled in this host), not from request headers, the
     /// <c>OutputCacheMiddleware</c> has no request-driven bypass, so
     /// <c>Cache-Control: no-cache</c>/<c>no-store</c> would NOT help.
     /// </summary>

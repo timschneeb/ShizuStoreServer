@@ -6,7 +6,7 @@ namespace ShizuAppStoreServer.Sync;
 
 /// <summary>
 /// Production <see cref="IEnrichmentRunner"/>: enriches one app in a fresh
-/// DI scope (its own <see cref="ShizuDbContext"/>, required — contexts are
+/// DI scope (its own <see cref="ShizuDbContext"/>, required. Contexts are
 /// not thread-safe and the loop fans out) and saves. A vanished row (deleted
 /// by a concurrent pass, which the gate normally prevents) becomes
 /// <c>Failed</c>, never a crash.
@@ -34,11 +34,7 @@ public sealed class EnrichmentRunner(IServiceScopeFactory scopes) : IEnrichmentR
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Infrastructure failure outside the enricher (DB blip, runner bug):
-            // without this, BulkEnricher counts a silent Failed that no log
-            // and no row ever explains (seen live 2026-09-12). Record on the
-            // row when possible so backoff applies; the message always flows
-            // to the pass log via FailedMessages. Shutdown still propagates.
+            // Infrastructure failure outside the enricher
             var message = $"Enrichment host error: {ex.Message}";
             try
             {
@@ -102,8 +98,6 @@ public sealed class EnrichmentRunner(IServiceScopeFactory scopes) : IEnrichmentR
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Icon-only run: never touch the row (no backoff disturbance);
-            // the message still reaches the run summary.
             return new EnrichResult(EnrichOutcome.Failed, $"Icon refresh host error: {ex.Message}");
         }
     }

@@ -7,7 +7,7 @@ namespace ShizuAppStoreServer.Core.Tests;
 public sealed class ApkSignerTests
 {
     // Captured from `apksigner verify --print-certs` (build-tools 35.0.0)
-    // against a locally signed test APK — locks the parsed format.
+    // against a locally signed test APK; locks the parsed format.
     private const string RealOutput = """
         Signer #1 certificate DN: CN=SigTest, OU=Test, O=Test, C=DE
         Signer #1 certificate SHA-256 digest: 980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9

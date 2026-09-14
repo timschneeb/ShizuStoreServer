@@ -71,6 +71,24 @@ public sealed class BadgingParserTests
         Assert.Equal("1.2.3", info.VersionName);
         Assert.Equal(24, info.MinSdk);
         Assert.Equal(2, info.Icons.Count);
+        Assert.Equal(["android.permission.INTERNET"], info.Permissions);
+    }
+
+    [Fact]
+    public void ParsesUsesPermissionsIncludingSdk23AndDeduplicates()
+    {
+        const string output = """
+            package: name='com.x' versionCode='1'
+            uses-permission: name='android.permission.INTERNET'
+            uses-permission-sdk-23: name='android.permission.POST_NOTIFICATIONS'
+            uses-permission: name='android.permission.INTERNET'
+            """;
+
+        var info = BadgingParser.Parse(output);
+
+        Assert.Equal(
+            ["android.permission.INTERNET", "android.permission.POST_NOTIFICATIONS"],
+            info.Permissions);
     }
 
     [Fact]

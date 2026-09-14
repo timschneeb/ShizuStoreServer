@@ -10,6 +10,8 @@ namespace ShizuAppStoreServer.Api;
 /// </summary>
 public static class ApiEnums
 {
+    // TODO: can this also be simplified using a library like AutoMapper?
+    
     public static string ToApiString(Listing v) => v switch
     {
         Listing.Main => "main",

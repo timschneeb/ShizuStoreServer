@@ -163,6 +163,51 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
+    public async Task ListSortsByPopularity()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var cat = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(cat);
+            var low = Seeds.NewApp("low", cat);
+            low.Stars = 5;
+            low.DownloadTotal = 1000;
+            var high = Seeds.NewApp("high", cat);
+            high.Stars = 900;
+            high.DownloadTotal = 50;
+            var popular = Seeds.NewApp("popular", cat);
+            popular.Stars = 50;
+            popular.DownloadTotal = 1_000_000;
+            db.Apps.AddRange(low, high, popular);
+        });
+
+        var byStars = await GetPageAsync("?sort=stars&pageSize=5");
+        Assert.Equal(["high", "popular", "low"], byStars.Items.Select(a => a.Slug));
+        Assert.Equal(900, byStars.Items[0].Stars);
+
+        var byDownloads = await GetPageAsync("?sort=downloads&pageSize=5");
+        Assert.Equal(["popular", "low", "high"], byDownloads.Items.Select(a => a.Slug));
+        Assert.Equal(1_000_000, byDownloads.Items[0].DownloadTotal);
+    }
+
+    [Fact]
+    public async Task SummaryCarriesListUpdatedAt()
+    {
+        var when = new DateTimeOffset(2026, 8, 1, 12, 0, 0, TimeSpan.Zero);
+        await factory.ResetAsync(db =>
+        {
+            var cat = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(cat);
+            db.Apps.Add(Seeds.NewApp("listed", cat, listUpdatedAt: when));
+        });
+
+        var page = await GetPageAsync("?q=listed");
+
+        Assert.Single(page.Items);
+        Assert.Equal(when.UtcDateTime, page.Items[0].ListUpdatedAt!.Value.UtcDateTime);
+    }
+
+    [Fact]
     public async Task DetailReturnsFullShape()
     {
         await factory.ResetAsync(db =>
@@ -188,6 +233,66 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
             detail.CategoryPath.Select(p => (p.Slug, p.Name)));
         Assert.StartsWith("https://github.com/example/", detail.Url);
         Assert.NotNull(response.Headers.ETag);
+    }
+
+    [Fact]
+    public async Task SummaryCarriesAuthorAndDetailCarriesExtras()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.Add(Seeds.NewApp(
+                "authored",
+                audio,
+                authorKey: "github:papergray",
+                authorName: "papergray",
+                authorUrl: "https://github.com/papergray",
+                permissions: ["android.permission.INTERNET"],
+                fullDescription: "# Readme"));
+        });
+
+        var page = await GetPageAsync("?q=authored");
+        Assert.Equal("github:papergray", page.Items[0].AuthorKey);
+        Assert.Equal("papergray", page.Items[0].AuthorName);
+
+        var response = await factory.NewClient().GetAsync("/v1/apps/authored");
+        var detail = (await response.Content.ReadFromJsonAsync<AppDetailDto>(Json))!;
+        Assert.Equal("papergray", detail.AuthorName);
+        Assert.Equal("https://github.com/papergray", detail.AuthorUrl);
+        Assert.Equal(["android.permission.INTERNET"], detail.Permissions);
+        Assert.Equal("# Readme", detail.FullDescription);
+    }
+
+    [Fact]
+    public async Task SourceNameIsFriendlyAndListingVersionIsUsed()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.Add(Seeds.NewApp(
+                "playonly",
+                audio,
+                url: "https://play.google.com/store/apps/details?id=com.ysy.switcherfiveg",
+                availability: Availability.PlayRedirect,
+                versionName: "2.6.0-new"));
+            var forge = Seeds.NewApp("forge", audio, url: "https://github.com/example/forge");
+            forge.SourceKind = SourceKind.GitHub;
+            db.Apps.Add(forge);
+        });
+
+        var page = await GetPageAsync("?q=playonly");
+        Assert.Equal("Play Store", page.Items[0].SourceName);
+        Assert.Equal("2.6.0-new", page.Items[0].VersionName);
+
+        var forgePage = await GetPageAsync("?q=forge");
+        Assert.Equal("GitHub", forgePage.Items[0].SourceName);
+
+        var response = await factory.NewClient().GetAsync("/v1/apps/playonly");
+        var detail = (await response.Content.ReadFromJsonAsync<AppDetailDto>(Json))!;
+        Assert.Equal("Play Store", detail.SourceName);
+        Assert.Equal("2.6.0-new", detail.VersionName);
     }
 
     [Fact]

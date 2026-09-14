@@ -10,7 +10,7 @@ public sealed record UpsertCounts(int Added, int Updated, int Removed, List<stri
 
 /// <summary>
 /// Imports parsed list documents into the catalog. Used by the initial
-/// backfill (M2) and later by the scheduled fast loop (M6).
+/// backfill and later by the scheduled fast loop.
 ///
 /// Identity rules:
 /// <list type="bullet">
@@ -73,10 +73,14 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
         var added = 0;
         var updated = 0;
-        // (listing, url, categoryId) pairs present in the parse — anything else
+        // (listing, url, categoryId) pairs present in the parse, anything else
         // stored under a synced listing is stale.
         var parsedKeys = new HashSet<(Listing, string, long)>();
         var parsedLocations = CollectLocations(docs);
+        // The source lists some apps under two categories. Keep the first
+        // occurrence so the catalog holds one row per (listing, url); later
+        // occurrences are left out and any existing duplicate rows go stale.
+        var seenEntries = new HashSet<(Listing, string)>();
 
         foreach (var doc in docs)
         {
@@ -94,7 +98,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 var type = MapType(category.Section, parsed.Name, parsed.Subcategory);
                 foreach (var entry in parsed.Entries)
                 {
-                    UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations,
+                    UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
                         listing, category, type, entry, parent: null, history, now, ref added, ref updated);
                 }
             }
@@ -238,11 +242,16 @@ public sealed class CatalogUpserter(ShizuDbContext db)
     private void UpsertEntry(
         List<App> apps, List<RemovedApp> tombstones, Dictionary<long, Category> categoriesById, HashSet<string> usedSlugs,
         HashSet<(Listing, string, long)> parsedKeys, HashSet<Location> parsedLocations,
+        HashSet<(Listing, string)> seenEntries,
         Listing listing, Category category, AppType type,
         ParsedEntry entry, App? parent,
         IReadOnlyDictionary<string, EntryHistory> history,
         DateTimeOffset now, ref int added, ref int updated)
     {
+        if (!seenEntries.Add((listing, entry.Url)))
+        {
+            return;
+        }
         var inCategory = apps
             .Where(a => a.Listing == listing && a.Url == entry.Url && IsSameCategory(a, category))
             .ToList();
@@ -278,6 +287,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 Category = category,
                 Parent = parent,
                 AddedAt = h?.AddedAt ?? now,
+                ListUpdatedAt = h?.UpdatedAt,
                 UpdatedAt = h?.UpdatedAt ?? now,
             };
             apps.Add(match);
@@ -335,9 +345,13 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 updated++;
             }
 
-            if (h is not null && h.AddedAt < match.AddedAt)
+            // History is authoritative for both the introduction and the
+            // list-change dates (silent commits already filtered out), and
+            // refreshes them even when the parsed entry itself is unchanged.
+            if (h is not null)
             {
                 match.AddedAt = h.AddedAt;
+                match.ListUpdatedAt = h.UpdatedAt;
             }
         }
 
@@ -345,7 +359,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
         foreach (var child in entry.Children)
         {
-            UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations,
+            UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
                 listing, category, type, child, parent: match, history, now, ref added, ref updated);
         }
     }
@@ -353,7 +367,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
     /// <summary>
     /// Move reuse: exactly one row carries this URL elsewhere in the listing
     /// <i>and</i> its old location is gone from the parse. When the old
-    /// location is still listed the entry is a deliberate duplicate — return
+    /// location is still listed the entry is a deliberate duplicate, return
     /// null so a new row is created instead of stealing the existing one.
     /// </summary>
     private static App? FindMoveTarget(
@@ -376,7 +390,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
         if (!TryLocationKey(rowCategory, categoriesById, out var key))
         {
-            return null; // Uncertain — never steal, create a new row.
+            return null; // Uncertain, never steal, create a new row.
         }
 
         var section = rowCategory.Section;

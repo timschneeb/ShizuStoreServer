@@ -8,7 +8,7 @@ namespace ShizuAppStoreServer.Web.Tests;
 /// so tests sharing one server never read another test's seeded response.
 /// Request <c>Cache-Control</c> headers do NOT bypass
 /// <c>OutputCacheMiddleware</c> (it has no request-driven bypass, unlike the
-/// old ResponseCaching middleware) — hence the swap, not a header.
+/// old ResponseCaching middleware), hence the swap, not a header.
 /// </summary>
 public sealed class NoOutputCachePolicy : IOutputCachePolicy
 {

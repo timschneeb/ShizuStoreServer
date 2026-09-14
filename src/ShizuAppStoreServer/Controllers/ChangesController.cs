@@ -14,16 +14,16 @@ namespace ShizuAppStoreServer.Controllers;
 public sealed class ChangesController(ShizuDbContext db) : ControllerBase
 {
     /// <summary>
-    /// Apps added/updated plus slugs removed since <c>since</c> (ISO-8601,
-    /// required). <c>added</c> = <c>added_at &gt;= since</c>; <c>updated</c> =
-    /// <c>updated_at &gt;= since</c> excluding already-added rows;
-    /// <c>removed</c> = tombstones with <c>removed_at &gt;= since</c>.
+    /// Apps added/updated plus slugs removed since <c>since</c> (ISO-8601, required).
+    /// <c>added = added_at >= since</c>
+    /// <c>updated = updated_at >= since</c> excluding already-added rows;
+    /// <c>removed</c> = tombstones with <c>removed_at >= since</c>.
     /// Entries are oldest-first so clients can apply them in order.
     /// <c>excluded</c> rows never appear.
     /// </summary>
     [HttpGet]
     [OutputCache(PolicyName = "changes")]
-    [ResponseCache(Duration = 30)]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     [ProducesResponseType<ChangesDto>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<ChangesDto>> Get(

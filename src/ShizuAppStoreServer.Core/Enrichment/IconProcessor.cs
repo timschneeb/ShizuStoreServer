@@ -28,7 +28,7 @@ public static class IconProcessor
 
     /// <summary>
     /// Normalizes raw image bytes (F-Droid repo icons) to a ≤192px PNG.
-    /// Returns null for corrupt/unknown formats — the caller falls back to
+    /// Returns null for corrupt/unknown formats, the caller falls back to
     /// <see cref="LetterAvatarGenerator"/>.
     /// </summary>
     public static ProcessedIcon? ProcessRawImage(byte[] bytes)

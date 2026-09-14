@@ -11,14 +11,14 @@ public sealed record BadgingInfo(
     long? VersionCode,
     string? VersionName,
     int? MinSdk,
-    IReadOnlyList<BadgingIcon> Icons);
+    IReadOnlyList<BadgingIcon> Icons,
+    IReadOnlyList<string> Permissions);
 
 public sealed class BadgingParseException(string message) : Exception(message);
 
 /// <summary>
 /// Parses <c>aapt2 dump badging</c> stdout. Pure static + tested against
-/// canned real-world output; the exact format is stable across build-tools
-/// 30–36 (verified locally with 35.0.0, see <c>docs/server-setup.md</c>).
+/// canned real-world output; the exact format is stable across build-tools 30–36.
 /// </summary>
 public static partial class BadgingParser
 {
@@ -31,6 +31,11 @@ public static partial class BadgingParser
 
     [GeneratedRegex(@"^application-icon(?:-(?<density>\d+))?:'(?<path>[^']*)'", RegexOptions.Multiline)]
     private static partial Regex IconLine();
+
+    // aapt2 emits `uses-permission:` plus `uses-permission-sdk-23:` for
+    // runtime-only declarations; both are requested permissions.
+    [GeneratedRegex(@"^uses-permission(?:-sdk-\d+)?:\s+name='(?<name>[^']*)'", RegexOptions.Multiline)]
+    private static partial Regex PermissionLine();
 
     public static BadgingInfo Parse(string output)
     {
@@ -63,6 +68,12 @@ public static partial class BadgingParser
             .Distinct()
             .ToList();
 
-        return new BadgingInfo(package.Groups["name"].Value, versionCode, versionName, minSdk, icons);
+        var permissions = PermissionLine().Matches(output)
+            .Select(m => m.Groups["name"].Value)
+            .Where(p => p.Length > 0)
+            .Distinct()
+            .ToList();
+
+        return new BadgingInfo(package.Groups["name"].Value, versionCode, versionName, minSdk, icons, permissions);
     }
 }

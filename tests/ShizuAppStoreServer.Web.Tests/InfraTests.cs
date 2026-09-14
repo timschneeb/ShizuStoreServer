@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
@@ -24,6 +25,7 @@ public sealed class IconsTests(ShizuApiFactory factory) : IClassFixture<ShizuApi
         Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
         Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
         Assert.Contains("immutable", response.Headers.CacheControl?.ToString());
+        Assert.Contains("max-age=86400", response.Headers.CacheControl?.ToString());
     }
 
     [Fact]
@@ -134,5 +136,66 @@ public sealed class RateLimitTests : IClassFixture<ShizuApiFactory>, IDisposable
             (await client.GetAsync("/v1/meta")).StatusCode);
     }
 
+    [Fact]
+    public async Task IconsAreNotRateLimited()
+    {
+        await _factory.ResetAsync(_ => { });
+        var client = _factory.NewClient();
+        var sha = new string('a', 64);
+
+        // The icon store is empty in tests, so a valid hash is a 404. The
+        // point is that it is never a 429, no matter how many are requested.
+        for (var i = 0; i < 8; i++)
+        {
+            var response = await client.GetAsync($"/icons/{sha}.png");
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        }
+    }
+
     public void Dispose() => _factory.Dispose();
+}
+
+/// <summary>Response compression: Brotli preferred, gzip fallback, identity untouched.</summary>
+public sealed class CompressionTests(ShizuApiFactory factory) : IClassFixture<ShizuApiFactory>
+{
+    [Fact]
+    public async Task MetaNegotiatesBrotli()
+    {
+        await factory.ResetAsync(_ => { });
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/meta");
+        request.Headers.AcceptEncoding.ParseAdd("br");
+
+        var response = await factory.NewClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("br", Assert.Single(response.Content.Headers.ContentEncoding));
+        await using var stream = new BrotliStream(
+            await response.Content.ReadAsStreamAsync(), CompressionMode.Decompress);
+        using var reader = new StreamReader(stream);
+        using var doc = JsonDocument.Parse(await reader.ReadToEndAsync());
+        Assert.True(doc.RootElement.TryGetProperty("counts", out _));
+    }
+
+    [Fact]
+    public async Task GzipIsTheFallback()
+    {
+        await factory.ResetAsync(_ => { });
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/meta");
+        request.Headers.AcceptEncoding.ParseAdd("gzip");
+
+        var response = await factory.NewClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("gzip", Assert.Single(response.Content.Headers.ContentEncoding));
+    }
+
+    [Fact]
+    public async Task NoAcceptEncodingIsUncompressed()
+    {
+        await factory.ResetAsync(_ => { });
+        var response = await factory.NewClient().GetAsync("/v1/meta");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty(response.Content.Headers.ContentEncoding);
+    }
 }

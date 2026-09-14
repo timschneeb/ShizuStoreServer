@@ -1,5 +1,7 @@
+using System.IO.Compression;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Scalar.AspNetCore;
@@ -18,6 +20,20 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+
+// Catalog JSON is large and repetitive, so compress it. Brotli first for
+// clients that negotiate it (the Android client's OkHttp), gzip as fallback.
+// Icons are already-compressed PNGs and stay out of the default MIME list.
+builder.Services.AddResponseCompression(o =>
+{
+    o.EnableForHttps = true;
+    o.Providers.Add<BrotliCompressionProvider>();
+    o.Providers.Add<GzipCompressionProvider>();
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(
+    o => o.Level = CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(
+    o => o.Level = CompressionLevel.Fastest);
 
 // Public API behavior: fixed-window rate limit (~100 req/min/IP) +
 // server-side output caching for GET /v1/*. Both come from the Api
@@ -80,6 +96,7 @@ ConfigureEnrichmentClients(builder.Services, enrichment);
 // Singleton (not scoped): the M6 loop enriches apps in parallel per-app
 // scopes, so the index cache must outlive any one scope (thread-safe since M6).
 builder.Services.AddSingleton<FdroidIndexProvider>();
+builder.Services.AddSingleton<IzzyStatsProvider>();
 builder.Services.AddHttpClient("apk-download",
     client => client.Timeout = enrichment.DownloadTimeout);
 builder.Services.AddSingleton<IAapt2Runner>(_ => new Aapt2Runner(enrichment.Aapt2Path));
@@ -100,11 +117,11 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IInstafelReleaseClient>(),
     sp.GetRequiredService<IGitCodeReleaseClient>(),
     sp.GetRequiredService<IPlayStoreClient>(),
+    sp.GetRequiredService<IzzyStatsProvider>(),
     sp.GetRequiredService<ILogger<AppEnricher>>()));
 
 // Sync engine (M6): fast loop + nightly full re-check in this same binary
-// (PLAN §0: single binary, single systemd service). Workers resolve
-// SyncService per pass; enrichment fans out over per-app scopes.
+// Workers resolve SyncService per pass; enrichment fans out over per-app scopes.
 var syncOptions = builder.Configuration.GetSection("Sync").Get<SyncOptions>() ?? new();
 builder.Services.AddSingleton(syncOptions);
 builder.Services.AddSingleton<GitHistoryService>();
@@ -147,9 +164,23 @@ if (!app.Environment.IsEnvironment("Testing"))
             $"Cannot start without required external tools ({string.Join(", ", missing.Select(m => $"{m.Name} at '{m.Path}'"))}); " +
             "see docs/server-setup.md (aapt2/apksigner/gradle sections).");
     }
+
+    // The Paparazzi renderer runs Gradle with `-p <IconToolDir>` relative to
+    // the process CWD, so a relative default only resolves when the server is
+    // started from the repo root. Booting with a missing tool dir does not
+    // fail enrichment; it silently falls back to raster icons and letter
+    // avatars, overwriting previously rendered adaptive icons. Refuse to boot.
+    var iconToolDir = Path.GetFullPath(enrichment.IconToolDir);
+    if (!Directory.Exists(iconToolDir))
+    {
+        throw new InvalidOperationException(
+            $"Enrichment:IconToolDir '{enrichment.IconToolDir}' (resolved to '{iconToolDir}') does not exist. " +
+            "Set Enrichment__IconToolDir to the absolute path of tools/icon-render, otherwise adaptive icons cannot " +
+            "render and enrichment would degrade them to rasters or avatars.");
+    }
 }
 
-// One-shot icon re-render (renderer upgrades, e.g. Paparazzi rollout):
+// One-shot icon re-render:
 // re-renders every recorded-APK icon, prints counts, exits before the
 // workers start. Run with the server stopped (both processes write apps).
 // --force rewrites + recounts every icon even when the fresh bytes match
@@ -179,6 +210,10 @@ if (app.Environment.IsDevelopment())
     app.MapScalarApiReference();
 }
 
+// Compression outside the output cache: cached bodies stay uncompressed and
+// are compressed per request on the way out.
+app.UseResponseCompression();
+
 // Output cache first so cache hits don't consume rate-limit permits.
 if (apiOptions.EnableOutputCache)
 {
@@ -195,16 +230,10 @@ app.Run();
 
 return 0;
 
-// Public for WebApplicationFactory (integration tests).
 public partial class Program
 {
     /// <summary>
-    /// Enrichment HTTP clients. The tokens live on <see cref="EnrichmentOptions"/>
-    /// (config + SHIZU_*_TOKEN env fallback, see above) and MUST be applied
-    /// here: the client ctors take an optional token string that DI cannot
-    /// supply, so without this every forge call silently goes anonymous
-    /// (found live 2026-09-12: mass 403s with a PAT configured).
-    /// Covered by EnrichmentClientWiringTests.
+    /// Enrichment HTTP clients
     /// </summary>
     public static void ConfigureEnrichmentClients(IServiceCollection services, EnrichmentOptions enrichment)
     {
@@ -227,6 +256,8 @@ public partial class Program
         });
         services.AddHttpClient<FdroidRepoClient>(
             client => client.Timeout = TimeSpan.FromSeconds(60));
+        services.AddHttpClient<IzzyStatsClient>(
+            client => client.Timeout = TimeSpan.FromSeconds(30));
         services.AddHttpClient<IInstafelReleaseClient, InstafelReleaseClient>(
             client => client.Timeout = TimeSpan.FromSeconds(30));
         services.AddHttpClient<IGitCodeReleaseClient, GitCodeReleaseClient>(

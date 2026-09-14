@@ -21,9 +21,14 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
     /// its subcategories; <c>sort</c> is <c>updated|added|name</c>.
     /// <c>excluded</c> rows are never returned.
     /// </summary>
+    /// <remarks>
+    /// The advanced filtering options are not actually used by the client app.
+    /// It pulls all entries on first launch, then does delta syncs to keep the local DB up-to-date.
+    /// Filtering is done locally on the client.
+    /// </remarks>
     [HttpGet]
     [OutputCache(PolicyName = "apps-list")]
-    [ResponseCache(Duration = 60)]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     [ProducesResponseType<PagedAppsDto>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<PagedAppsDto>> List(
@@ -116,9 +121,11 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
         }
 
         var sortKey = sort?.Trim().ToLowerInvariant();
-        if (sortKey is not ("updated" or "added" or "name"))
+        if (sortKey is not ("updated" or "added" or "name" or "stars" or "downloads"))
         {
-            return Problem($"Invalid sort '{sort}'. Use updated|added|name.", statusCode: StatusCodes.Status400BadRequest);
+            return Problem(
+                $"Invalid sort '{sort}'. Use updated|added|name|stars|downloads.",
+                statusCode: StatusCodes.Status400BadRequest);
         }
 
         var descending = order?.Trim().ToLowerInvariant() switch
@@ -147,6 +154,10 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
             ("name", false) => rows.OrderBy(a => a.Name).ThenBy(a => a.Id),
             ("added", true) => rows.OrderByDescending(a => a.AddedAt).ThenBy(a => a.Id),
             ("added", false) => rows.OrderBy(a => a.AddedAt).ThenBy(a => a.Id),
+            ("stars", true) => rows.OrderByDescending(a => a.Stars ?? -1).ThenBy(a => a.Id),
+            ("stars", false) => rows.OrderBy(a => a.Stars ?? -1).ThenBy(a => a.Id),
+            ("downloads", true) => rows.OrderByDescending(a => a.DownloadTotal ?? -1).ThenBy(a => a.Id),
+            ("downloads", false) => rows.OrderBy(a => a.DownloadTotal ?? -1).ThenBy(a => a.Id),
             (_, true) => rows.OrderByDescending(a => a.UpdatedAt).ThenBy(a => a.Id),
             (_, false) => rows.OrderBy(a => a.UpdatedAt).ThenBy(a => a.Id),
         };
@@ -165,7 +176,7 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
     /// </summary>
     [HttpGet("{slug}")]
     [OutputCache(PolicyName = "app-detail")]
-    [ResponseCache(Duration = 60)]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     [ProducesResponseType<AppDetailDto>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status304NotModified)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -216,15 +227,14 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
         stack.Push(root.Id);
         while (stack.TryPop(out var id))
         {
-            if (byParent.TryGetValue(id, out var children))
+            if (!byParent.TryGetValue(id, out var children))
             {
-                foreach (var child in children)
-                {
-                    if (ids.Add(child))
-                    {
-                        stack.Push(child);
-                    }
-                }
+                continue;
+            }
+
+            foreach (var child in children.Where(ids.Add))
+            {
+                stack.Push(child);
             }
         }
 

@@ -3,7 +3,7 @@ using ShizuAppStoreServer.Core.Sync;
 namespace ShizuAppStoreServer.Sync;
 
 /// <summary>
-/// Fast loop (PLAN §7): every <c>Sync:FastLoopMinutes</c> (15) drain
+/// Fast loop: every <c>Sync:FastLoopMinutes</c> (15) drain
 /// <c>sync_requests</c>, re-parse the list when HEAD moved, upsert, and
 /// enrich due apps. Optionally runs one pass at startup (first boot =
 /// initial backfill).

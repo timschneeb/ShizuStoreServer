@@ -167,7 +167,7 @@ public sealed class FdroidTests
     public async Task RevalidatesWithCachedEtag()
     {
         // Singleton semantics (M6): every call revalidates via conditional
-        // GET — the first seeds from the app's stored ETag, later calls use
+        // GET, the first seeds from the app's stored ETag, later calls use
         // the cached one and serve the cached parse on 304.
         var stub = new StubHandler(request =>
             request.Headers.IfNoneMatch.ToString().Contains("fd-etag")
@@ -188,10 +188,22 @@ public sealed class FdroidTests
     }
 
     [Fact]
+    public async Task ClientReplaysWeakEtag()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotModified));
+        var client = new FdroidRepoClient(new HttpClient(stub));
+
+        Assert.Null(await client.GetIndexAsync(FdroidRepos.FDroidBase, "W/\"fd-weak\""));
+
+        var request = Assert.Single(stub.Requests);
+        Assert.Contains("W/\"fd-weak\"", request.Headers.IfNoneMatch.ToString());
+    }
+
+    [Fact]
     public async Task ParallelCallsShareOneParse()
     {
         // The per-repo gate serializes concurrent callers: one 200 + parse,
-        // the rest 304 off the fresh cache — no stampede, no torn state.
+        // the rest 304 off the fresh cache; no stampede, no torn state.
         var twoHundreds = 0;
         var stub = new StubHandler(request =>
         {

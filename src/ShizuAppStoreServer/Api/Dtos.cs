@@ -19,12 +19,20 @@ public sealed record AppSummaryDto(
     long? VersionCode,
     string? VersionName,
     int? MinSdk,
+    long? Size,
     string? IconHash,
     bool IconAdaptive,
     string CategorySlug,
     DateTimeOffset UpdatedAt,
     string? SigSha256,
-    string? SigMd5);
+    string? SigMd5,
+    int? Stars,
+    long? DownloadTotal,
+    DateTimeOffset? VersionUpdatedAt,
+    DateTimeOffset? ListUpdatedAt,
+    string? AuthorKey,
+    string? AuthorName,
+    string SourceName);
 
 /// <summary>
 /// One installable candidate of an app, keyed by signing identity. Clients
@@ -80,7 +88,16 @@ public sealed record AppDetailDto(
     IReadOnlyList<CategoryPathDto> CategoryPath,
     string? ParentSlug,
     DateTimeOffset AddedAt,
-    DateTimeOffset? LastCheckedAt);
+    DateTimeOffset? LastCheckedAt,
+    int? Stars,
+    long? DownloadTotal,
+    DateTimeOffset? VersionUpdatedAt,
+    DateTimeOffset? ListUpdatedAt,
+    string? AuthorName,
+    string? AuthorUrl,
+    IReadOnlyList<string> Permissions,
+    string? FullDescription,
+    string SourceName);
 
 public sealed record CategoryPathDto(string Slug, string Name);
 

@@ -12,7 +12,7 @@ namespace ShizuAppStoreServer.Core.Tests;
 /// Upserter tests run against SQLite in-memory. No local Postgres server is
 /// available on this machine (postgresql-libs only, docker daemon down), so
 /// live-DB verification is deferred to the server; the migration SQL itself
-/// is validated via <c>dotnet ef migrations script</c> (see HANDOFF §6).
+/// is validated via <c>dotnet ef migrations script</c>.
 /// </summary>
 public sealed class CatalogUpserterTests : IDisposable
 {
@@ -80,12 +80,14 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.True(micUp.IsRecommended);
         Assert.Equal(T0, micUp.AddedAt);
         Assert.Equal(T1, micUp.UpdatedAt);
+        Assert.Equal(T1, micUp.ListUpdatedAt);
         Assert.Equal(Availability.LinkOnly, micUp.Availability);
         Assert.Equal(SourceKind.Other, micUp.SourceKind);
 
         // Entry without history falls back to now.
         var tuner = await _db.Apps.SingleAsync(a => a.Slug == "tuner");
         Assert.Equal(T1, tuner.AddedAt);
+        Assert.Null(tuner.ListUpdatedAt);
 
         // Nested bullet → child row.
         var beta = await _db.Apps.SingleAsync(a => a.Slug == "tuner-beta");
@@ -130,7 +132,7 @@ public sealed class CatalogUpserterTests : IDisposable
     }
 
     [Fact]
-    public async Task SameUrlInTwoCategoriesStaysTwoRows()
+    public async Task SameUrlInTwoCategoriesKeepsOneRow()
     {
         const string md = """
             ## Apps
@@ -147,10 +149,11 @@ public sealed class CatalogUpserterTests : IDisposable
         var counts = await Upserter().UpsertAsync(
             [new AwesomeListParser().Parse(md, "main")], new Dictionary<string, EntryHistory>(), T0);
 
-        Assert.Equal(2, counts.Added);
-        Assert.Equal(2, await _db.Apps.CountAsync(a => a.Url == "https://example.com/fluffy"));
+        // The source lists the same url under two categories; only the first
+        // occurrence is kept so the catalog has no duplicate apps.
+        Assert.Equal(1, counts.Added);
+        Assert.Equal(1, await _db.Apps.CountAsync(a => a.Url == "https://example.com/fluffy"));
 
-        // Re-import must not merge or duplicate them.
         var again = await Upserter().UpsertAsync(
             [new AwesomeListParser().Parse(md, "main")], new Dictionary<string, EntryHistory>(), T1);
         Assert.Equal((0, 0, 0), (again.Added, again.Updated, again.Removed));
@@ -266,7 +269,8 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.NotNull(miui.ParentId);
         var child = await _db.Apps.SingleAsync(a => a.Name == "aShell You");
         Assert.NotNull(child.ParentId);
-        Assert.Equal(2, await _db.Apps.CountAsync(a => a.Url == "https://github.com/KusStar/krude"));
+        // krude is listed twice in the source; dedupe keeps a single row.
+        Assert.Equal(1, await _db.Apps.CountAsync(a => a.Url == "https://github.com/KusStar/krude"));
         var hail = await _db.Apps.SingleAsync(a => a.Name == "Hail");
         Assert.True(hail.AddedAt <= hail.UpdatedAt);
         Assert.True(hail.AddedAt.Year >= 2022);

@@ -8,7 +8,7 @@ public sealed record ToolProbeResult(string Name, string Path, bool Available, s
 /// <summary>
 /// Startup gate for required external binaries (aapt2, apksigner): runs
 /// <c>&lt;path&gt; &lt;args&gt;</c> with a timeout and requires exit 0.
-/// Used once in Program.cs — per-APK enrichment failures stay best-effort.
+/// Used once in Program.cs, per-APK enrichment failures stay best-effort.
 /// </summary>
 public static class ExternalToolProbe
 {

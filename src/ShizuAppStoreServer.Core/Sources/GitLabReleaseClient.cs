@@ -43,7 +43,7 @@ public interface IGitLabReleaseClient
 
 /// <summary>
 /// Minimal GitLab Releases client over <see cref="HttpClient"/> +
-/// <c>System.Text.Json</c> — same hand-rolled shape as
+/// <c>System.Text.Json</c>, same hand-rolled shape as
 /// <see cref="GitHubReleaseClient"/> (stubbed-<c>HttpClient</c> tests, no
 /// extra deps). Token (optional, raises rate limits) comes from
 /// <c>SHIZU_GITLAB_TOKEN</c> via <c>PRIVATE-TOKEN</c>.
@@ -55,7 +55,7 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
         PropertyNameCaseInsensitive = false,
     };
 
-    // Markdown link: [name](url) — release descriptions commonly carry the
+    // Markdown link: [name](url), release descriptions commonly carry the
     // APK download links as markdown, not as assets.links entries.
     private static readonly Regex MarkdownLink =
         new(@"\[(?<name>[^\]]*)\]\((?<url>[^)\s]+)\)", RegexOptions.Compiled);
@@ -82,10 +82,7 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
             $"https://gitlab.com/api/v4/projects/{Uri.EscapeDataString(projectPath)}/releases?per_page=100");
-        if (etag is not null)
-        {
-            request.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(etag));
-        }
+        request.ApplyIfNoneMatch(etag);
 
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode == HttpStatusCode.NotModified)

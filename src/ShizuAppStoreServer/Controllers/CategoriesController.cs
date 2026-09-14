@@ -19,7 +19,7 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
     /// </summary>
     [HttpGet]
     [OutputCache(PolicyName = "categories")]
-    [ResponseCache(Duration = 300)]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     [ProducesResponseType<IReadOnlyList<CategoryNodeDto>>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status304NotModified)]
     public async Task<ActionResult<IReadOnlyList<CategoryNodeDto>>> Tree(CancellationToken ct = default)
@@ -67,12 +67,10 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
                 : []);
 
         var roots = categories.Where(c => !c.ParentId.HasValue).Select(Build).ToList();
-
-        // NOTE: the MAX() aggregate must run client-side — the SQLite
-        // provider rejects aggregates over DateTimeOffset (Npgsql is fine).
         var maxUpdated = (await db.Apps.AsNoTracking()
             .Select(a => (DateTimeOffset?)a.UpdatedAt)
             .ToListAsync(ct)).Max();
+        
         var etag = $"\"cat-{categories.Count}-{totals.Values.Sum()}-{maxUpdated?.UtcTicks ?? 0}\"";
         if (Request.Headers.IfNoneMatch == etag)
         {
@@ -80,6 +78,6 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
         }
 
         Response.Headers.ETag = etag;
-        return Ok((IReadOnlyList<CategoryNodeDto>)roots);
+        return Ok(roots);
     }
 }

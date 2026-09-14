@@ -1,7 +1,7 @@
 namespace ShizuAppStoreServer.Core.Enrichment;
 
 /// <summary>
-/// Enricher knobs. Binds to the <c>Enrichment</c> config section; the GitHub
+/// Enricher settings. Binds to the <c>Enrichment</c> config section; the GitHub
 /// PAT additionally falls back to <c>SHIZU_GITHUB_TOKEN</c> (see Program.cs).
 /// </summary>
 public sealed class EnrichmentOptions
@@ -32,7 +32,7 @@ public sealed class EnrichmentOptions
     /// <summary>GitLab token for the Releases API (<c>PRIVATE-TOKEN</c>). Null = anonymous.</summary>
     public string? GitLabToken { get; set; }
 
-    /// <summary>Max parallel enrichments (PLAN §5 politeness).</summary>
+    /// <summary>Max parallel enrichments.</summary>
     public int MaxParallelism { get; set; } = 4;
 
     /// <summary>Skip re-enriching healthy apps checked within this window.</summary>

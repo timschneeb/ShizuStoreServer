@@ -60,10 +60,7 @@ public sealed class GitCodeReleaseClient : IGitCodeReleaseClient
         var url = $"https://api.gitcode.com/api/v5/repos/{Uri.EscapeDataString(owner)}"
             + $"/{Uri.EscapeDataString(repo)}/releases?per_page=10";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        if (etag is not null)
-        {
-            request.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(etag));
-        }
+        request.ApplyIfNoneMatch(etag);
 
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode == HttpStatusCode.NotModified)

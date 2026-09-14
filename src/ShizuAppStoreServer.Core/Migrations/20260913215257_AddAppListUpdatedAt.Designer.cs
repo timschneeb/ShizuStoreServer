@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260913215257_AddAppListUpdatedAt")]
+    partial class AddAppListUpdatedAt
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -34,21 +37,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Property<DateTimeOffset>("AddedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("added_at");
-
-                    b.Property<string>("AuthorKey")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("author_key");
-
-                    b.Property<string>("AuthorName")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("author_name");
-
-                    b.Property<string>("AuthorUrl")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
-                        .HasColumnName("author_url");
 
                     b.Property<string>("Availability")
                         .IsRequired()
@@ -81,10 +69,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Property<string>("ExcludedReason")
                         .HasColumnType("text")
                         .HasColumnName("excluded_reason");
-
-                    b.Property<string>("FullDescription")
-                        .HasColumnType("text")
-                        .HasColumnName("full_description");
 
                     b.Property<bool>("HasAds")
                         .HasColumnType("boolean")
@@ -149,11 +133,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("parent_id");
 
-                    b.Property<string>("Permissions")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("permissions");
-
                     b.Property<bool>("RequiresRoot")
                         .HasColumnType("boolean")
                         .HasColumnName("requires_root");
@@ -203,11 +182,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)")
                         .HasColumnName("url");
-
-                    b.Property<string>("VersionName")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("version_name");
 
                     b.Property<DateTimeOffset?>("VersionUpdatedAt")
                         .HasColumnType("timestamp with time zone")

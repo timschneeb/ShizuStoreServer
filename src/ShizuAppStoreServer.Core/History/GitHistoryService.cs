@@ -15,7 +15,9 @@ public sealed record EntryHistory(DateTimeOffset AddedAt, DateTimeOffset Updated
 /// Strategy: a single <c>git log --reverse -p</c> over the list file; every
 /// added bullet line (<c>+* [Name](url)</c>) records a sighting. In reverse
 /// order the first sighting is the introduction (<c>added_at</c>), the last
-/// one the most recent touch (<c>updated_at</c>).
+/// one the most recent touch (<c>updated_at</c>). Commits flagged
+/// <c>[silent]</c> are housekeeping and are skipped, matching the published
+/// changelog.
 /// </summary>
 public sealed partial class GitHistoryService
 {
@@ -23,8 +25,15 @@ public sealed partial class GitHistoryService
     [GeneratedRegex(@"^\+(?!\+\+)\s*\*\s*\[[^\]]+\]\((?<url>[^)]+)\)", RegexOptions.Multiline)]
     private static partial Regex AddedEntryPattern();
 
-    [GeneratedRegex(@"^COMMIT:(?<hash>[0-9a-f]+)\|(?<date>\S+)\s*$", RegexOptions.Multiline)]
+    [GeneratedRegex(@"^COMMIT:(?<hash>[0-9a-f]+)\|(?<date>[^|]+)\|(?<subject>.*)$", RegexOptions.Multiline)]
     private static partial Regex CommitHeaderPattern();
+
+    /// <summary>
+    /// Housekeeping commits flagged <c>[silent]</c> are excluded from the
+    /// published changelog, so they must not move an entry's list-change date
+    /// either.
+    /// </summary>
+    private const string SilentMarker = "[silent]";
 
     /// <summary>
     /// Runs <c>git log</c> in <paramref name="repoPath"/> for
@@ -35,14 +44,14 @@ public sealed partial class GitHistoryService
     public async Task<Dictionary<string, EntryHistory>> GetHistoryAsync(
         string repoPath, string relativePath, CancellationToken ct = default)
     {
-        var output = await RunGitAsync(repoPath, $"log --reverse --format=COMMIT:%H|%aI -p -- {relativePath}", ct);
+        var output = await RunGitAsync(repoPath, $"log --reverse --format=COMMIT:%H|%aI|%s -p -- {relativePath}", ct);
         return ParseLog(output);
     }
 
     /// <summary>
     /// Refreshes the list clone (<c>git fetch origin</c>).
     /// Throws <see cref="InvalidOperationException"/> when git fails (no
-    /// remote, offline, …) — the sync treats that as best-effort and
+    /// remote, offline, …), the sync treats that as best-effort and
     /// continues off local clone state.
     /// </summary>
     public async Task FetchAsync(string repoPath, CancellationToken ct = default)
@@ -76,9 +85,17 @@ public sealed partial class GitHistoryService
             var header = CommitHeaderPattern().Match(line);
             if (header.Success)
             {
+                // Housekeeping commits are marked [silent] and are excluded
+                // from the published changelog; skip their sightings entirely.
+                if (header.Groups["subject"].Value.Contains(SilentMarker, StringComparison.OrdinalIgnoreCase))
+                {
+                    current = null;
+                    continue;
+                }
+
                 // Npgsql writes DateTimeOffset to timestamptz only with
                 // Offset=0 (it stores UTC instants, no offsets), while
-                // SQLite accepts anything — so normalize here, or every
+                // SQLite accepts anything, so normalize here, or every
                 // commit from a non-UTC committer breaks Postgres saves.
                 current = DateTimeOffset.TryParse(
                     header.Groups["date"].Value, CultureInfo.InvariantCulture,

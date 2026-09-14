@@ -93,13 +93,23 @@ public sealed class AppEnricherTests : IDisposable
         }
     }
 
-    private sealed class FakePlayClient(Func<string, string?> handler) : IPlayStoreClient
+    private sealed class FakePlayClient(
+        Func<string, string?> handler,
+        Func<string, PlayAppDetails?>? details = null) : IPlayStoreClient
     {
         public int Calls;
+        public int DetailCalls;
+
         public Task<string?> GetIconUrlAsync(string packageId, CancellationToken ct = default)
         {
             Calls++;
             return Task.FromResult(handler(packageId));
+        }
+
+        public Task<PlayAppDetails?> GetAppDetailsAsync(string packageId, CancellationToken ct = default)
+        {
+            DetailCalls++;
+            return Task.FromResult(details?.Invoke(packageId));
         }
     }
 
@@ -193,7 +203,8 @@ public sealed class AppEnricherTests : IDisposable
         ILauncherIconService? launcherIcons = null,
         IInstafelReleaseClient? instafel = null,
         IGitCodeReleaseClient? gitcode = null,
-        IPlayStoreClient? play = null) =>
+        IPlayStoreClient? play = null,
+        IzzyStatsProvider? izzyStats = null) =>
         new(new GitHubReleaseClient(new HttpClient(github), "tok"),
             new GitLabReleaseClient(new HttpClient(gitlab ?? new StubHandler(_ =>
                 throw new InvalidOperationException("must not call GitLab")))),
@@ -202,7 +213,7 @@ public sealed class AppEnricherTests : IDisposable
             aapt2,
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
             launcherIcons ?? new LauncherIconService(),
-            new HttpClient(downloads), _options, _db, instafel, gitcode, play);
+            new HttpClient(downloads), _options, _db, instafel, gitcode, play, izzyStats);
 
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
@@ -293,6 +304,9 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("\"rel-etag\"", app.EnrichEtag);
         Assert.Equal(T0, app.LastCheckedAt);
         Assert.Null(app.LastError);
+
+        // "Recently updated" tracks the release date, not the enrich pass.
+        Assert.Equal(DateTimeOffset.Parse("2024-06-01T00:00:00Z"), app.VersionUpdatedAt);
 
         var primary = Primary(app);
         Assert.Equal(SourceKind.GitHub, primary.Source);
@@ -393,7 +407,53 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(EnrichOutcome.SkippedFresh, (await enricher.EnrichAsync(app, T0)).Outcome);
-        Assert.Equal(1, github.Calls);
+        // First pass: releases + repo stats + readme. The fresh second pass
+        // must add nothing.
+        Assert.Equal(3, github.Calls);
+    }
+
+    [Fact]
+    public async Task RefetchesLegacyRenderedReadmeButKeepsMarkdown()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var readmeCalls = 0;
+        var github = new StubHandler(request =>
+        {
+            // Route the README call away from the releases payload the other
+            // calls share, so the stored value is unambiguous.
+            if (request.RequestUri!.AbsolutePath.EndsWith("/readme", StringComparison.Ordinal))
+            {
+                readmeCalls++;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("# Fresh\n\n```kt\nval x = 1\n```\n"),
+                };
+            }
+
+            return JsonReleases(
+                ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length),
+                "\"rel-etag\"");
+        });
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2);
+
+        var legacy = NewApp("legacy", "Legacy", "https://github.com/papergray/Legacy");
+        legacy.FullDescription =
+            "<div id=\"readme\" class=\"md\" data-path=\"README.md\"><p>rendered</p></div>";
+        await enricher.EnrichAsync(legacy, T0);
+        Assert.Equal("# Fresh\n\n```kt\nval x = 1\n```\n", legacy.FullDescription);
+        Assert.Equal(1, readmeCalls);
+
+        var markdown = NewApp("markdown", "Markdown", "https://github.com/papergray/Markdown");
+        markdown.FullDescription = "# Already";
+        await enricher.EnrichAsync(markdown, T0);
+        Assert.Equal("# Already", markdown.FullDescription);
+        Assert.Equal(1, readmeCalls);
     }
 
     [Fact]
@@ -546,7 +606,9 @@ public sealed class AppEnricherTests : IDisposable
         var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
-        Assert.Equal(Availability.LinkOnly, app.Availability);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
+        Assert.Equal(app.Url, app.StoreUrl);
+        Assert.Null(app.ExcludedReason);
         Assert.False(HasDownloads(app));
         Assert.Null(app.LastError);
         Assert.Equal(1, play.Calls);
@@ -555,7 +617,7 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
-    public async Task PlayListingMissingKeepsFailed()
+    public async Task PlayListingWithoutIconFallsBackToPlay()
     {
         var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
         {
@@ -570,10 +632,60 @@ public sealed class AppEnricherTests : IDisposable
 
         var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
 
-        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
-        Assert.Null(app.IconHash);
-        Assert.Contains("404", app.LastError);
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
+        Assert.Equal(app.Url, app.StoreUrl);
+        Assert.Null(app.ExcludedReason);
+        Assert.Null(app.LastError);
+        Assert.Equal(LetterAvatarGenerator.Generate("Play Fail").Sha256, app.IconHash);
+        Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
         Assert.Equal(1, play.Calls);
+    }
+
+    [Fact]
+    public async Task PlayListingDetailsPopulateExternalOnlyApp()
+    {
+        var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}"""),
+        });
+        var iconBytes = TestAssets.SolidPng(512, 512, Color.Red);
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(iconBytes),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var play = new FakePlayClient(
+            _ => throw new InvalidOperationException("details carry the icon"),
+            _ => new PlayAppDetails(
+                "https://play-lh.googleusercontent.com/icon=s0-br30",
+                "HyperOS MIUI 5G Switcher",
+                "7220530116384657977",
+                "MeowBit",
+                "https://play.google.com/store/apps/dev?id=7220530116384657977",
+                "2.6.0-new",
+                "NOTE: This app only supports HyperOS & MIUI system.",
+                DateTimeOffset.Parse("2026-07-22T00:00:00Z")));
+        var app = NewApp("plays-details", "Play Details",
+            "https://play.google.com/store/apps/details?id=com.ysy.switcherfiveg",
+            "https://github.com/example/switcher");
+
+        var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
+        Assert.Equal("com.ysy.switcherfiveg", app.PackageName);
+        Assert.Equal("MeowBit", app.AuthorName);
+        Assert.Equal(
+            "https://play.google.com/store/apps/dev?id=7220530116384657977",
+            app.AuthorUrl);
+        Assert.Equal("play:7220530116384657977", app.AuthorKey);
+        Assert.Equal("2.6.0-new", app.VersionName);
+        Assert.Equal("NOTE: This app only supports HyperOS & MIUI system.", app.FullDescription);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-22T00:00:00Z"), app.VersionUpdatedAt);
+        Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
+        Assert.Equal(0, play.Calls);
+        Assert.Equal(1, play.DetailCalls);
     }
 
     [Fact]
@@ -702,7 +814,7 @@ public sealed class AppEnricherTests : IDisposable
         return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid), gitlab, downloads, aapt2, zip);
     }
 
-    // Real index.xml shape (element-style version/versioncode/sig —
+    // Real index.xml shape (element-style version/versioncode/sig;
     // regression cover for the M4 attribute-only parser bug).
     private const string FdroidIndexXml = """
         <?xml version="1.0" encoding="utf-8"?>
@@ -726,7 +838,8 @@ public sealed class AppEnricherTests : IDisposable
 
     /// <summary>F-Droid wiring: index fetch + icon mirror; the APK download is attempted but 404s, exercising the index-only fallback.</summary>
     private (AppEnricher Enricher, StubHandler Fdroid, StubHandler Downloads)
-        FdroidHappyPath(byte[]? iconBytes = null, bool icon404 = false, Func<HttpResponseMessage>? githubResponse = null)
+        FdroidHappyPath(byte[]? iconBytes = null, bool icon404 = false, Func<HttpResponseMessage>? githubResponse = null,
+            IzzyStatsProvider? izzyStats = null)
     {
         iconBytes ??= TestAssets.SolidPng(256, 256, Color.Purple);
         var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
@@ -747,7 +860,7 @@ public sealed class AppEnricherTests : IDisposable
             : new StubHandler(_ => githubResponse());
         var gitlab = new StubHandler(_ => throw new InvalidOperationException("must not call GitLab"));
         var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
-        return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid), fdroid, downloads);
+        return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid, izzyStats: izzyStats), fdroid, downloads);
     }
 
     [Fact]
@@ -876,6 +989,9 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Null(primary.SigSha256); // no APK analyzed: SHA-256 unknown
         Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", primary.SigMd5); // index <sig>
         Assert.Null(app.LastError);
+        // F-Droid publishes no release dates, so the app stays unknown and sorts
+        // last under "recently updated".
+        Assert.Null(app.VersionUpdatedAt);
         // Icon is the mirrored repo PNG, normalized to 192px.
         Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
         using var icon = Image.Load(Path.Combine(_iconDir, $"{app.IconHash}.png"));
@@ -906,6 +1022,35 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(SourceKind.Izzy, app.SourceKind);
         Assert.StartsWith("https://apt.izzysoft.de/fdroid/repo/", Primary(app).ApkUrl);
+    }
+
+    [Fact]
+    public async Task IzzyAppGetsRollingDownloadCount()
+    {
+        var stats = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"com.example.app":12345}"""),
+        });
+        var izzyStats = new IzzyStatsProvider(new IzzyStatsClient(new HttpClient(stats)));
+        var (enricher, _, _) = FdroidHappyPath(izzyStats: izzyStats);
+        var app = NewApp("amarok", "Amarok", "https://apt.izzysoft.de/fdroid/index/apk/com.example.app");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(12345, app.DownloadTotal);
+    }
+
+    [Fact]
+    public async Task FdroidAppHasNoDownloadCount()
+    {
+        // f-droid.org publishes no counts, so the stats provider must not be
+        // consulted for an F-Droid-primary app.
+        var stats = new StubHandler(_ => throw new InvalidOperationException("must not fetch Izzy stats"));
+        var izzyStats = new IzzyStatsProvider(new IzzyStatsClient(new HttpClient(stats)));
+        var (enricher, _, _) = FdroidHappyPath(izzyStats: izzyStats);
+        var app = NewApp("hail", "Hail", "https://f-droid.org/packages/com.example.app");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Null(app.DownloadTotal);
     }
 
     [Fact]
@@ -1374,7 +1519,7 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Equal(1, downloads.Calls); // APK only — its icon wins, no mirror traffic
+        Assert.Equal(1, downloads.Calls); // APK only; its icon wins, no mirror traffic
         var primary = Primary(app);
         Assert.Equal(SourceKind.FDroid, primary.Source);
         Assert.Equal(Sha256(zip), primary.Sha256); // bytes win over the index hash

@@ -12,7 +12,7 @@ namespace ShizuAppStoreServer.Core.Tests;
 
 /// <summary>
 /// Hermetic sync-loop tests: a temp <c>git</c> repo (fixed commit dates, no
-/// remote — which also proves the best-effort fetch tolerates missing
+/// remote, which also proves the best-effort fetch tolerates missing
 /// remotes) + SQLite + a stub <see cref="IEnrichmentRunner"/> that marks
 /// rows checked. Needs the <c>git</c> CLI (early return otherwise, like
 /// <c>RealAapt2SmokeTests</c>).
@@ -230,7 +230,7 @@ public sealed class SyncServiceTests : IDisposable
         tuner = _db.Apps.Single(a => a.Slug == "tuner");
         Assert.Null(tuner.ExcludedReason);
         // Clearing nulled LastCheckedAt mid-pass, forcing re-enrichment (the
-        // fake stamps it again — proof the app was re-run, not skipped).
+        // fake stamps it again, proof the app was re-run, not skipped).
         Assert.Contains(_runner.Calls.Skip(callsBefore), c => c.AppId == tuner.Id);
     }
 

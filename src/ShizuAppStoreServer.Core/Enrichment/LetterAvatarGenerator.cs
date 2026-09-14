@@ -9,7 +9,7 @@ namespace ShizuAppStoreServer.Core.Enrichment;
 /// <summary>
 /// Deterministic letter-avatar fallback (192px PNG) for entries with no
 /// extractable APK icon: non-GitHub sources, missing releases, adaptive-icon
-/// XML with no raster layer. Self-contained 5×7 pixel font — no system-font
+/// XML with no raster layer. Self-contained 5×7 pixel font, no system-font
 /// dependency, so output is identical on dev machines and the server.
 /// </summary>
 public static class LetterAvatarGenerator
