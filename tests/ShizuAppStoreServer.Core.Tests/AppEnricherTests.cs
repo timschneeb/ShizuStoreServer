@@ -510,6 +510,40 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task SameVersionCodeWithNewNameDoesNotDuplicateVersionRow()
+    {
+        // Live case (vFlow): v1.5.3-pr1 reused 1.5.2's versionCode. The check
+        // matched (code, name) while the index is (app, code), so the insert
+        // violated it and rolled back stars/permissions with the whole save.
+        AppEnricher Wiring(string tag, string versionName)
+        {
+            var zip = TestAssets.BuildApk(
+                (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+            var github = new StubHandler(_ => JsonReleases(
+                ReleaseJson(tag, "app-release.apk", "https://cdn.example/app.apk", zip.Length),
+                "\"rel-etag\""));
+            var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(zip),
+            });
+            var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(
+                versionCode: "42", versionName: versionName));
+            return BuildEnricher(github, downloads, aapt2);
+        }
+
+        var app = NewApp("retagged", "Retagged", "https://github.com/example/retagged");
+        Assert.Equal(EnrichOutcome.Enriched, (await Wiring("v1.0", "1.2.3").EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+
+        // Same code under a new tag/name: no duplicate row, enrich still lands.
+        Age(app);
+        Assert.Equal(EnrichOutcome.Enriched, (await Wiring("v1.1-pr1", "1.2.4").EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
     public async Task KeepsSharedIconWhileOtherAppUsesIt()
     {
         var (enricher, _, _, _, _) = HappyPath();
@@ -549,7 +583,8 @@ public sealed class AppEnricherTests : IDisposable
 
         // Immediate retry is skipped (backoff); after the window it retries.
         Assert.Equal(EnrichOutcome.SkippedFresh, (await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0)).Outcome);
-        Assert.Equal(1, github.Calls);
+        // Releases plus the best-effort stats call, which also 404s here.
+        Assert.Equal(2, github.Calls);
     }
 
     [Fact]
@@ -1659,6 +1694,43 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Failed, result.Outcome);
         Assert.Contains("Upstream error", app.LastError);
         Assert.Equal(T0, app.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task RecordsStarsAndDeveloperWhenReleasesAreRateLimited()
+    {
+        // Live case (vFlow): the releases call hit GitHub API 403 while repo
+        // metadata was fine, but stars/author were dropped with the failure.
+        // Deep file URLs (README_EN.md) parse to owner/repo like any other.
+        var github = new StubHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/releases", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.Forbidden)
+                {
+                    Content = new StringContent("""{"message":"API rate limit exceeded"}"""),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"stargazers_count":1494,"owner":{"login":"ChaoMixian","html_url":"https://github.com/ChaoMixian"}}"""),
+            };
+        });
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var app = NewApp("ratelimited", "RateLimited",
+            "https://github.com/ChaoMixian/vFlow/blob/master/README_EN.md");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
+        Assert.Contains("403", app.LastError);
+        Assert.Equal(1494, app.Stars);
+        Assert.Equal("ChaoMixian", app.AuthorName);
+        Assert.Equal("github:chaomixian", app.AuthorKey);
+        Assert.Equal("https://github.com/ChaoMixian", app.AuthorUrl);
     }
 
     [Fact]

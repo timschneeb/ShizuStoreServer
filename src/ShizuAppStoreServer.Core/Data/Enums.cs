@@ -1,5 +1,7 @@
 namespace ShizuAppStoreServer.Core.Data;
 
+using System.ComponentModel;
+
 /// <summary>Which awesome-list file an entry comes from.</summary>
 public enum Listing
 {
@@ -31,12 +33,19 @@ public enum CategorySection
 /// <summary>Hosting forge detected from the entry/source URL. Set by the resolvers (M4).</summary>
 public enum SourceKind
 {
+    [Description("GitHub")]
     GitHub,
+    [Description("GitLab")]
     GitLab,
+    [Description("Codeberg")]
     Codeberg,
+    [Description("F-Droid")]
     FDroid,
+    [Description("IzzyOnDroid")]
     Izzy,
+    [Description("Play Store")]
     Play,
+    [Description("Website")]
     Other,
 }
 

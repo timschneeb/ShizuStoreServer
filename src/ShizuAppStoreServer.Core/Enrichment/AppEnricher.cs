@@ -235,28 +235,58 @@ public sealed class AppEnricher(
         }
     }
 
+    /// <summary>
+    /// Best-effort repo metadata: stars plus the repo owner as developer
+    /// identity. Popularity and developer details are refreshed even on a 304,
+    /// so they stay current without a new release. Never throws (except on
+    /// cancellation): a failing stats call leaves previous values alone and
+    /// the parsed owner stays the developer fallback.
+    /// </summary>
+    private async Task RefreshGitHubStatsAsync(App app, string owner, string repo, CancellationToken ct)
+    {
+        GitHubRepoStats? stats = null;
+        try
+        {
+            stats = await github.GetRepoStatsAsync(owner, repo, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogDebug(ex, "Repo stats fetch failed for {Owner}/{Repo}.", owner, repo);
+        }
+
+        if (stats?.Stars is { } stars)
+        {
+            app.Stars = stars;
+        }
+
+        // The repo owner is a stable developer identity; fall back to the
+        // parsed owner when the stats call failed.
+        var ownerLogin = stats?.OwnerLogin ?? owner;
+        app.AuthorName = ownerLogin;
+        app.AuthorUrl = stats?.OwnerUrl ?? $"https://github.com/{ownerLogin}";
+        app.AuthorKey = $"github:{ownerLogin.ToLowerInvariant()}";
+    }
+
     private async Task<EnrichResult> EnrichFromGitHubAsync(
         App app, string owner, string repo, DateTimeOffset now, CancellationToken ct)
     {
+        // A failing release list must not gate repo metadata: rate limits or
+        // missing releases would otherwise also blank stars and developer.
+        GitHubRelease? latest;
+        try
+        {
+            latest = await github.GetLatestReleaseAsync(owner, repo, app.EnrichEtag, ct);
+        }
+        catch (GitHubApiException ex)
+        {
+            await RefreshGitHubStatsAsync(app, owner, repo, ct);
+            return await HandleGitHubFailureAsync(ex);
+        }
+
         GitHubRelease release;
         try
         {
-            var latest = await github.GetLatestReleaseAsync(owner, repo, app.EnrichEtag, ct);
-
-            // Popularity and developer details are best-effort and refreshed
-            // even on a 304, so they stay current without a new release.
-            var stats = await github.GetRepoStatsAsync(owner, repo, ct);
-            if (stats?.Stars is { } stars)
-            {
-                app.Stars = stars;
-            }
-
-            // The repo owner is a stable developer identity; fall back to the
-            // parsed owner when the stats call failed.
-            var ownerLogin = stats?.OwnerLogin ?? owner;
-            app.AuthorName = ownerLogin;
-            app.AuthorUrl = stats?.OwnerUrl ?? $"https://github.com/{ownerLogin}";
-            app.AuthorKey = $"github:{ownerLogin.ToLowerInvariant()}";
+            await RefreshGitHubStatsAsync(app, owner, repo, ct);
 
             // Raw markdown, not rendered HTML: the client renders markdown.
             if (NeedsReadmeRefresh(app.FullDescription)
@@ -277,6 +307,11 @@ public sealed class AppEnricher(
             release = latest;
         }
         catch (GitHubApiException ex)
+        {
+            return await HandleGitHubFailureAsync(ex);
+        }
+
+        async Task<EnrichResult> HandleGitHubFailureAsync(GitHubApiException ex)
         {
             // No releases / unknown repo: the app may be F-Droid-only. A
             // transient API error (rate limit, 5xx) must not lock the source.
@@ -1517,8 +1552,12 @@ public sealed class AppEnricher(
     private async Task AddVersionRowAsync(
         App app, long? versionCode, string? versionName, string apkUrl, DateTimeOffset now, CancellationToken ct)
     {
+        // Identity is (app, code), mirroring IX_app_versions_app_id_version_code:
+        // upstreams re-tag the same build (vFlow's v1.5.3-pr1 reuses 1.5.2's
+        // code), and matching on the name too inserted a duplicate row whose
+        // unique violation rolled back the whole enrich (stars, permissions).
         if (!await db.AppVersions.AnyAsync(v =>
-            v.AppId == app.Id && v.VersionCode == versionCode && v.VersionName == versionName, ct))
+            v.AppId == app.Id && v.VersionCode == versionCode, ct))
         {
             app.Versions.Add(new AppVersion
             {

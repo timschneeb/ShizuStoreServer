@@ -2,8 +2,6 @@ using ShizuAppStoreServer.Core.Data;
 
 namespace ShizuAppStoreServer.Api;
 
-// TODO: use AutoMapper or a similar library?
-
 /// <summary>Entity → DTO projections shared by the apps and changes controllers.</summary>
 public static class AppMapper
 {
@@ -107,17 +105,7 @@ public static class AppMapper
     /// </summary>
     private static string SourceName(App a) => a.Availability == Availability.PlayRedirect
         ? "Play Store"
-        // TODO: Use DescriptionAttribute on the enum members to store their friendly-name
-        : a.SourceKind switch
-        {
-            SourceKind.GitHub => "GitHub",
-            SourceKind.GitLab => "GitLab",
-            SourceKind.Codeberg => "Codeberg",
-            SourceKind.FDroid => "F-Droid",
-            SourceKind.Izzy => "IzzyOnDroid",
-            SourceKind.Play => "Play Store",
-            _ => "Website",
-        };
+        : a.SourceKind.GetDescription();
 
     private static DownloadDto ToDownload(AppDownload d) => new(
         ApiEnums.ToApiString(d.Source),
