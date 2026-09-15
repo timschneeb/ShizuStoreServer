@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ShizuAppStoreServer.Core.History;
 using Xunit;
 
@@ -120,6 +121,150 @@ public sealed class GitHistoryServiceTests
         var head = await service.GetHeadCommitAsync(repo);
         Assert.NotNull(head);
         Assert.Matches("^[0-9a-f]{40}$", head);
+    }
+
+    [Fact]
+    public async Task FetchAsyncFastForwardsToRemoteHead()
+    {
+        if (!GitAvailable())
+        {
+            // Needs the git CLI (early return like the other live-ish tests).
+            return;
+        }
+
+        var root = TempRoot();
+        try
+        {
+            var (_, clone, other) = await InitTwoClonesAsync(root);
+            await File.WriteAllTextAsync(Path.Combine(other, "README.md"), "list v2\n");
+            await CommitAllAsync(other, "update list");
+            await GitAsync(other, "push origin master");
+            var remoteHead = (await GitAsync(other, "rev-parse HEAD")).Trim();
+
+            await new GitHistoryService().FetchAsync(clone);
+
+            Assert.Equal(remoteHead, (await GitAsync(clone, "rev-parse HEAD")).Trim());
+            Assert.Equal("list v2\n", await File.ReadAllTextAsync(Path.Combine(clone, "README.md")));
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    [Fact]
+    public async Task FetchAsyncReclonesWhenHistoryDiverged()
+    {
+        if (!GitAvailable())
+        {
+            return;
+        }
+
+        var root = TempRoot();
+        try
+        {
+            var (_, clone, other) = await InitTwoClonesAsync(root);
+
+            // Diverge the worker clone, then move the remote from elsewhere:
+            // a fast-forward is impossible, so the clone must be replaced.
+            await File.WriteAllTextAsync(Path.Combine(clone, "local-only.txt"), "mine\n");
+            await CommitAllAsync(clone, "local commit");
+            await File.WriteAllTextAsync(Path.Combine(other, "README.md"), "list v2\n");
+            await CommitAllAsync(other, "update list");
+            await GitAsync(other, "push origin master");
+            var remoteHead = (await GitAsync(other, "rev-parse HEAD")).Trim();
+
+            await new GitHistoryService().FetchAsync(clone);
+
+            Assert.Equal(remoteHead, (await GitAsync(clone, "rev-parse HEAD")).Trim());
+            Assert.Equal("list v2\n", await File.ReadAllTextAsync(Path.Combine(clone, "README.md")));
+            Assert.False(File.Exists(Path.Combine(clone, "local-only.txt")));
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    private static bool GitAvailable()
+    {
+        try
+        {
+            GitAsync(Path.GetTempPath(), "--version").GetAwaiter().GetResult();
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<(string Remote, string Clone, string Other)> InitTwoClonesAsync(string root)
+    {
+        var remote = Path.Combine(root, "remote.git");
+        var clone = Path.Combine(root, "clone");
+        var other = Path.Combine(root, "other");
+        Directory.CreateDirectory(root);
+        await GitAsync(root, $"init --bare -b master \"{remote}\"");
+        await GitAsync(root, $"clone \"{remote}\" \"{clone}\"");
+        await ConfigureAsync(clone);
+        await File.WriteAllTextAsync(Path.Combine(clone, "README.md"), "list v1\n");
+        await CommitAllAsync(clone, "init");
+        await GitAsync(clone, "push -u origin master");
+        await GitAsync(root, $"clone \"{remote}\" \"{other}\"");
+        await ConfigureAsync(other);
+        return (remote, clone, other);
+    }
+
+    private static async Task ConfigureAsync(string repo)
+    {
+        await GitAsync(repo, "config user.email test@example.com");
+        await GitAsync(repo, "config user.name Test");
+    }
+
+    private static async Task CommitAllAsync(string repo, string message)
+    {
+        await GitAsync(repo, "add -A");
+        await GitAsync(repo, $"commit -m \"{message}\"");
+    }
+
+    private static async Task<string> GitAsync(string workingDir, string arguments)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo("git", arguments)
+            {
+                WorkingDirectory = workingDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            },
+        };
+        process.Start();
+        var output = await process.StandardOutput.ReadToEndAsync();
+        var error = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"git {arguments} failed: {error.Trim()}");
+        }
+
+        return output;
+    }
+
+    private static string TempRoot() =>
+        Path.Combine(Path.GetTempPath(), "shizu-git-" + Guid.NewGuid().ToString("N"));
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        catch (Exception)
+        {
+            // Best effort: temp dir cleanup must not fail a test.
+        }
     }
 
     private static string? FindAwesomeShizukuRepo()

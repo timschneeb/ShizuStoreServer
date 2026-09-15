@@ -171,7 +171,8 @@ bundle` is rebuilt per deploy, never committed.
   loses its trigger.
 - **removed_apps** - tombstones closing the delete path:
   `slug` unique + `removed_at` index. Written (add-or-refresh) on
-  stale delete, cleared on re-add (resurrection).
+  stale delete and when the Shizuku-permission gate (§5.3) excludes a
+  row, cleared on re-add (resurrection) or when the gate heals a row.
 - **config_flags** - operator-controlled flags (`key` PK, `value`,
   `updated_at`), read live on every use so flips need no restart. A
   missing row reads as its documented default; `GET`s never insert.
@@ -514,6 +515,14 @@ declares the permission. The gate never touches another exclusion reason
 (for example the ARCHIVED one), and `exclude_override` acts as an
 implicit allow.
 
+Excluding a row also writes a `removed_apps` tombstone (§3): `/v1/changes`
+hides excluded rows from `added`/`updated` and reports removal only through
+tombstones, so without one a client that cached the app before the gate
+keeps it forever. The write is idempotent and backfills rows excluded
+before tombstoning existed. A heal clears the tombstone and bumps
+`updated_at` so the app reaches clients as an update rather than a stale
+add.
+
 `package_exceptions` holds operator overrides keyed by `package_name`
 (table §3), seeded by migration and edited with SQL. `allow` keeps the
 row available and emits no issue; `dontaudit` excludes it like the
@@ -577,7 +586,11 @@ row. A pass:
 1. Drains unprocessed `sync_requests` (any rows → trigger
    `"webhook"`; marked processed only on success).
 2. Best-effort `git fetch` (5-min timeout; offline/timeout →
-   continue off the local clone).
+   continue off the local clone) followed by a fast-forward of the
+   current branch to its upstream (`git merge --ff-only`), so the
+   working tree the pass reads is current. The clone is never written
+   to locally, so a fast-forward that cannot apply (diverged history,
+   dirty tree) deletes the clone and re-clones it from origin.
 3. Compares HEAD against the latest run's commit: unchanged HEAD +
    no requests + no `force` → enrich due-only apps plus
    poll-changed apps (forced) and write the row, or return

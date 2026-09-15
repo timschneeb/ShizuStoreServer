@@ -1,5 +1,5 @@
 [Unit]
-Description=Shizu App Store API + sync worker
+Description=Shizu App Store API
 After=network-online.target postgresql.service
 Wants=network-online.target
 
@@ -11,7 +11,7 @@ WorkingDirectory=/opt/shizuappstore/app
 ExecStart=/opt/shizuappstore/app/ShizuAppStoreServer
 EnvironmentFile=/etc/shizuappstore/env
 Environment=ASPNETCORE_ENVIRONMENT=Production
-Environment=ASPNETCORE_URLS=http://127.0.0.1:5100
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5137
 Restart=on-failure
 RestartSec=10
 # The worker enriches APKs in parallel; keep some headroom, cap the blast radius.

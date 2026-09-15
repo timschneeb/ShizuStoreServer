@@ -159,7 +159,7 @@ public sealed class SyncService(
             _runLog.Begin(effectiveTrigger, fullRecheck, now, dueIds.Count + freshIds.Count);
             var (enriched, upToDate, failed, failedMessages) =
                 await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
-            await ApplyShizukuFilterAsync(ct);
+            await ApplyShizukuFilterAsync(now, ct);
             return await FinishRunAsync(effectiveTrigger, head,
                 0, 0, 0, enriched, upToDate, failed,
                 0, [], false, 0, now, ct, failedMessages);
@@ -196,7 +196,7 @@ public sealed class SyncService(
         _runLog.Begin(effectiveTrigger, fullRecheck, now, ids.Count + extraIds.Count);
         var (enrichedFull, upToDateFull, failedFull, failedMessagesFull) =
             await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
-        await ApplyShizukuFilterAsync(ct);
+        await ApplyShizukuFilterAsync(now, ct);
 
         return await FinishRunAsync(effectiveTrigger, head,
             counts.Added, counts.Updated, counts.Removed,
@@ -395,11 +395,23 @@ public sealed class SyncService(
     /// issue collection so the two stay consistent in one pass. Rows excluded
     /// here stay in the due/recheck selection (they carry this exact reason) so
     /// a later APK that declares the permission auto-heals them.
+    ///
+    /// Excluding a row also writes a <see cref="RemovedApp"/> tombstone, because
+    /// the delta feed keys <c>/v1/changes removed[]</c> on that table and drops
+    /// excluded rows from <c>added[]</c>/<c>updated[]</c>: without the tombstone
+    /// a client that cached the app before the gate never learns to drop it.
+    /// The write doubles as the backfill for rows excluded before tombstoning
+    /// existed. Healing clears the tombstone and bumps <c>UpdatedAt</c> (an
+    /// availability flip alone does not, see <see cref="ShizuDbContext"/>), so
+    /// the app reaches clients again as an update instead of resurfacing via
+    /// <c>added[]</c> with its original date.
     /// </remarks>
-    private async Task<int> ApplyShizukuFilterAsync(CancellationToken ct)
+    private async Task<int> ApplyShizukuFilterAsync(DateTimeOffset now, CancellationToken ct)
     {
         var exceptions = await db.PackageExceptions.AsNoTracking()
             .ToDictionaryAsync(e => e.PackageName, e => e.Action, StringComparer.Ordinal);
+        var tombstones = await db.RemovedApps
+            .ToDictionaryAsync(t => t.Slug, StringComparer.Ordinal);
         var apps = await db.Apps
             .Where(a => a.PackageName != null
                 && (a.Availability == Availability.DirectApk
@@ -408,6 +420,7 @@ public sealed class SyncService(
             .ToListAsync(ct);
 
         var changed = 0;
+        var tombstonesChanged = false;
         foreach (var app in apps)
         {
             var allowed = ShizukuPermission.IsDeclared(app.Permissions)
@@ -418,17 +431,43 @@ public sealed class SyncService(
             {
                 app.Availability = Availability.DirectApk;
                 app.ExcludedReason = null;
+                app.UpdatedAt = now;
+                if (tombstones.Remove(app.Slug, out var cleared))
+                {
+                    db.RemovedApps.Remove(cleared);
+                    tombstonesChanged = true;
+                }
+
                 changed++;
             }
-            else if (!allowed && app.ExcludedReason != ShizukuPermission.Reason)
+            else if (!allowed)
             {
-                app.Availability = Availability.Excluded;
-                app.ExcludedReason = ShizukuPermission.Reason;
-                changed++;
+                if (app.ExcludedReason != ShizukuPermission.Reason)
+                {
+                    app.Availability = Availability.Excluded;
+                    app.ExcludedReason = ShizukuPermission.Reason;
+                    changed++;
+                }
+
+                // One tombstone per gated slug; re-excluding after a heal
+                // writes a fresh one so clients drop the row again.
+                if (!tombstones.ContainsKey(app.Slug))
+                {
+                    var tombstone = new RemovedApp
+                    {
+                        Slug = app.Slug,
+                        Name = app.Name,
+                        Listing = app.Listing,
+                        RemovedAt = now,
+                    };
+                    tombstones[app.Slug] = tombstone;
+                    db.RemovedApps.Add(tombstone);
+                    tombstonesChanged = true;
+                }
             }
         }
 
-        if (changed > 0)
+        if (changed > 0 || tombstonesChanged)
         {
             await db.SaveChangesAsync(ct);
         }

@@ -445,6 +445,8 @@ public sealed class SyncServiceTests : IDisposable
         var tuner = await SeedDirectApkAsync();
         await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
         Assert.Equal(Availability.Excluded, tuner.Availability);
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+        var excludedAt = tuner.UpdatedAt;
 
         tuner.Permissions = ["moe.shizuku.manager.permission.API_V23"];
         tuner.LastCheckedAt = null;
@@ -453,7 +455,53 @@ public sealed class SyncServiceTests : IDisposable
 
         Assert.Equal(Availability.DirectApk, tuner.Availability);
         Assert.Null(tuner.ExcludedReason);
+        Assert.DoesNotContain(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+        // The client sees the healed app as an update, not a stale add.
+        Assert.True(tuner.UpdatedAt > excludedAt);
         Assert.DoesNotContain(_db.SyncIssues.ToList(), i => i.Rule == ShizukuPermission.Rule);
+    }
+
+    [Fact]
+    public async Task ShizukuGateExclusionWritesRemovedTombstoneOnce()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+        var tombstone = Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+        Assert.Equal(tuner.Name, tombstone.Name);
+        Assert.Equal(tuner.Listing, tombstone.Listing);
+
+        // Re-running the gate does not duplicate the tombstone.
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(32));
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+    }
+
+    [Fact]
+    public async Task ShizukuGateBackfillsTombstoneForAnAlreadyExcludedRow()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        tuner.Availability = Availability.Excluded;
+        tuner.ExcludedReason = ShizukuPermission.Reason;
+        await _db.SaveChangesAsync();
+        Assert.Empty(_db.RemovedApps);
+
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
     }
 
     [Fact]

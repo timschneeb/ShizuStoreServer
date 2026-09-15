@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 
 namespace ShizuAppStoreServer.Core.History;
 
@@ -19,7 +20,7 @@ public sealed record EntryHistory(DateTimeOffset AddedAt, DateTimeOffset Updated
 /// <c>[silent]</c> are housekeeping and are skipped, matching the published
 /// changelog.
 /// </summary>
-public sealed partial class GitHistoryService
+public sealed partial class GitHistoryService(ILogger<GitHistoryService>? log = null)
 {
     // Added bullet lines only ("+" but not the "+++" file header).
     [GeneratedRegex(@"^\+(?!\+\+)\s*\*\s*\[[^\]]+\]\((?<url>[^)]+)\)", RegexOptions.Multiline)]
@@ -49,7 +50,8 @@ public sealed partial class GitHistoryService
     }
 
     /// <summary>
-    /// Refreshes the list clone (<c>git fetch origin</c>).
+    /// Refreshes the list clone (<c>git fetch origin</c>) and advances the
+    /// working tree to the fetched upstream.
     /// Throws <see cref="InvalidOperationException"/> when git fails (no
     /// remote, offline, …), the sync treats that as best-effort and
     /// continues off local clone state.
@@ -57,6 +59,64 @@ public sealed partial class GitHistoryService
     public async Task FetchAsync(string repoPath, CancellationToken ct = default)
     {
         await RunGitAsync(repoPath, "fetch origin", ct);
+        await FastForwardAsync(repoPath, ct);
+    }
+
+    /// <summary>
+    /// Fast-forwards the checked-out branch to its upstream. The clone is
+    /// worker-owned (production never writes to it), so a fast-forward that
+    /// cannot apply (diverged history, dirty tree) is recovered by deleting
+    /// and re-cloning instead of leaving the sync on a stale list.
+    /// </summary>
+    private async Task FastForwardAsync(string repoPath, CancellationToken ct)
+    {
+        string upstream;
+        try
+        {
+            // A repo without an upstream (plain local checkout) has nothing to
+            // advance to, so it is not a failure.
+            upstream = (await RunGitAsync(
+                repoPath, "rev-parse --abbrev-ref --symbolic-full-name @{u}", ct)).Trim();
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
+        if (upstream.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await RunGitAsync(repoPath, $"merge --ff-only --no-edit {upstream}", ct);
+        }
+        catch (InvalidOperationException ex)
+        {
+            log?.LogWarning(
+                "Fast-forward of '{Path}' to {Upstream} failed ({Error}); re-cloning.",
+                repoPath, upstream, ex.Message);
+            await RecloneAsync(repoPath, ct);
+        }
+    }
+
+    /// <summary>
+    /// Replaces a broken clone with a fresh one. The remote URL is the only
+    /// state worth keeping, so it is read before the directory is deleted.
+    /// </summary>
+    private static async Task RecloneAsync(string repoPath, CancellationToken ct)
+    {
+        var url = (await RunGitAsync(repoPath, "remote get-url origin", ct)).Trim();
+        var full = Path.GetFullPath(repoPath);
+        var parent = Path.GetDirectoryName(full)
+            ?? throw new InvalidOperationException($"Cannot resolve the parent of '{repoPath}'.");
+        if (Directory.Exists(full))
+        {
+            Directory.Delete(full, recursive: true);
+        }
+
+        await RunGitAsync(parent, $"clone \"{url}\" \"{full}\"", ct);
     }
 
     /// <summary>HEAD commit SHA of the list clone (sync_runs bookkeeping). Null when unavailable.</summary>
