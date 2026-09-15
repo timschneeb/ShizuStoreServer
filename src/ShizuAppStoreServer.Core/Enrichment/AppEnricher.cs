@@ -471,8 +471,27 @@ public sealed class AppEnricher(
 
             if (latest is null)
             {
-                app.LastCheckedAt = now;
-                return new EnrichResult(EnrichOutcome.UpToDate, null);
+                // A 304 would keep pre-fix rows permission-less forever (see
+                // NeedsPermissionHeal): refetch the list once and re-analyze
+                // below. A failing refetch is not an upstream change, so stay
+                // up-to-date instead of failing the pass.
+                if (NeedsPermissionHeal(app, await PrimaryDownloadAsync(app, ct)))
+                {
+                    try
+                    {
+                        latest = await gitlab.GetLatestReleaseAsync(projectPath, null, ct);
+                    }
+                    catch (GitLabApiException)
+                    {
+                        latest = null;
+                    }
+                }
+
+                if (latest is null)
+                {
+                    app.LastCheckedAt = now;
+                    return new EnrichResult(EnrichOutcome.UpToDate, null);
+                }
             }
 
             release = latest;
@@ -870,8 +889,27 @@ public sealed class AppEnricher(
 
         if (fetched is null)
         {
-            app.LastCheckedAt = now;
-            return new EnrichResult(EnrichOutcome.UpToDate, null);
+            // A 304 would keep pre-fix rows permission-less forever (see
+            // NeedsPermissionHeal): refetch the index once and re-analyze
+            // below. A failing refetch is not an upstream change, so stay
+            // up-to-date instead of failing the pass.
+            if (NeedsPermissionHeal(app, await PrimaryDownloadAsync(app, ct)))
+            {
+                try
+                {
+                    fetched = await fdroid.GetPackageAsync(repoBase, packageId, null, ct);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
+                {
+                    fetched = null;
+                }
+            }
+
+            if (fetched is null)
+            {
+                app.LastCheckedAt = now;
+                return new EnrichResult(EnrichOutcome.UpToDate, null);
+            }
         }
 
         var (package, indexEtag) = fetched.Value;
