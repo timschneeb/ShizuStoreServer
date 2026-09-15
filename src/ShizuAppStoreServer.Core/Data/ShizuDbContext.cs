@@ -12,6 +12,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
     public DbSet<RemovedApp> RemovedApps => Set<RemovedApp>();
+    public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
 
     public override int SaveChanges()
     {
@@ -161,6 +162,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.IconAdaptive).HasColumnName("icon_adaptive");
             e.Property(x => x.Stars).HasColumnName("stars");
             e.Property(x => x.DownloadTotal).HasColumnName("download_total");
+            e.Property(x => x.InstallCount).HasColumnName("install_count").HasDefaultValue(0L);
+            e.Property(x => x.InstallCountUpdatedAt).HasColumnName("install_count_updated_at");
             e.Property(x => x.CategoryId).HasColumnName("category_id");
             e.HasOne(x => x.Category).WithMany(x => x.Apps).HasForeignKey(x => x.CategoryId).OnDelete(DeleteBehavior.Restrict);
             e.Property(x => x.AddedAt).HasColumnName("added_at").IsRequired();
@@ -254,6 +257,15 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Listing).HasColumnName("listing").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.RemovedAt).HasColumnName("removed_at").IsRequired();
             e.HasIndex(x => x.RemovedAt);
+        });
+
+        b.Entity<ConfigFlag>(e =>
+        {
+            e.ToTable("config_flags");
+            e.HasKey(x => x.Key);
+            e.Property(x => x.Key).HasColumnName("key").HasMaxLength(200).IsRequired();
+            e.Property(x => x.Value).HasColumnName("value").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
         });
     }
 }

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260914225027_AddAppInstallCount")]
+    partial class AddAppInstallCount
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -112,10 +115,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("bigint")
                         .HasDefaultValue(0L)
                         .HasColumnName("install_count");
-
-                    b.Property<DateTimeOffset?>("InstallCountUpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("install_count_updated_at");
 
                     b.Property<bool>("IsRecommended")
                         .HasColumnType("boolean")
@@ -414,27 +413,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.HasIndex("Section", "ParentId");
 
                     b.ToTable("categories", (string)null);
-                });
-
-            modelBuilder.Entity("ShizuAppStoreServer.Core.Data.ConfigFlag", b =>
-                {
-                    b.Property<string>("Key")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("key");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at");
-
-                    b.Property<string>("Value")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("value");
-
-                    b.HasKey("Key");
-
-                    b.ToTable("config_flags", (string)null);
                 });
 
             modelBuilder.Entity("ShizuAppStoreServer.Core.Data.RemovedApp", b =>

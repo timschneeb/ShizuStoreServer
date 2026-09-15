@@ -204,6 +204,41 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
     }
 
     /// <summary>
+    /// Records one successful client install of <paramref name="slug"/>.
+    /// The counter is atomic (<c>ExecuteUpdateAsync</c> bypasses
+    /// <c>SaveChanges</c>, so <c>UpdatedAt</c> never bumps and the
+    /// added/updated feed does not churn; the move is visible only through
+    /// <c>installsUpdated</c> in <c>/v1/changes</c>).
+    /// <c>excluded</c> rows read as 404.
+    /// </summary>
+    [HttpPost("{slug}/installs")]
+    [ProducesResponseType<InstallRecordedDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<InstallRecordedDto>> RecordInstall(string slug, CancellationToken ct = default)
+    {
+        // ExecuteUpdate is expression-based, so the timestamp is captured
+        // into a local first; both columns land in one atomic UPDATE.
+        var now = DateTimeOffset.UtcNow;
+        var updated = await db.Apps
+            .Where(a => a.Slug == slug && a.Availability != Availability.Excluded)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.InstallCount, a => a.InstallCount + 1)
+                .SetProperty(a => a.InstallCountUpdatedAt, now), ct);
+
+        if (updated == 0)
+        {
+            return NotFound();
+        }
+
+        var count = await db.Apps.AsNoTracking()
+            .Where(a => a.Slug == slug)
+            .Select(a => a.InstallCount)
+            .FirstAsync(ct);
+
+        return Ok(new InstallRecordedDto(slug, count));
+    }
+
+    /// <summary>
     /// Category ids for <paramref name="slug"/> plus all descendants.
     /// Null when the slug is unknown. The table is tiny (~15 rows), so this
     /// runs fully in memory.

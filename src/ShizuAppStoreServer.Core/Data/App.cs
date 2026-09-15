@@ -111,6 +111,20 @@ public sealed class App
     /// </summary>
     public long? DownloadTotal { get; set; }
 
+    /// <summary>
+    /// Successful installs reported by Shizu clients
+    /// (<c>POST /v1/apps/{slug}/installs</c>). Monotonic counter, never
+    /// bumps <c>UpdatedAt</c> so the changes feed does not churn.
+    /// </summary>
+    public long InstallCount { get; set; }
+
+    /// <summary>
+    /// When <c>InstallCount</c> was last incremented. Drives the
+    /// <c>installsUpdated</c> delta map on <c>/v1/changes</c>; null until
+    /// the first reported install.
+    /// </summary>
+    public DateTimeOffset? InstallCountUpdatedAt { get; set; }
+
     public long CategoryId { get; set; }
     public Category? Category { get; set; }
 

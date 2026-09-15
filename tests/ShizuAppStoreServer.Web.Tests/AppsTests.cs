@@ -366,6 +366,38 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
+    public async Task RecordInstallIncrementsCountWithoutTouchingUpdatedAt()
+    {
+        await SeedAsync(SeedDirectory);
+        var client = factory.NewClient();
+
+        var first = await client.PostAsync("/v1/apps/micup/installs", null);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var body = (await first.Content.ReadFromJsonAsync<InstallRecordedDto>(Json))!;
+        Assert.Equal("micup", body.Slug);
+        Assert.Equal(1, body.InstallCount);
+
+        var second = await client.PostAsync("/v1/apps/micup/installs", null);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.Equal(2, (await second.Content.ReadFromJsonAsync<InstallRecordedDto>(Json))!.InstallCount);
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.PostAsync("/v1/apps/no-such-app/installs", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.PostAsync("/v1/apps/hidden/installs", null)).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ShizuDbContext>();
+        var app = await db.Apps.AsNoTracking().SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(2, app.InstallCount);
+        Assert.Equal(new DateTimeOffset(2026, 5, 1, 0, 0, 0, TimeSpan.Zero), app.UpdatedAt);
+
+        var detail = (await (await client.GetAsync("/v1/apps/micup"))
+            .Content.ReadFromJsonAsync<AppDetailDto>(Json))!;
+        Assert.Equal(2, detail.InstallCount);
+    }
+
+    [Fact]
     public async Task DetailNotFoundAndExcludedHidden()
     {
         await SeedAsync(SeedDirectory);

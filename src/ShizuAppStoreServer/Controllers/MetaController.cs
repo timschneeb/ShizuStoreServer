@@ -28,6 +28,16 @@ public sealed class MetaController(ShizuDbContext db) : ControllerBase
             .CountAsync(a => a.Availability != Availability.Excluded, ct);
         var categoryCount = await db.Categories.AsNoTracking().CountAsync(ct);
 
-        return Ok(new MetaDto(DateTimeOffset.UtcNow, listCommit, new CountsDto(appCount, categoryCount)));
+        // Single PK lookup; the endpoint is output-cached, and a live read
+        // means flag flips take effect without a restart. A missing row is
+        // false (GETs never insert).
+        var useInstallCounts = await ConfigFlags.GetBoolAsync(
+            db, ConfigFlags.UseInstallCountsForPopularity, ct: ct);
+
+        return Ok(new MetaDto(
+            DateTimeOffset.UtcNow,
+            listCommit,
+            new CountsDto(appCount, categoryCount),
+            useInstallCounts));
     }
 }

@@ -122,6 +122,41 @@ public sealed class ChangesTests(ShizuApiFactory factory) : IClassFixture<ShizuA
         Assert.Equal(["gone"], changes.Removed.Select(r => r.Slug));
         Assert.Equal("Gone", changes.Removed[0].Name);
     }
+
+    [Fact]
+    public async Task InstallsUpdatedCarriesOnlyPostCursorCounts()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            var counted = Seeds.NewApp("counted", audio, addedAt: Jan, updatedAt: Jan);
+            counted.InstallCount = 5;
+            counted.InstallCountUpdatedAt = Jul2;
+            var oldCount = Seeds.NewApp("old-count", audio, addedAt: Jan, updatedAt: Jan);
+            oldCount.InstallCount = 9;
+            oldCount.InstallCountUpdatedAt = Jan;
+            var hiddenCount = Seeds.NewApp("hidden-count", audio, addedAt: Jan, updatedAt: Jan,
+                availability: Availability.Excluded);
+            hiddenCount.InstallCount = 3;
+            hiddenCount.InstallCountUpdatedAt = Jul3;
+            db.Apps.AddRange(
+                counted,
+                oldCount,
+                Seeds.NewApp("never-installed", audio, addedAt: Jan, updatedAt: Jan),
+                hiddenCount);
+        });
+
+        var response = await factory.NewClient().GetAsync("/v1/changes?since=" + Since);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var changes = (await response.Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+
+        // Only the post-cursor count rides along; nothing here qualifies as
+        // added/updated, and the excluded row never appears.
+        Assert.Empty(changes.Added);
+        Assert.Empty(changes.Updated);
+        Assert.Equal(new Dictionary<string, long> { ["counted"] = 5 }, changes.InstallsUpdated);
+    }
 }
 
 public sealed class MetaTests(ShizuApiFactory factory) : IClassFixture<ShizuApiFactory>
@@ -152,6 +187,26 @@ public sealed class MetaTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Equal(1, meta.Counts.Apps);
         Assert.Equal(1, meta.Counts.Categories);
         Assert.True(meta.GeneratedAt <= DateTimeOffset.UtcNow);
+        Assert.False(meta.UseInstallCountsForPopularity);
+    }
+
+    [Fact]
+    public async Task MetaSurfacesPopularityFlag()
+    {
+        await factory.ResetAsync(db =>
+        {
+            db.ConfigFlags.Add(new ConfigFlag
+            {
+                Key = ConfigFlags.UseInstallCountsForPopularity,
+                Value = "true",
+                UpdatedAt = DateTimeOffset.UtcNow,
+            });
+        });
+
+        var response = await factory.NewClient().GetAsync("/v1/meta");
+        var metaBody = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.OK, $"{response.StatusCode}: {metaBody}");
+        Assert.True(JsonSerializer.Deserialize<MetaDto>(metaBody, Json)!.UseInstallCountsForPopularity);
     }
 
     [Fact]

@@ -28,6 +28,7 @@ public sealed record AppSummaryDto(
     string? SigMd5,
     int? Stars,
     long? DownloadTotal,
+    long InstallCount,
     DateTimeOffset? VersionUpdatedAt,
     DateTimeOffset? ListUpdatedAt,
     string? AuthorKey,
@@ -91,6 +92,7 @@ public sealed record AppDetailDto(
     DateTimeOffset? LastCheckedAt,
     int? Stars,
     long? DownloadTotal,
+    long InstallCount,
     DateTimeOffset? VersionUpdatedAt,
     DateTimeOffset? ListUpdatedAt,
     string? AuthorName,
@@ -122,15 +124,20 @@ public sealed record RemovedAppDto(
 public sealed record ChangesDto(
     IReadOnlyList<AppSummaryDto> Added,
     IReadOnlyList<AppSummaryDto> Updated,
-    IReadOnlyList<RemovedAppDto> Removed);
+    IReadOnlyList<RemovedAppDto> Removed,
+    IReadOnlyDictionary<string, long> InstallsUpdated);
 
 public sealed record CountsDto(int Apps, int Categories);
 
 public sealed record MetaDto(
     DateTimeOffset GeneratedAt,
     string? ListCommit,
-    CountsDto Counts);
+    CountsDto Counts,
+    bool UseInstallCountsForPopularity);
 
 public sealed record HealthDto(string Status);
 
 public sealed record SyncAcceptedDto(bool Queued);
+
+/// <summary>Result of <c>POST /v1/apps/{slug}/installs</c>: the new total.</summary>
+public sealed record InstallRecordedDto(string Slug, long InstallCount);

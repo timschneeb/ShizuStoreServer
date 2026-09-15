@@ -18,6 +18,9 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
     /// <c>added = added_at >= since</c>
     /// <c>updated = updated_at >= since</c> excluding already-added rows;
     /// <c>removed</c> = tombstones with <c>removed_at >= since</c>.
+    /// <c>installsUpdated</c> maps slug to install count for rows whose
+    /// count moved since <c>since</c>; it never triggers refetches, clients
+    /// apply it onto their stored rows directly.
     /// Entries are oldest-first so clients can apply them in order.
     /// <c>excluded</c> rows never appear.
     /// </summary>
@@ -60,9 +63,15 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
             .OrderBy(t => t.RemovedAt).ThenBy(t => t.Id)
             .ToList();
 
+        var installsUpdated = all
+            .Where(a => a.InstallCountUpdatedAt >= sinceValue)
+            .OrderBy(a => a.InstallCountUpdatedAt).ThenBy(a => a.Id)
+            .ToDictionary(a => a.Slug, a => a.InstallCount);
+
         return Ok(new ChangesDto(
             added.Select(AppMapper.ToSummary).ToList(),
             updated.Select(AppMapper.ToSummary).ToList(),
-            removed.Select(AppMapper.ToRemoved).ToList()));
+            removed.Select(AppMapper.ToRemoved).ToList(),
+            installsUpdated));
     }
 }
