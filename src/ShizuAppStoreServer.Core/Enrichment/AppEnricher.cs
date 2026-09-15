@@ -54,9 +54,10 @@ public sealed record PrepareIconResult(
 /// that supplied an APK is recorded and locked (<c>ApkSource</c>): once a
 /// build was served, enrichment never switches between forge and F-Droid
 /// (different signing keys would break updates). Two entries release
-/// outside their GitHub project and are special-cased: instafel (maintainer
-/// API at api.mamii.dev) and hlbmerge_flutter (APK builds only on the GitCode
-/// mirror gitcode.com/bigmolihuan/hlbmerge_flutter). Play-sole-source apps are
+/// outside the repo the list points at and are special-cased: instafel (the
+/// updater APK ships from github.com/instafel/u-rel while the list links the
+/// source monorepo mamiiblt/instafel) and hlbmerge_flutter (APK builds only
+/// on the GitCode mirror gitcode.com/bigmolihuan/hlbmerge_flutter). Play-sole-source apps are
 /// excluded unless the operator override flag is set. Failures record
 /// <c>last_error</c> and keep previous good values. Does not call
 /// <c>SaveChanges</c>, the caller batches (fast loop in M6, tests).
@@ -71,16 +72,18 @@ public sealed class AppEnricher(
     HttpClient downloads,
     EnrichmentOptions options,
     ShizuDbContext db,
-    IInstafelReleaseClient? instafel = null,
     IGitCodeReleaseClient? gitcode = null,
     IPlayStoreClient? play = null,
     IzzyStatsProvider? izzyStats = null,
     ILogger<AppEnricher>? log = null)
 {
     // Special-case release homes (user calls): the GitHub projects below
-    // publish no usable release assets on GitHub itself.
-    private const string InstafelOwner = "mamiiblt";
-    private const string InstafelRepo = "instafel";
+    // publish no usable release assets on GitHub itself. The list links the
+    // instafel source monorepo, but the updater APK ships from u-rel.
+    private const string InstafelListOwner = "mamiiblt";
+    private const string InstafelListRepo = "instafel";
+    private const string InstafelUpdaterOwner = "instafel";
+    private const string InstafelUpdaterRepo = "u-rel";
     private const string HlbmergeGitHubOwner = "molihuan";
     private const string HlbmergeGitHubRepo = "hlbmerge_flutter";
     private const string HlbmergeGitCodeOwner = "bigmolihuan";
@@ -155,12 +158,17 @@ public sealed class AppEnricher(
         {
             app.SourceKind = SourceKind.GitHub;
             KeepPlayStoreUrl(app, githubPrimary);
-            EnrichResult result;
-            if (instafel is not null && owner == InstafelOwner && repo == InstafelRepo)
+
+            // The list links instafel's source monorepo; the updater APK ships
+            // from a separate release repo. Treat it as a plain GitHub source.
+            if (owner == InstafelListOwner && repo == InstafelListRepo)
             {
-                result = await EnrichFromInstafelAsync(app, now, ct);
+                owner = InstafelUpdaterOwner;
+                repo = InstafelUpdaterRepo;
             }
-            else if (gitcode is not null && owner == HlbmergeGitHubOwner && repo == HlbmergeGitHubRepo)
+
+            EnrichResult result;
+            if (gitcode is not null && owner == HlbmergeGitHubOwner && repo == HlbmergeGitHubRepo)
             {
                 result = await EnrichFromGitCodeAsync(app, now, ct);
             }
@@ -373,38 +381,6 @@ public sealed class AppEnricher(
         }
 
         return await EnrichFromApkAsync(app, asset.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct, release.PublishedAt);
-    }
-
-    /// <summary>
-    /// Instafel publishes through api.mamii.dev, not GitHub. The payload's
-    /// file hash is the change signal (recorded as the etag): an unchanged
-    /// hash plus unchanged URL skips the download entirely.
-    /// </summary>
-    private async Task<EnrichResult> EnrichFromInstafelAsync(
-        App app, DateTimeOffset now, CancellationToken ct)
-    {
-        InstafelRelease release;
-        try
-        {
-            release = await instafel!.GetLatestAsync(ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return Fail(app, now, $"Instafel API: {ex.Message}");
-        }
-
-        var current = await PrimaryDownloadAsync(app, ct);
-        if (current is not null
-            && release.ApkUrl == current.ApkUrl
-            && release.FileHash == app.EnrichEtag
-            && current.VersionCode is not null
-            && !NeedsPermissionHeal(app, current))
-        {
-            app.LastCheckedAt = now;
-            return new EnrichResult(EnrichOutcome.UpToDate, null);
-        }
-
-        return await EnrichFromApkAsync(app, release.ApkUrl, release.FileHash, SourceKind.GitHub, now, ct);
     }
 
     /// <summary>

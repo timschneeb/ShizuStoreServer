@@ -115,7 +115,6 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("apk-download"),
     enrichment,
     sp.GetRequiredService<ShizuDbContext>(),
-    sp.GetRequiredService<IInstafelReleaseClient>(),
     sp.GetRequiredService<IGitCodeReleaseClient>(),
     sp.GetRequiredService<IPlayStoreClient>(),
     sp.GetRequiredService<IzzyStatsProvider>(),
@@ -268,8 +267,6 @@ public partial class Program
         services.AddHttpClient<FdroidRepoClient>(
             client => client.Timeout = TimeSpan.FromSeconds(60));
         services.AddHttpClient<IzzyStatsClient>(
-            client => client.Timeout = TimeSpan.FromSeconds(30));
-        services.AddHttpClient<IInstafelReleaseClient, InstafelReleaseClient>(
             client => client.Timeout = TimeSpan.FromSeconds(30));
         services.AddHttpClient<IGitCodeReleaseClient, GitCodeReleaseClient>(
             client => client.Timeout = TimeSpan.FromSeconds(30));

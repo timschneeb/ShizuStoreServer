@@ -72,16 +72,6 @@ public sealed class AppEnricherTests : IDisposable
         }
     }
 
-    private sealed class FakeInstafelClient(Func<InstafelRelease> handler) : IInstafelReleaseClient
-    {
-        public int Calls;
-        public Task<InstafelRelease> GetLatestAsync(CancellationToken ct = default)
-        {
-            Calls++;
-            return Task.FromResult(handler());
-        }
-    }
-
     private sealed class FakeGitCodeClient(Func<GitCodeRelease> handler) : IGitCodeReleaseClient
     {
         public int Calls;
@@ -201,7 +191,6 @@ public sealed class AppEnricherTests : IDisposable
         StubHandler? fdroid = null,
         FakeSignerRunner? signer = null,
         ILauncherIconService? launcherIcons = null,
-        IInstafelReleaseClient? instafel = null,
         IGitCodeReleaseClient? gitcode = null,
         IPlayStoreClient? play = null,
         IzzyStatsProvider? izzyStats = null) =>
@@ -213,7 +202,7 @@ public sealed class AppEnricherTests : IDisposable
             aapt2,
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
             launcherIcons ?? new LauncherIconService(),
-            new HttpClient(downloads), _options, _db, instafel, gitcode, play, izzyStats);
+            new HttpClient(downloads), _options, _db, gitcode, play, izzyStats);
 
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
@@ -1474,74 +1463,46 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Null(app.LastError);
     }
 
-    // ---- Special cases: instafel API + GitCode mirror ----
+    // ---- Special cases: instafel updater repo + GitCode mirror ----
 
     [Fact]
-    public async Task EnrichesInstafelFromApi()
+    public async Task EnrichesInstafelUpdaterFromURelRepo()
     {
+        const string assetUrl =
+            "https://github.com/instafel/u-rel/releases/download/v5.1.1/ifl-updater-v5.1.1-release.apk";
         var zip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
-        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var requested = new List<string>();
+        var github = new StubHandler(request =>
+        {
+            var uri = request.RequestUri!.ToString();
+            requested.Add(uri);
+
+            // The list links mamiiblt/instafel; the updater ships from u-rel.
+            return uri.Contains("/releases", StringComparison.Ordinal)
+                ? JsonReleases(ReleaseJson("v5.1.1", "ifl-updater-v5.1.1-release.apk", assetUrl, zip.Length))
+                : new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
         var downloads = new StubHandler(request =>
         {
-            Assert.Equal(
-                "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk",
-                request.RequestUri!.ToString());
+            Assert.Equal(assetUrl, request.RequestUri!.ToString());
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) };
         });
-        var instafel = new FakeInstafelClient(() => new InstafelRelease(
-            "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", "1b44b19f"));
-        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "807"));
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "511"));
         var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
 
-        var result = await BuildEnricher(github, downloads, aapt2, instafel: instafel).EnrichAsync(app, T0);
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Equal(1, instafel.Calls);
         Assert.Equal(1, downloads.Calls);
+        Assert.Contains(requested,
+            u => u == "https://api.github.com/repos/instafel/u-rel/releases?per_page=100");
+        Assert.DoesNotContain(requested, u => u.Contains("mamiiblt", StringComparison.Ordinal));
         Assert.Equal(Availability.DirectApk, app.Availability);
-        Assert.Equal("1b44b19f", app.EnrichEtag);
         var primary = Primary(app);
         Assert.Equal(SourceKind.GitHub, primary.Source);
-        Assert.Equal("https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", primary.ApkUrl);
+        Assert.Equal(assetUrl, primary.ApkUrl);
         Assert.NotNull(app.IconHash);
-    }
-
-    [Fact]
-    public async Task InstafelUnchangedHashSkipsDownload()
-    {
-        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
-        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
-        var instafel = new FakeInstafelClient(() => new InstafelRelease(
-            "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", "same-hash"));
-        var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
-        app.EnrichEtag = "same-hash";
-        AddDownload(app, SourceKind.GitHub,
-            "https://cdn.mamii.dev/instafel/releases/v807/instafel_uc_v807.apk", versionCode: 807);
-
-        var result = await BuildEnricher(github, downloads,
-            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
-            instafel: instafel).EnrichAsync(app, T0);
-
-        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
-        Assert.Equal(1, instafel.Calls);
-        Assert.Equal(0, downloads.Calls);
-    }
-
-    [Fact]
-    public async Task InstafelApiFailureMarksFailed()
-    {
-        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
-        var instafel = new FakeInstafelClient(() => throw new InstafelApiException("boom"));
-        var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
-
-        var result = await BuildEnricher(github,
-            new StubHandler(_ => throw new InvalidOperationException("must not download")),
-            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
-            instafel: instafel).EnrichAsync(app, T0);
-
-        Assert.Equal(EnrichOutcome.Failed, result.Outcome);
-        Assert.Equal("Instafel API: boom", app.LastError);
     }
 
     [Fact]

@@ -765,55 +765,7 @@ public sealed class SourcesTests
         Assert.Null(await GitLabClient(stub).GetReadmeMarkdownAsync("o/r"));
     }
 
-    // ---- Special-case sources: instafel API + GitCode mirror ----
-
-    [Fact]
-    public async Task ParsesInstafelUncloneFile()
-    {
-        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("""
-                {"fileInfos":{"unclone":{"fileUrl":"https://cdn.mamii.dev/u.apk","fileHash":"h-uc"},
-                              "clone":{"fileUrl":"https://cdn.mamii.dev/c.apk","fileHash":"h-c"}}}
-                """),
-        });
-        var release = await InstafelClient(stub).GetLatestAsync();
-
-        Assert.Equal("https://cdn.mamii.dev/u.apk", release.ApkUrl);
-        Assert.Equal("h-uc", release.FileHash);
-    }
-
-    [Fact]
-    public async Task FallsBackToInstafelCloneFile()
-    {
-        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("""
-                {"fileInfos":{"clone":{"fileUrl":"https://cdn.mamii.dev/c.apk","fileHash":"h-c"}}}
-                """),
-        });
-        var release = await InstafelClient(stub).GetLatestAsync();
-
-        Assert.Equal("https://cdn.mamii.dev/c.apk", release.ApkUrl);
-        Assert.Equal("h-c", release.FileHash);
-    }
-
-    [Fact]
-    public async Task ThrowsWithoutInstafelFileInfo()
-    {
-        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("""{"fileInfos":{}}"""),
-        });
-        await Assert.ThrowsAsync<InstafelApiException>(() => InstafelClient(stub).GetLatestAsync());
-    }
-
-    [Fact]
-    public async Task ThrowsOnInstafelApiError()
-    {
-        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
-        await Assert.ThrowsAsync<InstafelApiException>(() => InstafelClient(stub).GetLatestAsync());
-    }
+    // ---- Special-case source: GitCode mirror ----
 
     [Fact]
     public async Task PicksNewestGitCodeReleaseAssets()
@@ -976,8 +928,6 @@ public sealed class SourcesTests
             ["tag_name"] = "v2.0.4",
             ["assets"] = new JsonArray(),
         }).ToJsonString();
-
-    private static InstafelReleaseClient InstafelClient(StubHandler stub) => new(new HttpClient(stub));
 
     private static GitCodeReleaseClient GitCodeClient(StubHandler stub) => new(new HttpClient(stub));
 

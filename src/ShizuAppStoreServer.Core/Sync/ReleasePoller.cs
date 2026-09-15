@@ -28,8 +28,8 @@ public interface IReleasePoller
 /// along, so unchanged feeds answer 304); GitLab does the same URL
 /// compare (its API largely ignores ETags); F-Droid/Izzy fetch each repo
 /// index once and compare version codes in memory. Play, link-only,
-/// Codeberg and the Instafel/GitCode special cases have no cheap signal
-/// and stay on the due window. Poll failures are soft (unchanged), so a
+/// Codeberg and the GitCode special case have no cheap signal and stay
+/// on the due window. Poll failures are soft (unchanged), so a
 /// flapping upstream never marks rows failed.
 /// </summary>
 public sealed class ReleasePoller(
@@ -41,11 +41,13 @@ public sealed class ReleasePoller(
     SyncOptions sync,
     ILogger<ReleasePoller>? log = null) : IReleasePoller
 {
-    // Same special cases as AppEnricher: these GitHub URLs release
-    // elsewhere (maintainer API / GitCode mirror), so a GitHub poll
-    // would compare the wrong feed.
-    private const string InstafelOwner = "mamiiblt";
-    private const string InstafelRepo = "instafel";
+    // Same special cases as AppEnricher: instafel's list URL points at the
+    // source monorepo while the updater releases live in u-rel, so poll that
+    // feed; hlbmerge rebuilds only on GitCode, so skip the GitHub poll.
+    private const string InstafelListOwner = "mamiiblt";
+    private const string InstafelListRepo = "instafel";
+    private const string InstafelUpdaterOwner = "instafel";
+    private const string InstafelUpdaterRepo = "u-rel";
     private const string HlbmergeOwner = "molihuan";
     private const string HlbmergeRepo = "hlbmerge_flutter";
 
@@ -120,12 +122,19 @@ public sealed class ReleasePoller(
         if (SourceClassifier.TryParseGitHubRepo(app.Url, out var owner, out var repo)
             || SourceClassifier.TryParseGitHubRepo(app.SourceUrl, out owner, out repo))
         {
-            // These GitHub URLs release elsewhere (see AppEnricher), so a
-            // GitHub poll would compare the wrong feed.
-            if ((owner == InstafelOwner && repo == InstafelRepo)
-                || (owner == HlbmergeOwner && repo == HlbmergeRepo))
+            // hlbmerge rebuilds only on GitCode, so a GitHub poll would
+            // compare the wrong feed.
+            if (owner == HlbmergeOwner && repo == HlbmergeRepo)
             {
                 return null;
+            }
+
+            // instafel's list URL points at the source monorepo; the updater
+            // releases live in u-rel, so poll that feed instead.
+            if (owner == InstafelListOwner && repo == InstafelListRepo)
+            {
+                owner = InstafelUpdaterOwner;
+                repo = InstafelUpdaterRepo;
             }
 
             return new ForgeTarget(app, owner, repo, true);
