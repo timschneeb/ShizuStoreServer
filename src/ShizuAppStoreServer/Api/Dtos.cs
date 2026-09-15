@@ -40,9 +40,12 @@ public sealed record AppSummaryDto(
 /// compare the installed signing cert against the fingerprints, then compare
 /// that candidate's <c>VersionCode</c>; the <c>Primary</c> entry is the
 /// default offer for fresh installs (non-F-Droid builds preferred).
+/// <c>PackageName</c> is the package this build installs, so flavor variants
+/// of one entry are distinguishable.
 /// </summary>
 public sealed record DownloadDto(
     string Source,
+    string? PackageName,
     string ApkUrl,
     string? ArchiveEntry,
     long? VersionCode,

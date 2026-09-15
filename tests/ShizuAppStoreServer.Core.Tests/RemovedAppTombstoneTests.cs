@@ -59,6 +59,7 @@ public sealed class RemovedAppTombstoneTests : IDisposable
     public async Task DeletingStaleRowWritesTombstone()
     {
         await new CatalogUpserter(_db).UpsertAsync([Parse(Both)], NoHistory(), T0);
+        var before = DateTimeOffset.UtcNow;
         var counts = await new CatalogUpserter(_db).UpsertAsync([Parse(TunerOnly)], NoHistory(), T1);
 
         Assert.Equal(1, counts.Removed);
@@ -67,7 +68,10 @@ public sealed class RemovedAppTombstoneTests : IDisposable
         Assert.Equal("micup", tombstone.Slug);
         Assert.Equal("MicUp", tombstone.Name);
         Assert.Equal(Data.Listing.Main, tombstone.Listing);
-        Assert.Equal(T1, tombstone.RemovedAt);
+        // Removal is stamped when it is written, not at pass start, so a
+        // client cursor from during the pass cannot skip it.
+        Assert.True(tombstone.RemovedAt >= before);
+        Assert.True(tombstone.RemovedAt > T1);
     }
 
     [Fact]
@@ -89,11 +93,13 @@ public sealed class RemovedAppTombstoneTests : IDisposable
         await new CatalogUpserter(_db).UpsertAsync([Parse(Both)], NoHistory(), T0);
         await new CatalogUpserter(_db).UpsertAsync([Parse(TunerOnly)], NoHistory(), T0);
         await new CatalogUpserter(_db).UpsertAsync([Parse(Both)], NoHistory(), T1);
+        var before = DateTimeOffset.UtcNow;
         await new CatalogUpserter(_db).UpsertAsync([Parse(TunerOnly)], NoHistory(), T2);
 
         // Still exactly one row (slug is unique) with the latest timestamp.
         var tombstone = await _db.RemovedApps.SingleAsync();
         Assert.Equal("micup", tombstone.Slug);
-        Assert.Equal(T2, tombstone.RemovedAt);
+        Assert.True(tombstone.RemovedAt >= before);
+        Assert.True(tombstone.RemovedAt > T2);
     }
 }

@@ -3258,6 +3258,165 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Single(_db.Apps.Local, a => a.RootAppId == app.Id);
     }
+
+    // ---- Flavor grouping: same-label APKs of one release become one app with per-package candidates ----
+
+    [Fact]
+    public async Task SameLabelFlavorsCollapseIntoOneRowWithSeedPackageAsCanonical()
+    {
+        var baseApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var playApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", baseApk.Length),
+            ("app-play-release.apk", "https://cdn.example/app-play.apk", playApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("play", StringComparison.Ordinal)
+                ? playApk
+                : baseApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == playApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.app.play", label: "Example")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("example-app", "Example", "https://github.com/example/example-app");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+
+        // One row for both flavors; no variant rows.
+        Assert.DoesNotContain(_db.Apps.Local, a => a.RootAppId == app.Id);
+        Assert.Equal("com.example.app", app.PackageName);
+
+        var candidates = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Equal(2, candidates.Count);
+        Assert.Equal(
+            ["com.example.app", "com.example.app.play"],
+            candidates.Select(d => d.PackageName!).OrderBy(p => p, StringComparer.Ordinal).ToArray());
+
+        // The base package owns the primary candidate.
+        var primary = candidates.Single(d => d.IsPrimary);
+        Assert.Equal("com.example.app", primary.PackageName);
+    }
+
+    [Fact]
+    public async Task SameLabelFlavorsPickLabelTokenWhenNoPackageIsABase()
+    {
+        var officialApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var spoofedApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("mmrl-release.apk", "https://cdn.example/mmrl.apk", officialApk.Length),
+            ("mmrl-spoofed-release.apk", "https://cdn.example/mmrl-spoofed.apk", spoofedApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("spoofed", StringComparison.Ordinal)
+                ? spoofedApk
+                : officialApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == spoofedApk.Length
+            ? TestAssets.CannedBadging(package: "fsgpgfw1k.v64xr36kia19.kt1f7i4z28pvl4v", label: "MMRL")
+            : TestAssets.CannedBadging(package: "com.dergoogler.mmrl", label: "MMRL"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("mmrl", "MMRL", "https://github.com/DerGoogler/MMRL");
+
+        await enricher.EnrichAsync(app, T0);
+
+        Assert.DoesNotContain(_db.Apps.Local, a => a.RootAppId == app.Id);
+        Assert.Equal("com.dergoogler.mmrl", app.PackageName);
+
+        var candidates = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Equal(2, candidates.Count);
+        Assert.Equal("com.dergoogler.mmrl", candidates.Single(d => d.IsPrimary).PackageName);
+    }
+
+    [Fact]
+    public async Task ListEndpointPackageWinsOverBasePackageAsCanonical()
+    {
+        var baseApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var playApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", baseApk.Length),
+            ("app-play-release.apk", "https://cdn.example/app-play.apk", playApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("play", StringComparison.Ordinal)
+                ? playApk
+                : baseApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == playApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.app.play", label: "Example")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("example-app", "Example", "https://github.com/example/example-app",
+            sourceUrl: "https://play.google.com/store/apps/details?id=com.example.app.play");
+
+        await enricher.EnrichAsync(app, T0);
+
+        // The list links the Play flavor, so that package stays canonical even
+        // though com.example.app is a dot-prefix base.
+        Assert.Equal("com.example.app.play", app.PackageName);
+        Assert.Equal("com.example.app.play", _db.Downloads.Local.Single(d => d.AppId == app.Id && d.IsPrimary).PackageName);
+    }
+
+    [Fact]
+    public async Task SameLabelVariantRowIsFoldedIntoRootWithTombstone()
+    {
+        var baseApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var playApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", baseApk.Length),
+            ("app-play-release.apk", "https://cdn.example/app-play.apk", playApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("play", StringComparison.Ordinal)
+                ? playApk
+                : baseApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == playApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.app.play", label: "Example")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("smart-toolbox", "Smart Toolbox", "https://github.com/example/smart-toolbox");
+        app.ApkLabel = "Example";
+        _db.SaveChanges();
+
+        // A variant row created before flavor grouping existed: same label as the
+        // root, so the next pass must fold it back instead of keeping a twin.
+        var variant = new App
+        {
+            Slug = "com-example-app-play",
+            Name = "Smart Toolbox",
+            Url = "https://github.com/example/smart-toolbox",
+            Listing = Listing.Main,
+            Type = AppType.App,
+            RootAppId = app.Id,
+            CategoryId = app.CategoryId,
+            ApkLabel = "Example",
+            PackageName = "com.example.app.play",
+            AddedAt = T0,
+            UpdatedAt = T0,
+        };
+        _db.Apps.Add(variant);
+        _db.SaveChanges();
+        AddDownload(variant, SourceKind.GitHub, "https://cdn.example/legacy-play.apk",
+            versionCode: 42, sigSha256: "980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9");
+
+        await enricher.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == app.Id).ToListAsync());
+        Assert.Contains(await _db.RemovedApps.ToListAsync(), r => r.Slug == "com-example-app-play");
+
+        var candidates = await _db.Downloads.Where(d => d.AppId == app.Id).ToListAsync();
+        Assert.Equal(2, candidates.Count);
+        Assert.Contains(candidates, d => d.PackageName == "com.example.app.play");
+        Assert.Equal("com.example.app", candidates.Single(d => d.IsPrimary).PackageName);
+    }
 }
 
 public sealed class BulkEnricherTests

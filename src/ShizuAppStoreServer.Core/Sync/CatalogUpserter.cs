@@ -62,6 +62,12 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         var docs = documents.ToList();
         var syncedListings = docs.Select(d => MapListing(d.ListingName)).ToHashSet();
 
+        // The pass clock (`now`) is captured before fetch and history parsing,
+        // so a client that syncs while this pass runs gets a cursor ahead of
+        // it. New rows and tombstones carry the write clock instead, or they
+        // would fall behind that cursor and never reach /v1/changes.
+        var commitNow = DateTimeOffset.UtcNow;
+
         var categories = await db.Categories.ToListAsync(ct);
         var allApps = await db.Apps.ToListAsync(ct);
         // Extra packages of a multi-app repo are enrich-created children; they
@@ -104,7 +110,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 foreach (var entry in parsed.Entries)
                 {
                     UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
-                        listing, category, type, entry, parent: null, history, now, ref added, ref updated);
+                        listing, category, type, entry, parent: null, history, now, commitNow, ref added, ref updated);
                 }
             }
         }
@@ -114,7 +120,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 && !parsedKeys.Contains((a.Listing, a.Url, EffectiveCategoryId(a, categories))))
             .ToList();
         var removedSlugs = stale.Select(a => a.Slug).ToList();
-        WriteTombstones(tombstones, stale, now);
+        WriteTombstones(tombstones, stale, commitNow);
         db.Apps.RemoveRange(stale);
 
         await db.SaveChangesAsync(ct);
@@ -125,7 +131,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
     /// Records one tombstone per deleted row (refreshing any existing row
     /// for the slug) so <c>GET /v1/changes removed[]</c> stays correct.
     /// </summary>
-    private void WriteTombstones(List<RemovedApp> tombstones, List<App> stale, DateTimeOffset now)
+    private void WriteTombstones(List<RemovedApp> tombstones, List<App> stale, DateTimeOffset removedAt)
     {
         foreach (var app in stale)
         {
@@ -139,7 +145,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
             existing.Name = app.Name;
             existing.Listing = app.Listing;
-            existing.RemovedAt = now;
+            existing.RemovedAt = removedAt;
         }
     }
 
@@ -251,7 +257,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         Listing listing, Category category, AppType type,
         ParsedEntry entry, App? parent,
         IReadOnlyDictionary<string, EntryHistory> history,
-        DateTimeOffset now, ref int added, ref int updated)
+        DateTimeOffset now, DateTimeOffset commitNow, ref int added, ref int updated)
     {
         if (!seenEntries.Add((listing, entry.Url)))
         {
@@ -293,7 +299,9 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 Parent = parent,
                 AddedAt = h?.AddedAt ?? now,
                 ListUpdatedAt = h?.UpdatedAt,
-                UpdatedAt = h?.UpdatedAt ?? now,
+                // Change clock, so the write time: a first-seen row must be
+                // newer than any cursor already handed to a client.
+                UpdatedAt = commitNow,
             };
             apps.Add(match);
             db.Apps.Add(match);
@@ -341,7 +349,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
             if (changed)
             {
-                var ts = h?.UpdatedAt ?? now;
+                var ts = h?.UpdatedAt ?? commitNow;
                 if (ts > match.UpdatedAt)
                 {
                     match.UpdatedAt = ts;
@@ -365,7 +373,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         foreach (var child in entry.Children)
         {
             UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
-                listing, category, type, child, parent: match, history, now, ref added, ref updated);
+                listing, category, type, child, parent: match, history, now, commitNow, ref added, ref updated);
         }
     }
 

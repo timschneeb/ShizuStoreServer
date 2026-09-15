@@ -114,6 +114,7 @@ public static class AppMapper
 
     private static DownloadDto ToDownload(AppDownload d) => new(
         ApiEnums.ToApiString(d.Source),
+        d.PackageName,
         d.ApkUrl,
         d.ArchiveEntry,
         d.VersionCode,

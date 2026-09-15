@@ -194,6 +194,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             e.Property(x => x.AppId).HasColumnName("app_id");
             e.HasOne(x => x.App).WithMany(x => x.Downloads).HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(255);
             e.Property(x => x.Source).HasColumnName("source").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.SourceRef).HasColumnName("source_ref").HasMaxLength(256);
             e.Property(x => x.ApkUrl).HasColumnName("apk_url").HasMaxLength(2000).IsRequired();
@@ -210,7 +211,9 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
             e.Property(x => x.ResolvedAt).HasColumnName("resolved_at").IsRequired();
             // NULLS NOT DISTINCT so universal builds (abi null) still dedupe.
-            e.HasIndex(x => new { x.AppId, x.SigKey, x.Abi }).IsUnique().AreNullsDistinct(false);
+            // Package is part of the key: flavor builds of one app share a row
+            // but are distinct installable packages.
+            e.HasIndex(x => new { x.AppId, x.PackageName, x.SigKey, x.Abi }).IsUnique().AreNullsDistinct(false);
             // At most one primary candidate per app; recomputed on every upsert.
             e.HasIndex(x => x.AppId).IsUnique().HasFilter("is_primary");
         });

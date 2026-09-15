@@ -505,6 +505,30 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ShizukuGateTombstoneUsesCommitTimeNotPassStart()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await SeedDirectApkAsync();
+
+        // The gate runs after enrichment, so a client that synced mid-pass
+        // holds a cursor around the pass start. Stamping the tombstone with
+        // that pass-start `now` would hide it forever; it must carry the
+        // commit time instead.
+        var passStart = T0.AddMinutes(16);
+        var before = DateTimeOffset.UtcNow;
+        await Service().RunAsync("nightly", fullRecheck: true, passStart);
+
+        var tombstone = Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+        Assert.True(tombstone.RemovedAt >= before);
+        Assert.True(tombstone.RemovedAt > passStart);
+    }
+
+    [Fact]
     public async Task ShizukuGateNeverClobbersAnotherExclusionReason()
     {
         if (!InitRepo())

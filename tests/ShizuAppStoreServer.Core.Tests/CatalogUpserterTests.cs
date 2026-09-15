@@ -67,6 +67,7 @@ public sealed class CatalogUpserterTests : IDisposable
             ["https://github.com/papergray/MicUp"] = new(T0, T1),
         };
 
+        var before = DateTimeOffset.UtcNow;
         var counts = await Upserter().UpsertAsync([ParseMain()], history, T1);
 
         Assert.Equal(4, counts.Added); // MicUp, Tuner, Tuner Beta, Aura
@@ -79,7 +80,9 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.Equal(AppType.App, micUp.Type);
         Assert.True(micUp.IsRecommended);
         Assert.Equal(T0, micUp.AddedAt);
-        Assert.Equal(T1, micUp.UpdatedAt);
+        // Change clock is the write time, so a client that synced mid-pass
+        // still sees the row; the git date stays on ListUpdatedAt.
+        Assert.True(micUp.UpdatedAt >= before);
         Assert.Equal(T1, micUp.ListUpdatedAt);
         Assert.Equal(Availability.LinkOnly, micUp.Availability);
         Assert.Equal(SourceKind.Other, micUp.SourceKind);
@@ -100,6 +103,24 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.Equal("Vendor-specific", vendor.Name);
         var aura = await _db.Apps.SingleAsync(a => a.Slug == "aura");
         Assert.Equal(miui.Id, aura.CategoryId);
+    }
+
+    [Fact]
+    public async Task FirstSeenRowsCarryTheWriteClockNotThePassClock()
+    {
+        // The pass clock predates the upsert, so a client that synced while
+        // the pass ran holds a cursor past it. These rows must still be newer
+        // than that cursor or /v1/changes would never report them.
+        var passClock = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var before = DateTimeOffset.UtcNow;
+
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), passClock);
+
+        foreach (var app in await _db.Apps.ToListAsync())
+        {
+            Assert.True(app.UpdatedAt >= before, $"'{app.Slug}' predates the write clock.");
+            Assert.True(app.UpdatedAt > passClock);
+        }
     }
 
     [Fact]

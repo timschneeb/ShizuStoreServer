@@ -159,7 +159,7 @@ public sealed class SyncService(
             _runLog.Begin(effectiveTrigger, fullRecheck, now, dueIds.Count + freshIds.Count);
             var (enriched, upToDate, failed, failedMessages) =
                 await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
-            await ApplyShizukuFilterAsync(now, ct);
+            await ApplyShizukuFilterAsync(ct);
             return await FinishRunAsync(effectiveTrigger, head,
                 0, 0, 0, enriched, upToDate, failed,
                 0, [], false, 0, now, ct, failedMessages);
@@ -196,7 +196,7 @@ public sealed class SyncService(
         _runLog.Begin(effectiveTrigger, fullRecheck, now, ids.Count + extraIds.Count);
         var (enrichedFull, upToDateFull, failedFull, failedMessagesFull) =
             await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
-        await ApplyShizukuFilterAsync(now, ct);
+        await ApplyShizukuFilterAsync(ct);
 
         return await FinishRunAsync(effectiveTrigger, head,
             counts.Added, counts.Updated, counts.Removed,
@@ -406,8 +406,13 @@ public sealed class SyncService(
     /// the app reaches clients again as an update instead of resurfacing via
     /// <c>added[]</c> with its original date.
     /// </remarks>
-    private async Task<int> ApplyShizukuFilterAsync(DateTimeOffset now, CancellationToken ct)
+    private async Task<int> ApplyShizukuFilterAsync(CancellationToken ct)
     {
+        // The gate runs after enrichment, so the pass-start `now` can be
+        // minutes stale. Delta rows must carry the commit time or a client
+        // that synced mid-pass holds a cursor past removed_at and never sees
+        // the tombstone; only the commit time is a safe stamp.
+        var commitNow = DateTimeOffset.UtcNow;
         var exceptions = await db.PackageExceptions.AsNoTracking()
             .ToDictionaryAsync(e => e.PackageName, e => e.Action, StringComparer.Ordinal);
         var tombstones = await db.RemovedApps
@@ -431,7 +436,7 @@ public sealed class SyncService(
             {
                 app.Availability = Availability.DirectApk;
                 app.ExcludedReason = null;
-                app.UpdatedAt = now;
+                app.UpdatedAt = commitNow;
                 if (tombstones.Remove(app.Slug, out var cleared))
                 {
                     db.RemovedApps.Remove(cleared);
@@ -458,7 +463,7 @@ public sealed class SyncService(
                         Slug = app.Slug,
                         Name = app.Name,
                         Listing = app.Listing,
-                        RemovedAt = now,
+                        RemovedAt = commitNow,
                     };
                     tombstones[app.Slug] = tombstone;
                     db.RemovedApps.Add(tombstone);

@@ -1,12 +1,12 @@
 namespace ShizuAppStoreServer.Core.Data;
 
 /// <summary>
-/// One installable build candidate of an app, keyed by signing identity and
-/// ABI: at most one row per (signature, ABI), always that pair's newest
-/// version. Clients pick the row whose fingerprint matches the locally
-/// installed build and whose ABI the device supports; <see cref="IsPrimary"/>
-/// marks the default candidate for fresh installs (forge builds preferred
-/// over F-Droid rebuilds).
+/// One installable build candidate of an app, keyed by package, signing
+/// identity and ABI: at most one row per (package, signature, ABI), always
+/// that triple's newest version. Clients pick the row whose fingerprint
+/// matches the locally installed build and whose ABI the device supports;
+/// <see cref="IsPrimary"/> marks the default candidate for fresh installs
+/// (forge builds preferred over F-Droid rebuilds).
 /// </summary>
 public sealed class AppDownload
 {
@@ -14,6 +14,13 @@ public sealed class AppDownload
 
     public long AppId { get; set; }
     public App? App { get; set; }
+
+    /// <summary>
+    /// Android package this build installs. Flavor variants of one app (FOSS
+    /// vs Play, debug vs release) share a row but differ here, so the client
+    /// can show and install the right one.
+    /// </summary>
+    public string? PackageName { get; set; }
 
     /// <summary>Where this build was resolved from.</summary>
     public SourceKind Source { get; set; }

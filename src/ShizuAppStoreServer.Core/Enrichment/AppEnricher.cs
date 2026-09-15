@@ -814,7 +814,7 @@ public sealed class AppEnricher(
 
             if (!extra.Analyze)
             {
-                await UpsertIndexAssetAsync(app, kind, extra, now, ct);
+                await UpsertIndexAssetAsync(app, kind, extra, app.PackageName, now, ct);
                 continue;
             }
 
@@ -866,7 +866,7 @@ public sealed class AppEnricher(
     /// </summary>
     private async Task<EnrichResult> ApplyAnalysisAsync(
         App target, ArtifactAnalysis analysis, bool asRepresentative, bool recomputePrimary, bool setEtag,
-        DateTimeOffset now, CancellationToken ct, bool recordDownload = true)
+        DateTimeOffset now, CancellationToken ct, bool recordDownload = true, string? preferredPackage = null)
     {
         // A metadata heal re-analyzes a recorded primary to refill presentation
         // fields; recording it again could rewrite the row's version and flip
@@ -877,12 +877,13 @@ public sealed class AppEnricher(
                 analysis.LockSource, null, analysis.ArtifactUrl, analysis.ArchiveEntry,
                 analysis.Badging.VersionCode, analysis.Badging.VersionName,
                 analysis.FileSize, analysis.FileSha256, analysis.SigSha256, analysis.SigMd5,
-                analysis.Badging.MinSdk, analysis.Badging.Abi), now, ct);
+                analysis.Badging.MinSdk, analysis.Badging.Abi,
+                PackageName: analysis.Badging.PackageName), now, ct);
         }
 
         if (recomputePrimary)
         {
-            await RecomputePrimaryAsync(target, ct);
+            await RecomputePrimaryAsync(target, ct, preferredPackage);
         }
 
         // A completed analysis stamps the check even when it changes nothing
@@ -949,9 +950,12 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
-    /// Groups the analyses by package, resolves the owning row for each (the
-    /// list row or one of its variants), applies them and then finalizes the
-    /// display names. A package no longer present in the scanned release is
+    /// Groups the release's artifacts by the app name they declare and applies
+    /// each group to its row: the group matching the list entry goes on the
+    /// root, every other distinct name becomes a variant row. Same-name
+    /// packages are flavors of one app (FOSS vs Play, debug vs release), so
+    /// they become candidates of one row (distinguished by package) instead of
+    /// separate entries. A package no longer present in the scanned release is
     /// dropped, but only when every asset analyzed cleanly.
     /// </summary>
     private async Task<EnrichResult> ApplyAnalysesAsync(
@@ -960,19 +964,40 @@ public sealed class AppEnricher(
     {
         var result = new EnrichResult(EnrichOutcome.UpToDate, null);
         var presented = new List<App>();
+        var listPackage = ListEndpointPackage(root);
+
         // A repo can ship the same package for phone, TV and watch (for example
         // universal-installer's app/tv/wearos release APKs); the phone build is
         // the one a phone store should offer, so a package that also ships a
         // phone build drops its TV and watch flavors.
-        foreach (var analysis in PreferPhoneAnalyses(analyses))
+        var groups = GroupByLabel(PreferPhoneAnalyses(analyses));
+        var rootGroup = SelectRootGroup(root, groups, listPackage);
+
+        // Fold variant rows that predate flavor grouping: their package belongs
+        // to the root's group now, and a row plus a candidate for the same
+        // package must not both exist.
+        await MergeSameLabelVariantsAsync(root, rootGroup?.Label, listPackage, now, ct);
+
+        foreach (var group in groups)
         {
-            var target = await ResolveTargetForPackageAsync(root, kind, analysis.Badging.PackageName, now, ct);
-            var applied = await ApplyAnalysisAsync(
-                target, analysis, asRepresentative: true, recomputePrimary: true, setEtag: true, now, ct);
-            if (applied.Outcome == EnrichOutcome.Enriched)
+            var canonical = ResolveCanonicalPackage(root, group.Label, GroupPackages(group), listPackage);
+            var target = ReferenceEquals(group, rootGroup)
+                ? root
+                : await EnsureVariantAsync(root, kind, canonical, now, ct);
+            foreach (var analysis in group.Items)
             {
-                result = applied;
-                presented.Add(target);
+                // Only the canonical package presents the row; flavor siblings
+                // record candidates (their own package) only.
+                var representative = canonical is not null
+                    && string.Equals(analysis.Badging.PackageName, canonical, StringComparison.OrdinalIgnoreCase);
+                var applied = await ApplyAnalysisAsync(
+                    target, analysis, asRepresentative: representative, recomputePrimary: true,
+                    setEtag: representative, now, ct, preferredPackage: canonical);
+                if (applied.Outcome == EnrichOutcome.Enriched)
+                {
+                    result = applied;
+                    presented.Add(target);
+                }
             }
         }
 
@@ -996,7 +1021,7 @@ public sealed class AppEnricher(
 
         // Letter-avatars need the final display name, so they are generated
         // after the names settle rather than during the analysis.
-        foreach (var target in presented)
+        foreach (var target in presented.Distinct())
         {
             if (target.IconHash is null)
             {
@@ -1008,6 +1033,296 @@ public sealed class AppEnricher(
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// One app name's artifacts within a release. Same label means the same
+    /// user-facing app; a blank label cannot group and stays one group per
+    /// package.
+    /// </summary>
+    private sealed record LabelGroup(string? Label, List<ArtifactAnalysis> Items);
+
+    private static List<LabelGroup> GroupByLabel(IReadOnlyList<ArtifactAnalysis> analyses)
+    {
+        var groups = new List<LabelGroup>();
+        foreach (var analysis in analyses)
+        {
+            var label = NormalizeLabel(analysis.Badging.ApplicationLabel);
+            var group = label is null
+                ? null
+                : groups.FirstOrDefault(g => string.Equals(g.Label, label, StringComparison.OrdinalIgnoreCase));
+            if (group is null)
+            {
+                group = new LabelGroup(label, []);
+                groups.Add(group);
+            }
+
+            group.Items.Add(analysis);
+        }
+
+        return groups;
+    }
+
+    private static string? NormalizeLabel(string? label) =>
+        string.IsNullOrWhiteSpace(label) ? null : label.Trim();
+
+    private static List<string> GroupPackages(LabelGroup group) =>
+        group.Items.Select(a => a.Badging.PackageName)
+            .Where(p => !string.IsNullOrEmpty(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>
+    /// The group that owns the list entry: the stored APK label, else the group
+    /// holding the list URL's package, else the root package, else the group
+    /// carrying the broadest (base) package. The list entry is normally the
+    /// base app; flavors hang off it.
+    /// </summary>
+    private static LabelGroup? SelectRootGroup(App root, List<LabelGroup> groups, string? listPackage)
+    {
+        if (groups.Count == 0)
+        {
+            return null;
+        }
+
+        var current = NormalizeLabel(root.ApkLabel);
+        var match = current is null
+            ? null
+            : groups.FirstOrDefault(g => string.Equals(g.Label, current, StringComparison.OrdinalIgnoreCase));
+        match ??= listPackage is null ? null : GroupWithPackage(groups, listPackage);
+
+        // A stored package is the root's identity: when the release no longer
+        // carries it, every group is a different app, so the root stays
+        // unclaimed until HealRootPresentationAsync refills it from its primary.
+        if (!string.IsNullOrEmpty(root.PackageName))
+        {
+            return match ?? GroupWithPackage(groups, root.PackageName);
+        }
+
+        // First enrich: nothing stored yet, so the broadest group is the list app.
+        var basePackage = FindBasePackage(groups.SelectMany(g => GroupPackages(g)).ToList());
+        match ??= basePackage is null ? null : GroupWithPackage(groups, basePackage);
+        return match ?? groups[0];
+    }
+
+    private static LabelGroup? GroupWithPackage(List<LabelGroup> groups, string packageName) =>
+        groups.FirstOrDefault(g => g.Items.Any(a =>
+            string.Equals(a.Badging.PackageName, packageName, StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>
+    /// The package that presents a group: the list URL's package when present,
+    /// else the dot-prefix base (the flavor parent), else the package whose id
+    /// names the app (label/repo token, e.g. <c>com.dergoogler.mmrl</c> over an
+    /// obfuscated spoof build), else the first.
+    /// </summary>
+    private static string? ResolveCanonicalPackage(
+        App root, string? label, IReadOnlyList<string> packages, string? listPackage)
+    {
+        if (packages.Count <= 1)
+        {
+            return packages.FirstOrDefault();
+        }
+
+        if (listPackage is not null)
+        {
+            var listed = packages.FirstOrDefault(p => string.Equals(p, listPackage, StringComparison.OrdinalIgnoreCase));
+            if (listed is not null)
+            {
+                return listed;
+            }
+        }
+
+        var basePackage = FindBasePackage(packages);
+        if (basePackage is not null)
+        {
+            return basePackage;
+        }
+
+        foreach (var token in IdentityTokens(root, label))
+        {
+            var tokenMatch = packages.FirstOrDefault(p => p.Contains(token, StringComparison.OrdinalIgnoreCase));
+            if (tokenMatch is not null)
+            {
+                return tokenMatch;
+            }
+        }
+
+        return packages[0];
+    }
+
+    /// <summary>
+    /// The shortest package that prefixes every other with a dot (the flavor
+    /// parent: <c>app.mihon</c> for <c>app.mihon.foss</c>). Candidates must be
+    /// members, so an unrelated short id cannot win.
+    /// </summary>
+    private static string? FindBasePackage(IReadOnlyList<string> packages) =>
+        packages
+            .Where(p => packages.All(q => string.Equals(p, q, StringComparison.OrdinalIgnoreCase)
+                || q.StartsWith(p + ".", StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(p => p.Length)
+            .ThenBy(p => p, StringComparer.Ordinal)
+            .FirstOrDefault();
+
+    private static IEnumerable<string> IdentityTokens(App root, string? label)
+    {
+        foreach (var raw in new[] { label, RepoName(root.Url), RepoName(root.SourceUrl) })
+        {
+            var token = NormalizeToken(raw);
+            if (token is { Length: >= 3 })
+            {
+                yield return token;
+            }
+        }
+    }
+
+    private static string? NormalizeToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            if (char.IsLetterOrDigit(c))
+            {
+                builder.Append(char.ToLowerInvariant(c));
+            }
+        }
+
+        return builder.Length == 0 ? null : builder.ToString();
+    }
+
+    private static string? RepoName(string? url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            ? uri.AbsolutePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault()?.Replace(".git", string.Empty, StringComparison.OrdinalIgnoreCase)
+            : null;
+
+    /// <summary>
+    /// Package id a list entry's own URL targets (F-Droid or Play), the
+    /// strongest signal for which package the entry means.
+    /// </summary>
+    private static string? ListEndpointPackage(App root)
+    {
+        if (SourceClassifier.TryParseFdroidPackage(root.Url, out var fdroid)
+            || SourceClassifier.TryParseFdroidPackage(root.SourceUrl, out fdroid))
+        {
+            return fdroid;
+        }
+
+        if (SourceClassifier.TryParsePlayPackage(root.Url, out var play)
+            || SourceClassifier.TryParsePlayPackage(root.SourceUrl, out play))
+        {
+            return play;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Folds pre-flavor-grouping variant rows back into the root. A variant
+    /// whose stored APK label matches the root's is a flavor of the same app:
+    /// its candidates move onto the root (each keeping its package), the row is
+    /// deleted and tombstoned so cached clients drop it. Root <c>UpdatedAt</c>
+    /// bumps so those clients also refetch the merged entry.
+    /// </summary>
+    private async Task MergeSameLabelVariantsAsync(
+        App root, string? rootLabel, string? listPackage, DateTimeOffset now, CancellationToken ct)
+    {
+        var label = rootLabel ?? NormalizeLabel(root.ApkLabel);
+        if (label is null)
+        {
+            return;
+        }
+
+        var variants = await LoadVariantGroupAsync(root, ct);
+        if (variants.Count == 0)
+        {
+            return;
+        }
+
+        var packages = new List<string>();
+        foreach (var variant in variants)
+        {
+            if (!string.IsNullOrEmpty(variant.PackageName))
+            {
+                packages.Add(variant.PackageName);
+            }
+        }
+
+        foreach (var download in await LoadDownloadsAsync(root, ct))
+        {
+            if (!string.IsNullOrEmpty(download.PackageName))
+            {
+                packages.Add(download.PackageName);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(root.PackageName))
+        {
+            packages.Add(root.PackageName);
+        }
+
+        var canonical = ResolveCanonicalPackage(root, label, packages.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), listPackage);
+
+        var folded = false;
+        foreach (var variant in variants)
+        {
+            if (!string.Equals(NormalizeLabel(variant.ApkLabel), label, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var download in await LoadDownloadsAsync(variant, ct))
+            {
+                download.App = root;
+                download.AppId = root.Id;
+                download.PackageName ??= variant.PackageName;
+            }
+
+            var icon = variant.IconHash;
+            variant.IconHash = null;
+            if (icon is not null)
+            {
+                await DeleteIconIfOrphanedAsync(variant, icon, ct);
+            }
+
+            await WriteRemovedTombstoneAsync(variant, ct);
+            db.Apps.Remove(variant);
+            folded = true;
+        }
+
+        if (!folded)
+        {
+            return;
+        }
+
+        if (canonical is not null && !string.Equals(root.PackageName, canonical, StringComparison.OrdinalIgnoreCase))
+        {
+            root.PackageName = canonical;
+        }
+
+        // Folding changes the entry's candidates; refresh cached clients.
+        root.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    private async Task WriteRemovedTombstoneAsync(App app, CancellationToken ct)
+    {
+        var existing = db.RemovedApps.Local.FirstOrDefault(t => t.Slug == app.Slug)
+            ?? await db.RemovedApps.FirstOrDefaultAsync(t => t.Slug == app.Slug, ct);
+        if (existing is null)
+        {
+            existing = new RemovedApp { Slug = app.Slug };
+            db.RemovedApps.Add(existing);
+        }
+
+        existing.Name = app.Name;
+        existing.Listing = app.Listing;
+        // Commit time, not the pass start: a client that synced mid-pass must
+        // still see the removal, the same reason the Shizuku gate stamps so.
+        existing.RemovedAt = DateTimeOffset.UtcNow;
     }
 
     /// <summary>
@@ -1083,21 +1398,21 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
-    /// The list row keeps its package; a new package becomes a variant row
-    /// that mirrors the list entry's metadata and points back at it.
+    /// The row for a non-root app name (one repo, several distinct apps). A
+    /// new name becomes a variant row that mirrors the list entry's metadata
+    /// and points back at it; its package identifies it across passes.
     /// </summary>
-    private async Task<App> ResolveTargetForPackageAsync(
-        App root, SourceKind kind, string packageName, DateTimeOffset now, CancellationToken ct)
+    private async Task<App> EnsureVariantAsync(
+        App root, SourceKind kind, string? packageName, DateTimeOffset now, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(packageName)
-            || string.IsNullOrEmpty(root.PackageName)
-            || root.PackageName == packageName)
+        if (string.IsNullOrEmpty(packageName))
         {
             return root;
         }
 
         var variants = await LoadVariantGroupAsync(root, ct);
-        var existing = variants.FirstOrDefault(v => v.PackageName == packageName);
+        var existing = variants.FirstOrDefault(v =>
+            string.Equals(v.PackageName, packageName, StringComparison.OrdinalIgnoreCase));
         if (existing is not null)
         {
             return existing;
@@ -1210,6 +1525,7 @@ public sealed class AppEnricher(
                 await DeleteIconIfOrphanedAsync(variant, icon, ct);
             }
 
+            await WriteRemovedTombstoneAsync(variant, ct);
             db.Apps.Remove(variant);
         }
     }
@@ -1223,7 +1539,7 @@ public sealed class AppEnricher(
     /// per-architecture siblings of an F-Droid package.
     /// </summary>
     private async Task UpsertIndexAssetAsync(
-        App app, SourceKind kind, SourceAsset asset, DateTimeOffset now, CancellationToken ct)
+        App app, SourceKind kind, SourceAsset asset, string? packageName, DateTimeOffset now, CancellationToken ct)
     {
         await UpsertDownloadAsync(app, new DownloadCandidate(
             kind,
@@ -1237,7 +1553,8 @@ public sealed class AppEnricher(
             SigSha256: null,
             SigMd5: asset.SigMd5,
             MinSdk: null,
-            Abi: asset.Abi), now, ct);
+            Abi: asset.Abi,
+            PackageName: packageName), now, ct);
     }
 
     /// <summary>
@@ -1406,7 +1723,8 @@ public sealed class AppEnricher(
         string? SigSha256,
         string? SigMd5,
         int? MinSdk,
-        string? Abi = null);
+        string? Abi = null,
+        string? PackageName = null);
 
     /// <summary>
     /// Signing identity of a candidate: the first SHA-256 token, else the
@@ -1511,10 +1829,15 @@ public sealed class AppEnricher(
         var sigKey = ComputeSigKey(candidate.SigSha256, candidate.SigMd5, candidate.ApkUrl);
         var md5 = FirstFingerprint(candidate.SigMd5);
         var rows = await LoadDownloadsAsync(app, ct);
-        // ABI is part of the key: one release can ship several per-arch APKs
-        // that share a signing identity.
-        var row = rows.FirstOrDefault(d => d.SigKey == sigKey && d.Abi == candidate.Abi)
-            ?? (md5 is null ? null : rows.FirstOrDefault(d => FirstFingerprint(d.SigMd5) == md5 && d.Abi == candidate.Abi));
+        // Package, signing identity and ABI are the key: one release can ship
+        // several per-arch APKs that share a signing identity, and one app row
+        // can carry several flavor packages (FOSS vs Play, debug vs release).
+        // An unknown package (index-only asset) matches any; a null-package row
+        // is legacy data that adopts the package instead of gaining a twin.
+        bool SamePackage(string? value) =>
+            candidate.PackageName is null || string.Equals(value, candidate.PackageName, StringComparison.OrdinalIgnoreCase);
+        var row = rows.FirstOrDefault(d => SamePackage(d.PackageName) && d.SigKey == sigKey && d.Abi == candidate.Abi)
+            ?? (md5 is null ? null : rows.FirstOrDefault(d => SamePackage(d.PackageName) && FirstFingerprint(d.SigMd5) == md5 && d.Abi == candidate.Abi));
         if (row is null)
         {
             row = new AppDownload { App = app, SigKey = sigKey, ApkUrl = candidate.ApkUrl, Abi = candidate.Abi };
@@ -1534,6 +1857,11 @@ public sealed class AppEnricher(
 
         row.Source = candidate.Source;
         row.SourceRef = candidate.SourceRef;
+        if (candidate.PackageName is not null)
+        {
+            row.PackageName = candidate.PackageName;
+        }
+
         row.ApkUrl = candidate.ApkUrl;
         row.ArchiveEntry = candidate.ArchiveEntry;
         row.VersionCode = candidate.VersionCode;
@@ -1552,11 +1880,22 @@ public sealed class AppEnricher(
     /// then the newest version, then a fixed source order. Exactly one row is
     /// primary per app (invariant enforced here, not by a DB constraint).
     /// </summary>
-    private async Task RecomputePrimaryAsync(App app, CancellationToken ct)
+    private async Task RecomputePrimaryAsync(App app, CancellationToken ct, string? preferredPackage = null)
     {
         var rows = await LoadDownloadsAsync(app, ct);
+        // Flavor packages share one row; the default offer must stay the
+        // canonical package (the list URL's package), so a flavor can never
+        // become the fresh install. Unknown packages keep the old ordering.
+        var candidates = preferredPackage is null
+            ? rows
+            : rows.Where(r => r.PackageName is null || string.Equals(r.PackageName, preferredPackage, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (candidates.Count == 0)
+        {
+            candidates = rows;
+        }
+
         AppDownload? best = null;
-        foreach (var row in rows)
+        foreach (var row in candidates)
         {
             best = best is null ? row : PreferDownload(row, best);
         }
@@ -1676,7 +2015,8 @@ public sealed class AppEnricher(
                 null,
                 sibling.SigMd5,
                 sibling.MinSdk,
-                sibling.Abi), now, ct);
+                sibling.Abi,
+                PackageName: packageId), now, ct);
         }
 
         var keep = siblings.Select(s => s.ApkName).Append(primary.ApkName).ToHashSet(StringComparer.Ordinal);
@@ -1835,8 +2175,9 @@ public sealed class AppEnricher(
             sigSha256,
             sigMd5,
             minSdk,
-            analyzed?.Badging.Abi ?? package.Abi), now, ct);
-        await RecomputePrimaryAsync(app, ct);
+            analyzed?.Badging.Abi ?? package.Abi,
+            PackageName: package.PackageName), now, ct);
+        await RecomputePrimaryAsync(app, ct, package.PackageName);
 
         app.PackageName = package.PackageName;
         if (analyzed is not null)
@@ -1857,7 +2198,7 @@ public sealed class AppEnricher(
         // The index lists one package per architecture; record the siblings as
         // index-only rows so the client can pick the device's ABI.
         await UpsertFdroidSiblingsAsync(app, kind, repoBase, packageId, packages, package, now, ct);
-        await RecomputePrimaryAsync(app, ct);
+        await RecomputePrimaryAsync(app, ct, package.PackageName);
 
         await AddVersionRowAsync(app, versionCode, versionName, apkUrl, now, ct);
 
@@ -1911,7 +2252,7 @@ public sealed class AppEnricher(
         if (package is null)
         {
             await RemoveDownloadAsync(app, SourceKind.FDroid, ct);
-            await RecomputePrimaryAsync(app, ct);
+            await RecomputePrimaryAsync(app, ct, app.PackageName);
             return;
         }
 
@@ -1931,7 +2272,7 @@ public sealed class AppEnricher(
                 existing.ResolvedAt = now;
             }
 
-            await RecomputePrimaryAsync(app, ct);
+            await RecomputePrimaryAsync(app, ct, app.PackageName);
             return;
         }
 
@@ -1949,7 +2290,8 @@ public sealed class AppEnricher(
                 CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256)),
                 CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5,
                 analyzed.Badging.MinSdk,
-                analyzed.Badging.Abi)
+                analyzed.Badging.Abi,
+                PackageName: package.PackageName)
             : new DownloadCandidate(
                 SourceKind.FDroid,
                 package.PackageName,
@@ -1962,9 +2304,10 @@ public sealed class AppEnricher(
                 null,
                 package.SigMd5,
                 package.MinSdk,
-                package.Abi);
+                package.Abi,
+                PackageName: package.PackageName);
         await UpsertDownloadAsync(app, candidate, now, ct);
-        await RecomputePrimaryAsync(app, ct);
+        await RecomputePrimaryAsync(app, ct, app.PackageName);
     }
 
     /// <summary>
