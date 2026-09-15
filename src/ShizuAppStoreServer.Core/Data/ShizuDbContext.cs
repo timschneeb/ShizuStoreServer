@@ -10,6 +10,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<AppVersion> AppVersions => Set<AppVersion>();
     public DbSet<AppDownload> Downloads => Set<AppDownload>();
     public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
+    public DbSet<SyncIssue> SyncIssues => Set<SyncIssue>();
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
     public DbSet<RemovedApp> RemovedApps => Set<RemovedApp>();
     public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
@@ -231,7 +232,29 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Updated).HasColumnName("updated");
             e.Property(x => x.Removed).HasColumnName("removed");
             e.Property(x => x.Failed).HasColumnName("failed");
+            e.Property(x => x.IssueCount).HasColumnName("issue_count");
             e.Property(x => x.Error).HasColumnName("error");
+        });
+
+        b.Entity<SyncIssue>(e =>
+        {
+            e.ToTable("sync_issues");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.SyncRunId).HasColumnName("sync_run_id");
+            e.HasOne(x => x.SyncRun).WithMany().HasForeignKey(x => x.SyncRunId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>().HasMaxLength(32).IsRequired();
+            e.Property(x => x.Rule).HasColumnName("rule").HasMaxLength(64).IsRequired();
+            e.Property(x => x.AppId).HasColumnName("app_id");
+            e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.SetNull);
+            e.Property(x => x.Slug).HasColumnName("slug").HasMaxLength(200);
+            e.Property(x => x.Message).HasColumnName("message").IsRequired();
+            e.Property(x => x.Location).HasColumnName("location");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.HasIndex(x => x.SyncRunId);
+            e.HasIndex(x => x.Kind);
+            e.HasIndex(x => x.Rule);
+            e.HasIndex(x => x.Slug);
         });
 
         b.Entity<SyncRequest>(e =>

@@ -22,4 +22,16 @@ public sealed class SyncOptions
     /// backfill); integration tests turn it off.
     /// </summary>
     public bool RunOnStartup { get; set; } = true;
+
+    /// <summary>
+    /// Fast-path release poll: each non-nightly pass cheaply checks release
+    /// feeds/indexes for new versions and force-enriches changed apps even
+    /// inside their re-check window. Needs a GitHub PAT (anonymous limits
+    /// cover 60 calls/hr); without one the poll stays off and fast passes
+    /// enrich due-only apps.
+    /// </summary>
+    public bool PollEnabled { get; set; } = true;
+
+    /// <summary>Max parallel release-metadata fetches in the poll.</summary>
+    public int PollParallelism { get; set; } = 8;
 }

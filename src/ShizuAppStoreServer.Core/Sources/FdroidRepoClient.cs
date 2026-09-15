@@ -88,6 +88,18 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
             p => SourceClassifier.RepoKey(p.SourceUrl) == repoKey);
     }
 
+    /// <summary>
+    /// Whole-repo package map for the fast-path release poll: one
+    /// conditional fetch per repo per pass instead of one per app. Null
+    /// only when the index answered 304 with nothing cached yet.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, FdroidPackageInfo>?> GetAllPackagesAsync(
+        string repoBase, CancellationToken ct = default)
+    {
+        var cached = await LoadIndexAsync(repoBase, seedEtag: null, ct);
+        return cached?.Packages;
+    }
+
     private async Task<CachedIndex?> LoadIndexAsync(string repoBase, string? seedEtag, CancellationToken ct)
     {
         var gate = _gates.GetOrAdd(repoBase, _ => new SemaphoreSlim(1, 1));

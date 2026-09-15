@@ -91,6 +91,7 @@ public sealed class ShizuApiFactory : WebApplicationFactory<Program>
                 o.AddPolicy("app-detail", NoOutputCachePolicy.Instance);
                 o.AddPolicy("categories", NoOutputCachePolicy.Instance);
                 o.AddPolicy("changes", NoOutputCachePolicy.Instance);
+                o.AddPolicy("issues", NoOutputCachePolicy.Instance);
                 o.AddPolicy("meta", NoOutputCachePolicy.Instance);
             });
         });

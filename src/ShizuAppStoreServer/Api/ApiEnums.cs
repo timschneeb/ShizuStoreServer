@@ -54,6 +54,14 @@ public static class ApiEnums
         _ => throw new ArgumentOutOfRangeException(nameof(v), v, null),
     };
 
+    public static string ToApiString(IssueKind v) => v switch
+    {
+        IssueKind.Parse => "parse",
+        IssueKind.Enrich => "enrich",
+        IssueKind.Quality => "quality",
+        _ => throw new ArgumentOutOfRangeException(nameof(v), v, null),
+    };
+
     public static bool TryParseListing(string? s, out Listing v) => TryParse(s, out v);
     public static bool TryParseAppType(string? s, out AppType v) => TryParse(s, out v);
     public static bool TryParseAvailability(string? s, out Availability v) => TryParse(s, out v);
@@ -86,6 +94,7 @@ public static class ApiEnums
         CategorySection s => ToApiString(s),
         SourceKind k => ToApiString(k),
         Availability a => ToApiString(a),
+        IssueKind k => ToApiString(k),
         _ => throw new ArgumentOutOfRangeException(nameof(v), v, null),
     };
 }

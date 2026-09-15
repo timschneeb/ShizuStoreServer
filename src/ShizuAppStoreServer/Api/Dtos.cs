@@ -129,6 +129,27 @@ public sealed record ChangesDto(
 
 public sealed record CountsDto(int Apps, int Categories);
 
+/// <summary>One entry of the catalog health snapshot.</summary>
+public sealed record IssueDto(
+    string Kind,
+    string Rule,
+    string? Slug,
+    string Message,
+    string? Location);
+
+public sealed record IssueSummaryDto(int Parse, int Enrich, int Quality, int Total);
+
+/// <summary>Current health snapshot: latest completed run plus its issues.</summary>
+public sealed record IssuesDto(
+    long? RunId,
+    string? HeadCommit,
+    DateTimeOffset GeneratedAt,
+    IssueSummaryDto Summary,
+    IReadOnlyList<IssueDto> Items,
+    int Total,
+    int Page,
+    int PageSize);
+
 public sealed record MetaDto(
     DateTimeOffset GeneratedAt,
     string? ListCommit,

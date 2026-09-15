@@ -49,8 +49,10 @@ and two hosted workers (fast loop + nightly).
 
 Request pipeline order matters: `UseOutputCache` runs **before**
 `UseRateLimiter`, so cache hits don't consume rate-limit permits.
-All `/v1/*` controllers carry `[EnableRateLimiting("api")]` except
-`/healthz`, which is unlimited and uncached. The `api` policy is a
+All `/v1/*` controllers carry `[EnableRateLimiting("api")]`. `/healthz` and
+`/icons/*` are exempt: `/healthz` is unlimited and uncached, and icons are
+immutable static assets requested in bulk by list screens, so the edge caches
+them instead of the origin enforcing a limit. The `api` policy is a
 per-IP (fallback `"unknown"`) fixed window: 100 req/min by default, no queue -
 excess gets 429. `ApiOptions` is resolved per request (not captured),
 so tests can swap the registration per suite.
@@ -72,20 +74,37 @@ bundle` is rebuilt per deploy, never committed.
 - **categories** - `slug` unique; self-referencing `parent_id`
   (max depth 2 in real data); `section` (`apps|libraries|misc`).
 - **apps** - one awesome-list entry. `slug` globally unique and
-  **stable across renames**. `url` is deliberately **non-unique**:
-  real data lists the same URL in several categories, so identity is
-  `(listing, url, category)`, never the URL alone.
+  **stable across renames**. `url` is deliberately **non-unique**
+  across listings, but within one listing a URL maps to a single row:
+  identity is `(listing, url)`. When the source lists the same URL under
+  several categories, the first occurrence owns the row and the rest are
+  ignored, so the catalog never shows the same app twice.
   - List fields: `name`, `description`, `license`, `listing`
     (`main|closed_source`), `type` (`app|library|flow`), flags
     (`is_recommended`, `has_paid`, `has_iap`, `has_ads`,
     `trial_days`, `requires_root`), `parent_id` (nested entries),
     `url`, `source_url`, `source_kind`, `availability`, `store_url`.
   - Enrichment fields: `package_name`, `icon_hash`, `icon_adaptive`,
-    `enrich_etag` (conditional-request ETag reuse), `last_checked_at`,
+    `author_key`/`author_name`/`author_url` (stable developer identity:
+    `github:<owner>` or `gitlab:<group>`; summary-visible so clients can
+    group by developer), `permissions` (the primary APK's
+    `uses-permission` list, extracted with aapt2 only, never F-Droid),
+    `full_description` (README markdown, or scraped plain-text Play
+    description, sent only on the detail endpoint), `enrich_etag` (conditional-request ETag
+    reuse), `stars` (GitHub
+    stargazers), `download_total` (popularity, §8), `install_count`
+    (successful installs reported by clients via
+    `POST /v1/apps/{slug}/installs`; monotonic, never bumps `updated_at`), `version_updated_at`
+    (release date of the currently served APK version; null when the
+    source publishes none, and nulls sort last), `list_updated_at`
+    (when the awesome-list entry was last added or edited, `[silent]`
+    commits excluded; drives "recently added", nulls sort last),
+    `last_checked_at`,
     `last_error` (trimmed to 500 chars).
   - `exclude_override` (operator flag, never touched by the
     upserter), `excluded_reason`, `added_at`/`updated_at` (git
-    history, §4).
+    history, §4; `updated_at` is the change clock, not the release
+    date).
   - Indexes on `url`, `updated_at`, `availability`, `category_id`.
 - **app_downloads** - one row per signing identity of an app's
   installable builds. Replaces the removed per-candidate `apps`
@@ -115,14 +134,27 @@ bundle` is rebuilt per deploy, never committed.
 - **sync_runs** - audit log of passes: `trigger`, `head_commit`,
   per-bucket counts (added/updated/removed/enriched/up-to-date/
   failed, drained requests, parse warnings, archived changes),
+  `issue_count` (rows in the health snapshot this pass wrote),
   `skipped` flag, `error`. A `Skipped` pass
   writes **no row** (clean audit log, not a heartbeat table).
+- **sync_issues** - current catalog health snapshot: `sync_run_id`
+  (FK cascade), `kind` (`parse|enrich|quality`), `rule`, `app_id`
+  (nullable, set null on delete), `slug`, `message`, `location`
+  (parser context, parse rows only), `created_at`. Holds only the
+  latest completed run: successful passes replace all rows, skipped
+  and failed passes leave the previous good snapshot in place.
 - **sync_requests** - webhook queue (`reason`, `processed`); rows
   are marked processed only on pass success, so a failed pass never
   loses its trigger.
 - **removed_apps** - tombstones closing the delete path:
   `slug` unique + `removed_at` index. Written (add-or-refresh) on
   stale delete, cleared on re-add (resurrection).
+- **config_flags** - operator-controlled flags (`key` PK, `value`,
+  `updated_at`), read live on every use so flips need no restart. A
+  missing row reads as its documented default; `GET`s never insert.
+  Known keys: `use_install_counts_for_popularity` (`true` makes
+  clients sort popularity by `install_count` and show it in list
+  subtitles; default false).
 
 ## 4. List ingestion
 
@@ -137,15 +169,20 @@ bundle` is rebuilt per deploy, never committed.
 - **History** (`History/GitHistoryService`): one
   `git log --reverse -p` pass over `README.md`; the first
   `+* [Name](url)` sighting of a URL is `added_at`, the last is
-  `updated_at`.
+  `updated_at`. Commits flagged `[silent]` are housekeeping and are
+  skipped, matching the published changelog. The upserter seeds
+  `list_updated_at` from that last non-silent sighting (the changelog's
+  "recently changed" clock) and re-seeds `added_at`/`list_updated_at` on
+  every pass; afterwards
+  `updated_at` is the change clock (any summary change bumps it, §3/§8)
+  while `version_updated_at` tracks the served APK version.
 - **Upserter** (`Sync/CatalogUpserter`): matches rows by
-  `(listing, url, category)`. Rows from sections no longer ingested
+  `(listing, url)`. Rows from sections no longer ingested
   (libraries, misc, closed-source) sweep out as stale. Same-URL
-  rename keeps id + slug.
-  Move-vs-duplicate is resolved in two phases against precomputed
-  logical locations: vanished old location = move (row reused),
-  still-parsed old location = genuine duplicate (new row). Stale
-  `(url, category)` pairs are hard-deleted and reported by slug.
+  rename keeps id + slug and moves the row to the new category; a URL
+  repeated in another category is a duplicate and is skipped. Stale
+  `(url, category)` pairs, including duplicates created by earlier
+  syncs, are hard-deleted and reported by slug.
 - **ARCHIVED.md** (`pages/ARCHIVED.md`, applied after upsert):
   listed URLs (entry + source links, recursive incl. children) are
   marked `Excluded` with a fixed reason; un-listed apps are
@@ -162,6 +199,13 @@ Resolution is **forge-first, always**: GitHub → GitLab →
 F-Droid/Izzy → fallback. A forge link anywhere in the entry (primary
 or source URL) wins the primary APK; F-Droid is never primary while a
 forge source exists. Play + forge combos keep Play as `store_url`.
+
+Conditional source requests replay the stored `enrich_etag` via
+`If-None-Match` through `ConditionalRequest.ApplyIfNoneMatch`, which
+parses with `EntityTagHeaderValue.TryParse`: GitHub weak validators
+(`W/"..."`) are replayed and malformed tags are skipped instead of
+throwing (one bad tag previously failed that app's pass forever). A 304
+reuses the prior result; for GitHub it still refreshes `stars`.
 
 When a forge fails with no usable APK (no release, no `.apk` asset
 and no archive carrying one), the app falls back to the F-Droid main
@@ -220,13 +264,19 @@ therefore treats Izzy as forge-like.
   `app_downloads` row (`source` = FDroid/Izzy, `source_ref` = package
   id, §6). Index lookups by source URL (`FindPackageBySourceAsync`)
   power the forge fallback.
-- **Fallback** (no forge/F-Droid source): letter-avatar icon,
+- **Fallback** (no forge/F-Droid APK available): letter-avatar icon,
   `LinkOnly` - or `PlayRedirect` with `StoreUrl` for Play entries.
   When a Play listing is linked (including on apps whose forge has no
-  APK at all), the real icon is scraped from the listing's `og:image`
-  and used instead of the avatar; no download row is recorded and the
-  client shows an open-in-Play-store / open-externally button based on
-  the entry URL.
+  APK at all), the page is scraped once for the icon (`og:image`), the
+  package id (from the listing URL), the developer name/profile
+  (`author_key` = `play:<devId>`), the version name, the full
+  description and the last-update date (`VersionUpdatedAt`), so
+  external-only entries still carry developer, version and details; no
+  download row is recorded and the client shows an open-in-Play-store /
+  open-externally button based on the entry URL. The fallback also runs when a forge source exists but
+  yields no release or no APK asset (for example a GitHub repo with no
+  release), so those entries become a Play redirect instead of failing
+  the pass.
   Play-sole-source apps (no usable source link, no override) are
   `Excluded` with a reason and hidden from every endpoint.
 
@@ -290,7 +340,10 @@ Genuine shutdown cancellation still aborts the pass.
 
 Outcomes: `Enriched`, `UpToDate`, `AvatarFallback`, `Excluded`,
 `Failed` (`last_error` set, previous good values kept),
-`SkippedFresh`. `BulkEnricher` fans out over app ids with a
+`SkippedFresh`. Every completed check stamps `last_checked_at` (and
+clears `last_error`), including analyses whose build does not become
+primary: an unstamped success stays due forever and is re-downloaded
+every pass. `BulkEnricher` fans out over app ids with a
 `SemaphoreSlim` (default 4), preserving order, isolating faults;
 cancellation propagates.
 
@@ -356,17 +409,33 @@ row. A pass:
 2. Best-effort `git fetch` (5-min timeout; offline/timeout →
    continue off the local clone).
 3. Compares HEAD against the latest run's commit: unchanged HEAD +
-   no requests + no `force` → enrich due-only apps and write the
-   row, or return `Skipped` (no row) when nothing is due.
+   no requests + no `force` → enrich due-only apps plus
+   poll-changed apps (forced) and write the row, or return
+   `Skipped` (no row) when neither has anything.
 4. Else full pass: read + parse `README.md` (Apps section) →
    history → upsert (the empty closed doc sweeps stale listings) →
    `ARCHIVED.md` → enrich selection (full re-check: all
    non-excluded with `force=true`; else the client-side due
-   window) fanned out per-app through `BulkEnricher` with
+   window plus poll-changed extras, forced) fanned out per-app through `BulkEnricher` with
    `IEnrichmentRunner` (fresh scope per app, persists its own
    save; vanished rows count `Failed`) → mark requests processed +
-   write the run row. No app mutations happen after the upsert
-   save, so the final save writes only requests + run.
+   write the run row plus the health snapshot (§7.1). No app mutations
+   happen after the upsert save, so the final save writes only
+   requests + run + issues.
+
+### 7.1 Health snapshot (`sync_issues`, served by `GET /v1/issues`)
+
+Each successful pass replaces the snapshot: parse rows from this
+pass's warnings (README plus `ARCHIVED.md`), enrich rows from every
+non-excluded row currently carrying `last_error`, quality rows from
+`CatalogHealthCheck` (missing license/description/icon, non-http
+entry or source URL, direct-APK rows without package name or primary
+download, never-checked or twice-window-stale rows; excluded rows are
+never checked). Due-only passes (HEAD unchanged) keep the previous
+parse rows and refresh only enrich + quality rows. Skipped and failed
+passes write no issues, so a crashed pass keeps the last good snapshot.
+Staleness is evaluated against the pass clock. The run row records the
+snapshot size in `issue_count`.
 
 Workers (`Web/Sync/`): `SyncWorker` runs one pass at startup
 (`RunOnStartup`, the first-boot backfill) then ticks on a
@@ -376,30 +445,92 @@ default 03:00; invalid values disable it with a log) and triggers
 full re-checks. `SyncGate` single-flights passes - a contested tick
 skips.
 
+### 7.2 Fast-path release poll (`Core/Sync/ReleasePoller`)
+
+Every non-nightly pass cheaply checks whether apps still inside
+their re-check window released something new, and force-enriches
+the changed ones. The poll is metadata-only (release feeds plus
+one F-Droid/Izzy index fetch per repo, no APK download, no aapt2,
+no DB writes) and compares against the recorded downloads:
+GitHub/GitLab compare the picked APK/zip asset URL against the
+primary download (the stored ETag rides along, so unchanged GitHub
+feeds answer 304); F-Droid/Izzy compare the index version code
+and APK URL against the matching download row. Play, link-only,
+Codeberg and the Instafel/GitCode special cases have no cheap
+signal and stay on the due window. Skipped apps (excluded) and
+rows without a matching download count as changed, so they enrich
+on the next pass. Poll failures are soft (unchanged): a flapping
+upstream never marks rows failed, and a throwing poller degrades
+the pass to due-only enrichment. The poll needs a GitHub PAT
+(anonymous limits cover 60 calls/hr); without one it stays off
+with a startup warning and fast passes enrich due-only apps.
+
 ## 8. API behavior (`/v1/*`)
 
 Snake_case wire format (`main|closed_source`, `app|library|flow`,
 `apps|libraries|misc`, `github|gitlab|codeberg|fdroid|izzy|play|
 other`, `direct_apk|play_redirect|link_only|excluded`). `excluded`
 rows are never returned (detail reads them as 404). Summary/list DTOs
-source `versionCode`/`versionName`/`minSdk`/`sigSha256`/`sigMd5` from
-the primary download.
+source `versionCode`/`versionName`/`minSdk`/`size`/`sigSha256`/`sigMd5`
+from the primary download (`size` is the primary APK's `size_bytes`, null
+when unknown).
+
+`stars` (GitHub stargazers) and `downloadTotal` are best-effort
+popularity fields on both summary and detail; null when unknown.
+`downloadTotal` reflects the app's primary source: the sum of GitHub
+release asset `download_count` over all non-draft releases, or the
+IzzyOnDroid rolling-year download count for Izzy-primary apps.
+f-droid.org publishes no per-app download counts (its API lists
+versions only), so F-Droid-primary apps have none. `sort=stars`/
+`sort=downloads` order by them (nulls last on descending).
+
+`versionUpdatedAt` (summary + detail) is the release date of the
+currently served APK version: GitHub `published_at` or GitLab
+`released_at`; F-Droid-primary apps and sources that publish no date
+stay null (they sort last). It only advances when a newer primary version
+is served, so metadata-only refreshes (icon, stars, desc) never move
+it. The server's `sort=updated` still orders by `updated_at`; clients
+use `versionUpdatedAt` for their "Recently updated" list so metadata
+churn does not surface as a new version.
+
+`listUpdatedAt` (summary + detail) is the last add or edit of the
+awesome-list entry from git history, with `[silent]` commits excluded.
+It matches the published changelog ordering, so clients use it for
+"Recently added" (an entry edited recently moves up, exactly like the
+changelog). Rows without git history stay null and sort last. The
+server's `sort=added` still orders by `added_at` (first sighting).
+
+`authorKey`/`authorName` (GitHub owner or GitLab namespace) ride on both
+summary and detail so clients can group apps by developer; `authorUrl`
+(profile link) is detail-only. `permissions` (the primary APK's
+requested permissions, APK-sourced only) and `fullDescription` (README
+markdown, or plain-text Play description, capped at 200k chars) are
+detail-only: they are deliberately absent from summaries and
+`/v1/changes`, and clients keep the README in memory rather than
+persisting it.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `listing`/`availability`/`type` (parse or 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
+| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `listing`/`availability`/`type` (parse or 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts (excluded omitted). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
-| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. Output-cached 30s, `VaryByQuery(*)`. |
-| `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories). Output-cached 60s. |
+| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. Output-cached 30s, `VaryByQuery(*)`. |
+| `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
+| `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
-| `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-year `Cache-Control` (no output-cache attribute - its filter would overwrite the header). |
+| `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
 | `POST /v1/admin/sync` | Webhook: secret from `Admin:HmacSecret` or `SHIZU_ADMIN_SECRET`, else fail-closed 503. `X-Shizu-Signature` must be hex `HMAC-SHA256(raw body)` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row → 202 `{queued:true}`. |
+| `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 
-Rate limit: fixed window, 100 req/min/IP, no queue (→ 429).
-Caching: server-side output cache per the table above plus
-`ResponseCache` client headers on GET endpoints. OpenAPI document
-is served in all environments; Scalar UI is development-only.
+Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).
+Caching: server-side output cache per the table above. Dynamic GET
+endpoints send `Cache-Control: no-store`, so clients and the edge never
+reuse an API response (only `/icons/*` advertises a cache lifetime; a
+cached `/v1/changes` would make a client refresh a no-op). Responses are
+compressed (Brotli preferred, gzip fallback) and advertise `Vary:
+Accept-Encoding`; compression sits outside the output cache so cached bodies
+stay uncompressed and compress on the way out. OpenAPI document is served in
+all environments; Scalar UI is development-only.
 
 ## 9. Behavior knobs (code-level defaults)
 
@@ -421,6 +552,8 @@ is served in all environments; Scalar UI is development-only.
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |
 | `Sync:NightlyTimeUtc` | `03:00` | Full re-check time (UTC) |
 | `Sync:RunOnStartup` | `true` | Boot pass (first boot = backfill) |
+| `Sync:PollEnabled` | `true` | Fast-path release poll (§7.2); off without a GitHub PAT |
+| `Sync:PollParallelism` | `8` | Concurrent release-metadata fetches in the poll |
 
 ## 10. Invariants & gotchas (do not break)
 

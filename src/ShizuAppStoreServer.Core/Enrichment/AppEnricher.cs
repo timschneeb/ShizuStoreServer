@@ -1178,8 +1178,16 @@ public sealed class AppEnricher(
             artifactSize, artifactSha256, sigSha256, sigMd5, badging.MinSdk), now, ct);
         await RecomputePrimaryAsync(app, ct);
 
+        // A completed analysis stamps the check even when it changes nothing
+        // user-visible: without this, an app whose analyzed build never
+        // becomes primary stays due forever and is re-downloaded every pass
+        // (seen live: two rows pinned at null LastCheckedAt that the new
+        // never_checked report surfaced). The ETag is deliberately left
+        // alone here; it belongs to the primary source's conditional requests.
         if (!asPrimary)
         {
+            app.LastCheckedAt = now;
+            app.LastError = null;
             return new EnrichResult(EnrichOutcome.Enriched, null);
         }
 
@@ -1189,6 +1197,8 @@ public sealed class AppEnricher(
             || primary.ApkUrl != artifactUrl
             || primary.SigKey != ComputeSigKey(sigSha256, sigMd5, artifactUrl))
         {
+            app.LastCheckedAt = now;
+            app.LastError = null;
             return new EnrichResult(EnrichOutcome.UpToDate, null);
         }
 

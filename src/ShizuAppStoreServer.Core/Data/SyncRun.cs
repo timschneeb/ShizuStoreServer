@@ -17,5 +17,6 @@ public sealed class SyncRun
     public int Updated { get; set; }
     public int Removed { get; set; }
     public int Failed { get; set; }
+    public int IssueCount { get; set; }
     public string? Error { get; set; }
 }

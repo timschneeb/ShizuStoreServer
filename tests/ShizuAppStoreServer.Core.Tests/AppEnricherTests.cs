@@ -1222,6 +1222,24 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(SourceKind.GitHub, rows.Single(d => d.IsPrimary).Source);
     }
 
+    [Fact]
+    public async Task AnalyzedBuildThatLosesPrimaryStillStampsCheck()
+    {
+        // Live 2026-09-15: two rows sat at null LastCheckedAt forever (caught
+        // by the never_checked report) because the analyzed-but-not-primary
+        // return left no stamp, so every pass re-downloaded them.
+        var (enricher, _, _, _, _) = HappyPath(versionCode: "42");
+        var app = NewApp("loser", "Loser", "https://github.com/example/loser");
+        AddDownload(app, SourceKind.GitHub, "https://example.com/newer.apk", versionCode: 100);
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal("https://example.com/newer.apk", Primary(app).ApkUrl);
+        Assert.Equal(T0, app.LastCheckedAt);
+        Assert.Null(app.LastError);
+    }
+
     // ---- Special cases: instafel API + GitCode mirror ----
 
     [Fact]

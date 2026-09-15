@@ -53,7 +53,8 @@ public sealed record IconRefreshResult(
 /// <item>Best-effort <c>git fetch</c> (offline/timeout → continue off local
 /// clone state; enrichment failures will still surface).</item>
 /// <item>HEAD unchanged + no requests + not a full re-check → enrich due
-/// apps only, or skip entirely (no <c>sync_runs</c> row) when nothing is due.</item>
+/// apps plus poll-changed apps (force), or skip entirely (no
+/// <c>sync_runs</c> row) when neither has anything.</item>
 /// <item>Otherwise parse README (CLOSED_SOURCE is ignored; its rows sweep
 /// out as stale), merge git history, upsert, apply ARCHIVED.md
 /// exclusions, then enrich.</item>
@@ -70,6 +71,7 @@ public sealed class SyncService(
     CatalogUpserter upserter,
     GitHistoryService git,
     IEnrichmentRunner enrich,
+    IReleasePoller poll,
     IPaparazziRenderer renderer,
     SyncOptions options,
     EnrichmentOptions enrichment)
@@ -142,22 +144,23 @@ public sealed class SyncService(
         if (!fullRecheck && pending.Count == 0 && head is not null && head == lastHead)
         {
             var dueIds = await SelectDueAppIdsAsync(now, ct);
-            if (dueIds.Count == 0)
+            var freshIds = (await PollChangedAsync(ct)).Except(dueIds).ToList();
+            if (dueIds.Count == 0 && freshIds.Count == 0)
             {
                 return new SyncPassResult(
                     effectiveTrigger, head, 0, 0, 0, 0, 0, 0, 0, 0, 0, true, null);
             }
 
-            var (enriched, upToDate, failed, failedMessages) = await EnrichSelectedAsync(dueIds, false, now, ct);
+            var (enriched, upToDate, failed, failedMessages) =
+                await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
             return await FinishRunAsync(effectiveTrigger, head,
                 0, 0, 0, enriched, upToDate, failed,
-                0, 0, 0, now, ct, failedMessages);
+                0, [], false, 0, now, ct, failedMessages);
         }
 
         var readme = await File.ReadAllTextAsync(Path.Combine(options.ListPath, ReadmePath), ct);
         var parser = new AwesomeListParser();
         var mainDoc = parser.Parse(readme, "main");
-        var warnings = mainDoc.Warnings.Count;
 
         var history = await git.GetHistoryAsync(options.ListPath, ReadmePath, ct);
 
@@ -167,7 +170,8 @@ public sealed class SyncService(
         var closedDoc = new ParsedDocument { ListingName = "closed-source" };
 
         var counts = await upserter.UpsertAsync([mainDoc, closedDoc], history, now, ct);
-        var archivedChanged = await ApplyArchivedAsync(ct);
+        var (archivedChanged, archivedWarnings) = await ApplyArchivedAsync(ct);
+        var parseWarnings = mainDoc.Warnings.Concat(archivedWarnings).ToList();
 
         var ids = fullRecheck
             ? await db.Apps.AsNoTracking()
@@ -175,13 +179,16 @@ public sealed class SyncService(
                 .Select(a => a.Id)
                 .ToListAsync(ct)
             : await SelectDueAppIdsAsync(now, ct);
+        // The nightly force-enriches everything already; polling would only
+        // re-list what the pass enriches anyway.
+        var extraIds = fullRecheck ? [] : (await PollChangedAsync(ct)).Except(ids).ToList();
         var (enrichedFull, upToDateFull, failedFull, failedMessagesFull) =
-            await EnrichSelectedAsync(ids, fullRecheck, now, ct);
+            await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
 
         return await FinishRunAsync(effectiveTrigger, head,
             counts.Added, counts.Updated, counts.Removed,
             enrichedFull, upToDateFull, failedFull,
-            pending.Count, warnings, archivedChanged, now, ct, failedMessagesFull);
+            pending.Count, parseWarnings, true, archivedChanged, now, ct, failedMessagesFull);
     }
 
     /// <summary>IDs due for enrichment (never-checked, or outside the success/failure window).</summary>
@@ -203,6 +210,38 @@ public sealed class SyncService(
             .ToList();
     }
 
+    /// <summary>Poll-changed ids (best-effort: any failure means no forced extras).</summary>
+    private async Task<IReadOnlySet<long>> PollChangedAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await poll.FindChangedAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new HashSet<long>();
+        }
+    }
+
+    /// <summary>
+    /// Due selection plus poll-changed extras (always forced: the poll
+    /// already proved they are stale).
+    /// </summary>
+    private async Task<(int Enriched, int UpToDate, int Failed, List<string> FailedMessages)> EnrichWithFreshAsync(
+        List<long> ids, bool force, List<long> freshIds, DateTimeOffset now, CancellationToken ct)
+    {
+        var (enriched, upToDate, failed, failedMessages) = await EnrichSelectedAsync(ids, force, now, ct);
+        if (freshIds.Count == 0)
+        {
+            return (enriched, upToDate, failed, failedMessages);
+        }
+
+        var (freshEnriched, freshUpToDate, freshFailed, freshMessages) =
+            await EnrichSelectedAsync(freshIds, true, now, ct);
+        failedMessages.AddRange(freshMessages);
+        return (enriched + freshEnriched, upToDate + freshUpToDate, failed + freshFailed, failedMessages);
+    }
+
     private async Task<(int Enriched, int UpToDate, int Failed, List<string> FailedMessages)> EnrichSelectedAsync(
         List<long> ids, bool force, DateTimeOffset now, CancellationToken ct)
     {
@@ -212,7 +251,16 @@ public sealed class SyncService(
         var failedMessages = new List<string>();
         var results = await BulkEnricher.EnrichManyAsync(
             ids, (id, c) => enrich.EnrichAsync(id, force, now, c), enrichment.MaxParallelism, ct);
-        foreach (var (_, r) in results)
+        var failedIds = results
+            .Where(x => x.Result.Outcome == EnrichOutcome.Failed && x.Result.Error is not null)
+            .Select(x => x.App)
+            .ToList();
+        var slugs = failedIds.Count == 0
+            ? new Dictionary<long, string>()
+            : await db.Apps.AsNoTracking()
+                .Where(a => failedIds.Contains(a.Id))
+                .ToDictionaryAsync(a => a.Id, a => a.Slug, ct);
+        foreach (var (id, r) in results)
         {
             switch (r.Outcome)
             {
@@ -220,7 +268,9 @@ public sealed class SyncService(
                     failed++;
                     if (r.Error is not null)
                     {
-                        failedMessages.Add(r.Error);
+                        failedMessages.Add(slugs.TryGetValue(id, out var slug)
+                            ? $"[{slug}] {r.Error}"
+                            : $"[{id}] {r.Error}");
                     }
 
                     break;
@@ -241,12 +291,12 @@ public sealed class SyncService(
     /// there are hidden from clients; entries that reappear upstream have the
     /// flag cleared and are forced through re-enrichment.
     /// </summary>
-    private async Task<int> ApplyArchivedAsync(CancellationToken ct)
+    private async Task<(int Changed, List<ParseWarning> Warnings)> ApplyArchivedAsync(CancellationToken ct)
     {
         var path = Path.Combine(options.ListPath, ArchivedPath);
         if (!File.Exists(path))
         {
-            return 0;
+            return (0, []);
         }
 
         var archived = new AwesomeListParser().Parse(await File.ReadAllTextAsync(path, ct), "archived");
@@ -288,7 +338,7 @@ public sealed class SyncService(
             await db.SaveChangesAsync(ct);
         }
 
-        return changed;
+        return (changed, archived.Warnings);
     }
 
     private static void CollectUrls(ParsedEntry entry, HashSet<string> urls)
@@ -432,7 +482,7 @@ public sealed class SyncService(
         string trigger, string? head,
         int added, int updated, int removed,
         int enriched, int upToDate, int failed,
-        int drained, int warnings, int archivedChanged,
+        int drained, IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse, int archivedChanged,
         DateTimeOffset started, CancellationToken ct,
         IReadOnlyList<string>? failedMessages = null)
     {
@@ -443,7 +493,25 @@ public sealed class SyncService(
             request.ProcessedAt = now;
         }
 
-        db.SyncRuns.Add(new SyncRun
+        // Staleness is evaluated against the pass clock (started), not the
+        // finished time: they differ only by the pass duration in production,
+        // but tests run passes with a fixed historical clock.
+        var issues = await CollectIssuesAsync(parseWarnings, refreshParse, started, now, ct);
+
+        // The snapshot holds only the latest completed run: successful passes
+        // replace it wholesale (due-only passes keep the parse rows, whose
+        // source list did not change). Failed passes never reach here, so a
+        // crashed pass keeps the previous good snapshot.
+        if (refreshParse)
+        {
+            await db.SyncIssues.ExecuteDeleteAsync(ct);
+        }
+        else
+        {
+            await db.SyncIssues.Where(i => i.Kind != IssueKind.Parse).ExecuteDeleteAsync(ct);
+        }
+
+        var run = new SyncRun
         {
             StartedAt = started,
             FinishedAt = now,
@@ -453,12 +521,80 @@ public sealed class SyncService(
             Updated = updated,
             Removed = removed,
             Failed = failed,
-        });
+            IssueCount = issues.Count,
+        };
+        db.SyncRuns.Add(run);
+        foreach (var issue in issues)
+        {
+            issue.SyncRun = run;
+        }
+
+        db.SyncIssues.AddRange(issues);
         await db.SaveChangesAsync(ct);
         return new SyncPassResult(trigger, head, added, updated, removed,
-            enriched, upToDate, failed, drained, warnings, archivedChanged, false, null)
+            enriched, upToDate, failed, drained, issues.Count(i => i.Kind == IssueKind.Parse),
+            archivedChanged, false, null)
         {
             FailedMessages = failedMessages ?? [],
         };
+    }
+
+    /// <summary>
+    /// Current health snapshot rows for the run. Parse rows come from this
+    /// pass; enrich rows reflect every row carrying <c>last_error</c> right
+    /// now (not just this pass); quality rows are recomputed over the catalog.
+    /// </summary>
+    private async Task<List<SyncIssue>> CollectIssuesAsync(
+        IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse,
+        DateTimeOffset referenceNow, DateTimeOffset now, CancellationToken ct)
+    {
+        var issues = new List<SyncIssue>();
+        if (refreshParse)
+        {
+            foreach (var warning in parseWarnings)
+            {
+                issues.Add(new SyncIssue
+                {
+                    Kind = IssueKind.Parse,
+                    Rule = "parse_warning",
+                    Message = warning.Message,
+                    Location = warning.Location,
+                    CreatedAt = now,
+                });
+            }
+        }
+
+        var failures = await db.Apps.AsNoTracking()
+            .Where(a => a.Availability != Availability.Excluded && a.LastError != null)
+            .Select(a => new { a.Id, a.Slug, a.LastError })
+            .ToListAsync(ct);
+        foreach (var failure in failures)
+        {
+            issues.Add(new SyncIssue
+            {
+                Kind = IssueKind.Enrich,
+                Rule = "enrich_failed",
+                AppId = failure.Id,
+                Slug = failure.Slug,
+                Message = failure.LastError!,
+                CreatedAt = now,
+            });
+        }
+
+        var quality = await CatalogHealthCheck.CheckAsync(db, referenceNow, enrichment.SuccessRecheckInterval, ct);
+        foreach (var finding in quality)
+        {
+            issues.Add(new SyncIssue
+            {
+                Kind = IssueKind.Quality,
+                Rule = finding.Rule,
+                AppId = finding.AppId,
+                Slug = finding.Slug,
+                Message = finding.Message,
+                CreatedAt = now,
+            });
+        }
+
+        return issues;
     }
 }

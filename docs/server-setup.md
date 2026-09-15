@@ -220,4 +220,9 @@ enriches all ~350 apps (slow one-time pass over the Releases APIs -
 this is what the PAT is for). Watch it via
 `journalctl -u shizuappstore -f` and `sync_runs` rows; later passes are
 cheap (HEAD-gated fast loop every 15 min + nightly full re-check at
-03:00 UTC, both tunable under `Sync:`).
+03:00 UTC, both tunable under `Sync:`). Each fast-loop pass also runs
+the release poll (SPEC §7.2): one release-feed call per forge app plus
+one F-Droid/Izzy index fetch per repo, so the PAT's 5000 calls/hr
+covers the ~1200/hr steady state; without `SHIZU_GITHUB_TOKEN` the
+poll stays off (startup warning) and fast passes enrich due-only
+apps. `Sync:PollEnabled` / `Sync:PollParallelism` tune it.

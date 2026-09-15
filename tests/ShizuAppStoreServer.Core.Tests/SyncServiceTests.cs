@@ -279,6 +279,32 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PollChangedAppIsForceEnrichedInsideRecheckWindow()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        // +1h: within the 24h success window, so nothing is due; the poll
+        // flags tuner and the pass force-enriches it instead of skipping.
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        var poll = new FakePoller(new HashSet<long> { tuner.Id });
+        var callsBefore = _runner.Calls.Count;
+        var result = await Service(poll: poll).RunAsync("scheduled", fullRecheck: false, T0.AddHours(1));
+
+        Assert.False(result.Skipped);
+        Assert.Equal(1, poll.Calls);
+        var call = Assert.Single(_runner.Calls.Skip(callsBefore));
+        Assert.Equal(tuner.Id, call.AppId);
+        Assert.True(call.Force);
+        Assert.Equal(1, result.Enriched);
+    }
+
+    [Fact]
     public async Task MissingListPathYieldsErrorRun()
     {
         if (!InitRepo())
@@ -318,11 +344,12 @@ public sealed class SyncServiceTests : IDisposable
         Assert.False(request.Processed); // retried next loop
     }
 
-    private SyncService Service(string? listPath = null) => new(
+    private SyncService Service(string? listPath = null, IReleasePoller? poll = null) => new(
         _db,
         new CatalogUpserter(_db),
         new GitHistoryService(),
         _runner,
+        poll ?? new FakePoller(),
         new ThrowingRenderer(),
         new SyncOptions { ListPath = listPath ?? _repo },
         new EnrichmentOptions { MaxParallelism = 1 });
@@ -341,6 +368,7 @@ public sealed class SyncServiceTests : IDisposable
             new CatalogUpserter(_db),
             new GitHistoryService(),
             new ThrowingRunner(),
+            new FakePoller(),
             new ThrowingRenderer(),
             new SyncOptions { ListPath = _repo },
             new EnrichmentOptions { MaxParallelism = 1 });
@@ -351,6 +379,17 @@ public sealed class SyncServiceTests : IDisposable
         Assert.Equal(2, result.Failed);
         Assert.Equal(2, result.FailedMessages.Count);
         Assert.All(result.FailedMessages, m => Assert.Contains("boom", m));
+    }
+
+    /// <summary>Stub poller: returns a canned changed set, records calls.</summary>
+    private sealed class FakePoller(IReadOnlySet<long>? changed = null) : IReleasePoller
+    {
+        public int Calls;
+        public Task<IReadOnlySet<long>> FindChangedAsync(CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult<IReadOnlySet<long>>(changed ?? new HashSet<long>());
+        }
     }
 
     private sealed class ThrowingRunner : IEnrichmentRunner
@@ -457,6 +496,7 @@ public sealed class SyncServiceTests : IDisposable
         new CatalogUpserter(_db),
         new GitHistoryService(),
         runner,
+        new FakePoller(),
         renderer,
         new SyncOptions { ListPath = _repo },
         new EnrichmentOptions { MaxParallelism = 2 });

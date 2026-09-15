@@ -69,6 +69,7 @@ if (apiOptions.EnableOutputCache)
         o.AddPolicy("app-detail", p => p.Expire(TimeSpan.FromSeconds(60)));
         o.AddPolicy("categories", p => p.Expire(TimeSpan.FromMinutes(5)));
         o.AddPolicy("changes", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));
+        o.AddPolicy("issues", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));
         o.AddPolicy("meta", p => p.Expire(TimeSpan.FromSeconds(60)));
     });
 }
@@ -126,6 +127,7 @@ var syncOptions = builder.Configuration.GetSection("Sync").Get<SyncOptions>() ??
 builder.Services.AddSingleton(syncOptions);
 builder.Services.AddSingleton<GitHistoryService>();
 builder.Services.AddScoped<CatalogUpserter>();
+builder.Services.AddScoped<IReleasePoller, ReleasePoller>();
 builder.Services.AddScoped<SyncService>();
 builder.Services.AddScoped<IEnrichmentRunner, EnrichmentRunner>();
 builder.Services.AddSingleton<SyncGate>();
@@ -139,6 +141,15 @@ var app = builder.Build();
 // apksigner + its JRE, gradle + its JRE for XML icons) the server would
 // boot but never enrich. Skipped in the Testing environment so Web.Tests
 // stay hermetic (no binaries needed).
+// The fast-loop release poll costs one feed call per app per pass, which
+// needs the 5000/hr authenticated GitHub limit; without a PAT it stays
+// off and fast passes enrich due-only apps.
+if (string.IsNullOrEmpty(enrichment.GitHubToken))
+{
+    app.Logger.LogWarning(
+        "Enrichment:GitHubToken (SHIZU_GITHUB_TOKEN) is not set: the fast-loop release poll is disabled.");
+}
+
 if (!app.Environment.IsEnvironment("Testing"))
 {
     var probes = await Task.WhenAll(

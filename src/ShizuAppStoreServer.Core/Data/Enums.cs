@@ -49,6 +49,14 @@ public enum SourceKind
     Other,
 }
 
+/// <summary>Which pipeline stage reported a catalog health issue.</summary>
+public enum IssueKind
+{
+    Parse,
+    Enrich,
+    Quality,
+}
+
 /// <summary>What the client can do with an entry. Set by the resolvers (M4).</summary>
 public enum Availability
 {
