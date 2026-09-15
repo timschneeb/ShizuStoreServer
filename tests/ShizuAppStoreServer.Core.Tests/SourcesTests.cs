@@ -677,6 +677,94 @@ public sealed class SourcesTests
         Assert.Equal(HttpStatusCode.NotFound, ex.Status);
     }
 
+    [Fact]
+    public async Task ReadsGitLabProjectStats()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"id":21844919,"star_count":522,"default_branch":"master"}"""),
+        });
+
+        var stats = (await GitLabClient(stub).GetProjectStatsAsync("fmd-foss/fmd-android"))!;
+        Assert.Equal(522, stats.Stars);
+    }
+
+    [Fact]
+    public async Task GitLabProjectStatsFailSoftToNull()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.Forbidden));
+        Assert.Null(await GitLabClient(stub).GetProjectStatsAsync("o/r"));
+    }
+
+    [Fact]
+    public async Task ReadsGitLabReadmeMarkdown()
+    {
+        var stub = new StubHandler(request =>
+        {
+            if (request.RequestUri!.ToString().Contains("/repository/files/", StringComparison.Ordinal))
+            {
+                Assert.Contains(
+                    "/projects/o%2Fr/repository/files/README.md/raw?ref=master",
+                    request.RequestUri.ToString());
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("# FMD Android\n\nFind your device.\n"),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"id":1,"default_branch":"master","readme_url":"https://gitlab.com/o/r/-/blob/master/README.md"}"""),
+            };
+        });
+
+        Assert.Equal(
+            "# FMD Android\n\nFind your device.\n",
+            await GitLabClient(stub).GetReadmeMarkdownAsync("o/r"));
+    }
+
+    [Fact]
+    public async Task GitLabReadmeNullWithoutReadmeUrl()
+    {
+        var stub = new StubHandler(request =>
+        {
+            if (request.RequestUri!.ToString().Contains("/repository/files/", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("must not fetch a file without readme_url");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"id":1,"default_branch":"master","readme_url":null}"""),
+            };
+        });
+
+        Assert.Null(await GitLabClient(stub).GetReadmeMarkdownAsync("o/r"));
+    }
+
+    [Fact]
+    public async Task GitLabReadmeFailsSoftToNull()
+    {
+        var stub = new StubHandler(request =>
+        {
+            if (request.RequestUri!.ToString().Contains("/repository/files/", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"id":1,"default_branch":"master","readme_url":"https://gitlab.com/o/r/-/blob/master/README.md"}"""),
+            };
+        });
+
+        Assert.Null(await GitLabClient(stub).GetReadmeMarkdownAsync("o/r"));
+    }
+
     // ---- Special-case sources: instafel API + GitCode mirror ----
 
     [Fact]

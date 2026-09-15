@@ -30,6 +30,12 @@ public sealed class GitLabApiException(HttpStatusCode status, string message) : 
     public HttpStatusCode Status { get; } = status;
 }
 
+/// <summary>
+/// Subset of <c>GET /projects/{urlencoded-path}</c> used by enrichment:
+/// popularity (star count).
+/// </summary>
+public sealed record GitLabProjectStats(int? Stars);
+
 public interface IGitLabReleaseClient
 {
     /// <returns>
@@ -39,6 +45,23 @@ public interface IGitLabReleaseClient
     /// <exception cref="GitLabApiException">Unknown project, no usable release, …</exception>
     Task<GitLabRelease?> GetLatestReleaseAsync(
         string projectPath, string? etag, CancellationToken ct = default);
+
+    /// <summary>
+    /// Project metadata via <c>GET /projects/{urlencoded-path}</c>. Null on
+    /// any failure; popularity is best-effort and never fails an enrich.
+    /// Default impl keeps test doubles that only care about releases simple.
+    /// </summary>
+    Task<GitLabProjectStats?> GetProjectStatsAsync(string projectPath, CancellationToken ct = default) =>
+        Task.FromResult<GitLabProjectStats?>(null);
+
+    /// <summary>
+    /// Raw README markdown: the project's <c>readme_url</c> resolves to a
+    /// repository file fetched through <c>/repository/files/…/raw</c>. Null
+    /// on any failure (including no README). Default impl keeps test
+    /// doubles simple.
+    /// </summary>
+    Task<string?> GetReadmeMarkdownAsync(string projectPath, CancellationToken ct = default) =>
+        Task.FromResult<string?>(null);
 }
 
 /// <summary>
@@ -149,6 +172,118 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
             latest.ReleasedAt,
             responseEtag,
             assets);
+    }
+
+    public async Task<GitLabProjectStats?> GetProjectStatsAsync(string projectPath, CancellationToken ct = default)
+    {
+        try
+        {
+            using var response = await _http.GetAsync(
+                $"https://gitlab.com/api/v4/projects/{Uri.EscapeDataString(projectPath)}",
+                HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            using var document = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            int? stars = root.TryGetProperty("star_count", out var starsElement)
+                && starsElement.TryGetInt32(out var starsValue)
+                    ? starsValue
+                    : null;
+            return new GitLabProjectStats(stars);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or JsonException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
+
+    public async Task<string?> GetReadmeMarkdownAsync(string projectPath, CancellationToken ct = default)
+    {
+        try
+        {
+            var project = Uri.EscapeDataString(projectPath);
+            using var meta = await _http.GetAsync(
+                $"https://gitlab.com/api/v4/projects/{project}",
+                HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!meta.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            using var document = await JsonDocument.ParseAsync(
+                await meta.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !TryReadString(document.RootElement, "readme_url", out var readmeUrl)
+                || string.IsNullOrEmpty(readmeUrl)
+                || !TryReadString(document.RootElement, "default_branch", out var branch)
+                || string.IsNullOrEmpty(branch))
+            {
+                return null;
+            }
+
+            // readme_url is .../-/blob/{branch}/{path}; the default branch
+            // disambiguates slash-bearing branch names. Absent without a
+            // match (renamed branch), not worth guessing.
+            var prefix = $"/-/blob/{branch}/";
+            var slash = readmeUrl.IndexOf(prefix, StringComparison.Ordinal);
+            if (slash < 0)
+            {
+                return null;
+            }
+
+            var filePath = readmeUrl[(slash + prefix.Length)..];
+            if (filePath.Length == 0)
+            {
+                return null;
+            }
+
+            using var raw = await _http.GetAsync(
+                $"https://gitlab.com/api/v4/projects/{project}/repository/files/{Uri.EscapeDataString(filePath)}/raw?ref={Uri.EscapeDataString(branch)}",
+                HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!raw.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await raw.Content.ReadAsStringAsync(ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or JsonException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
+
+    private static bool TryReadString(JsonElement element, string name, out string? value)
+    {
+        value = element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+        return value is not null;
     }
 
     /// <summary>

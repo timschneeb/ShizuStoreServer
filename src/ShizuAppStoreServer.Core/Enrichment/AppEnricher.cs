@@ -299,8 +299,27 @@ public sealed class AppEnricher(
 
             if (latest is null)
             {
-                app.LastCheckedAt = now;
-                return new EnrichResult(EnrichOutcome.UpToDate, null);
+                // A 304 would keep pre-fix rows permission-less forever (see
+                // NeedsPermissionHeal): refetch the list once and re-analyze
+                // below. A failing refetch is not an upstream change, so stay
+                // up-to-date instead of failing the pass.
+                if (NeedsPermissionHeal(app, await PrimaryDownloadAsync(app, ct)))
+                {
+                    try
+                    {
+                        latest = await github.GetLatestReleaseAsync(owner, repo, null, ct);
+                    }
+                    catch (GitHubApiException)
+                    {
+                        latest = null;
+                    }
+                }
+
+                if (latest is null)
+                {
+                    app.LastCheckedAt = now;
+                    return new EnrichResult(EnrichOutcome.UpToDate, null);
+                }
             }
 
             app.DownloadTotal = latest.TotalDownloads;
@@ -378,7 +397,8 @@ public sealed class AppEnricher(
         if (current is not null
             && release.ApkUrl == current.ApkUrl
             && release.FileHash == app.EnrichEtag
-            && current.VersionCode is not null)
+            && current.VersionCode is not null
+            && !NeedsPermissionHeal(app, current))
         {
             app.LastCheckedAt = now;
             return new EnrichResult(EnrichOutcome.UpToDate, null);
@@ -421,7 +441,8 @@ public sealed class AppEnricher(
         }
 
         var current = await PrimaryDownloadAsync(app, ct);
-        if (current is not null && asset.Url == current.ApkUrl && current.VersionCode is not null)
+        if (current is not null && asset.Url == current.ApkUrl && current.VersionCode is not null
+            && !NeedsPermissionHeal(app, current))
         {
             app.EnrichEtag = release.Etag;
             app.LastCheckedAt = now;
@@ -436,10 +457,42 @@ public sealed class AppEnricher(
     {
         ApplyGitLabAuthor(app, projectPath);
 
+        GitLabRelease? latest;
+        try
+        {
+            latest = await gitlab.GetLatestReleaseAsync(projectPath, app.EnrichEtag, ct);
+        }
+        catch (GitLabApiException ex)
+        {
+            await RefreshGitLabStatsAsync(app, projectPath, ct);
+            if (ex.Status == HttpStatusCode.NotFound
+                && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
+            {
+                return rescued;
+            }
+
+            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
+            {
+                return play;
+            }
+
+            return Fail(app, now, $"GitLab: {ex.Message}");
+        }
+
         GitLabRelease release;
         try
         {
-            var latest = await gitlab.GetLatestReleaseAsync(projectPath, app.EnrichEtag, ct);
+            await RefreshGitLabStatsAsync(app, projectPath, ct);
+
+            // Raw markdown, not rendered HTML: the client renders markdown.
+            if (NeedsReadmeRefresh(app.FullDescription)
+                && await gitlab.GetReadmeMarkdownAsync(projectPath, ct) is { Length: > 0 } readme)
+            {
+                app.FullDescription = readme.Length > MaxFullDescriptionChars
+                    ? readme[..MaxFullDescriptionChars]
+                    : readme;
+            }
+
             if (latest is null)
             {
                 app.LastCheckedAt = now;
@@ -482,7 +535,8 @@ public sealed class AppEnricher(
 
         // GitLab largely ignores If-None-Match: same recorded asset URL means nothing new.
         var gitlabCurrent = await PrimaryDownloadAsync(app, ct);
-        if (gitlabCurrent is not null && link.Url == gitlabCurrent.ApkUrl && gitlabCurrent.VersionCode is not null)
+        if (gitlabCurrent is not null && link.Url == gitlabCurrent.ApkUrl && gitlabCurrent.VersionCode is not null
+            && !NeedsPermissionHeal(app, gitlabCurrent))
         {
             app.EnrichEtag = release.Etag;
             app.LastCheckedAt = now;
@@ -491,6 +545,42 @@ public sealed class AppEnricher(
 
         return await EnrichFromApkAsync(app, link.Url, release.Etag, SourceKind.GitLab, now, ct, release.ReleasedAt);
     }
+
+    /// <summary>
+    /// Best-effort GitLab popularity: star count from the project metadata.
+    /// Developer identity stays path-derived (<see cref="ApplyGitLabAuthor"/>);
+    /// stats refresh even when the release list fails, so they stay current
+    /// without a new release. Never throws (except on cancellation).
+    /// </summary>
+    private async Task RefreshGitLabStatsAsync(App app, string projectPath, CancellationToken ct)
+    {
+        GitLabProjectStats? stats = null;
+        try
+        {
+            stats = await gitlab.GetProjectStatsAsync(projectPath, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogDebug(ex, "Project stats fetch failed for {Project}.", projectPath);
+        }
+
+        if (stats?.Stars is { } stars)
+        {
+            app.Stars = stars;
+        }
+    }
+
+    /// <summary>
+    /// Pre-fix rows recorded a fully analyzed build but never persisted its
+    /// permissions (the F-Droid path never wrote them); the same-asset
+    /// short-circuits would keep them blank forever, so re-analyze once. A
+    /// SHA-256 identity proves a full analysis ran before: index-only rows
+    /// (MD5 at most) never had one and stay up-to-date. A genuinely
+    /// permission-less build re-verifies each pass; such builds are all but
+    /// nonexistent.
+    /// </summary>
+    private static bool NeedsPermissionHeal(App app, AppDownload? primary) =>
+        app.Permissions is not { Count: > 0 } && primary?.SigSha256 is not null;
 
     /// <summary>
     /// The top-level GitLab namespace (group or user) is a stable developer
@@ -829,7 +919,8 @@ public sealed class AppEnricher(
             && current.Source == kind
             && current.ApkUrl == apkUrl
             && current.VersionCode == package.VersionCode
-            && current.Sha256 is not null)
+            && current.Sha256 is not null
+            && !NeedsPermissionHeal(app, current))
         {
             app.EnrichEtag = indexEtag;
             app.LastCheckedAt = now;
@@ -876,6 +967,13 @@ public sealed class AppEnricher(
         await RecomputePrimaryAsync(app, ct);
 
         app.PackageName = package.PackageName;
+        if (analyzed is not null)
+        {
+            // The analyzed APK's permission list belongs to the served
+            // build regardless of source; index-only rows keep prior values.
+            app.Permissions = analyzed.Badging.Permissions.ToList();
+        }
+
         app.IconHash = icon.Sha256;
         app.IconAdaptive = icon.Adaptive;
         app.Availability = Availability.DirectApk;

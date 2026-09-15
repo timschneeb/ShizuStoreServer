@@ -483,6 +483,68 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task GitHubHealRefetchesOn304WhenPermissionsMissing()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var releases = ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length);
+        var app = NewApp("ghheal", "GhHeal", "https://github.com/example/ghheal");
+        var signer = new FakeSignerRunner(_ => SignerOutputA);
+        var firstGithub = new StubHandler(_ => JsonReleases(releases, "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        Assert.Equal(
+            EnrichOutcome.Enriched,
+            (await BuildEnricher(firstGithub, downloads, aapt2, signer: signer).EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        // Simulate a pre-fix row: fully analyzed build recorded, permissions blank.
+        app.Permissions = [];
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var etagSeen = new List<string>();
+        var github = new StubHandler(request =>
+        {
+            var url = request.RequestUri!.ToString();
+            if (url.Contains("/releases", StringComparison.Ordinal))
+            {
+                if (request.Headers.IfNoneMatch.Count > 0)
+                {
+                    etagSeen.AddRange(request.Headers.IfNoneMatch.Select(e => e.ToString()));
+                    return new HttpResponseMessage(HttpStatusCode.NotModified);
+                }
+
+                return JsonReleases(releases, "\"rel-etag\"");
+            }
+
+            if (url.EndsWith("/readme", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"stargazers_count":7,"owner":{"login":"example","html_url":"https://github.com/example"}}"""),
+            };
+        });
+        var aapt2Calls = aapt2.Calls;
+        var downloadCalls = downloads.Calls;
+
+        var result = await BuildEnricher(github, downloads, aapt2, signer: signer).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(["\"rel-etag\""], etagSeen);
+        Assert.True(aapt2.Calls > aapt2Calls);
+        Assert.True(downloads.Calls > downloadCalls);
+        Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
+    }
+
+    [Fact]
     public async Task AppendsVersionRowOnlyOnBump()
     {
         var (first, _, _, _, _) = HappyPath();
@@ -926,6 +988,104 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(42, version.VersionCode);
     }
 
+    [Fact]
+    public async Task GitLabRecordsStarsReadmeAndPermissions()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var gitlab = new StubHandler(request =>
+        {
+            var url = request.RequestUri!.ToString();
+            if (url.Contains("/repository/files/", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("# FMD Android\n\nFind your device.\n"),
+                };
+            }
+
+            if (url.Contains("/releases", StringComparison.Ordinal))
+            {
+                return GitLabReleases(GitLabJson("v1.0", "app-release.apk", "https://cdn.example/app.apk"));
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"id":21844919,"star_count":522,"default_branch":"master","readme_url":"https://gitlab.com/o/r/-/blob/master/README.md"}"""),
+            };
+        });
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var fdroid = new StubHandler(_ => throw new InvalidOperationException("must not fetch index"));
+        var app = NewApp("glmeta", "GlMeta", "https://gitlab.com/o/r");
+
+        var result = await BuildEnricher(github, downloads, aapt2, gitlab, fdroid)
+            .EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(522, app.Stars);
+        Assert.Equal("# FMD Android\n\nFind your device.\n", app.FullDescription);
+        Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
+    }
+
+    [Fact]
+    public async Task GitLabHealRedownloadsSameAssetWhenPermissionsMissing()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var gitlab = new StubHandler(request =>
+        {
+            if (request.RequestUri!.ToString().Contains("/repository/files/", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            if (request.RequestUri.ToString().Contains("/releases", StringComparison.Ordinal))
+            {
+                return GitLabReleases(GitLabJson("v1.0", "app-release.apk", "https://cdn.example/app.apk"));
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"id":1,"star_count":7,"default_branch":"master"}"""),
+            };
+        });
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var fdroid = new StubHandler(_ => throw new InvalidOperationException("must not fetch index"));
+        var signer = new FakeSignerRunner(_ => SignerOutputA);
+        var app = NewApp("glheal", "GlHeal", "https://gitlab.com/o/glheal");
+
+        Assert.Equal(
+            EnrichOutcome.Enriched,
+            (await BuildEnricher(github, downloads, aapt2, gitlab, fdroid, signer: signer).EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        // Simulate a pre-fix row: fully analyzed build recorded, permissions blank.
+        app.Permissions = [];
+        await _db.SaveChangesAsync();
+        Age(app);
+        var aapt2Calls = aapt2.Calls;
+        var downloadCalls = downloads.Calls;
+
+        Assert.Equal(
+            EnrichOutcome.Enriched,
+            (await BuildEnricher(github, downloads, aapt2, gitlab, fdroid, signer: signer).EnrichAsync(app, T0)).Outcome);
+
+        Assert.True(aapt2.Calls > aapt2Calls);
+        Assert.True(downloads.Calls > downloadCalls);
+        Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
+    }
+
     [Theory]
     // Play + GitLab combos: GitLab wins for the APK, Play stays as store_url.
     [InlineData("https://play.google.com/store/apps/details?id=com.x", "https://gitlab.com/o/r")]
@@ -1103,6 +1263,80 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(0, downloads.Calls);
         Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    /// <summary>F-Droid wiring with a downloadable APK: index fetch + full analysis.</summary>
+    private (AppEnricher Enricher, StubHandler Downloads, FakeAapt2Runner Aapt2, byte[] Zip)
+        FdroidAnalyzedPath()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(FdroidIndexXml),
+        });
+        var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = request.RequestUri!.ToString().Contains("/icons")
+                ? new ByteArrayContent(iconBytes)
+                : new ByteArrayContent(zip),
+        });
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var gitlab = new StubHandler(_ => throw new InvalidOperationException("must not call GitLab"));
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "20"));
+        var signer = new FakeSignerRunner(_ => SignerOutputA);
+        return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid, signer: signer), downloads, aapt2, zip);
+    }
+
+    [Fact]
+    public async Task FdroidPathRecordsAnalyzedPermissions()
+    {
+        var (enricher, _, _, _) = FdroidAnalyzedPath();
+        var app = NewApp("fdperm", "FdPerm", "https://f-droid.org/packages/com.example.app/");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(SourceKind.FDroid, Primary(app).Source);
+        Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
+    }
+
+    [Fact]
+    public async Task FdroidHealReanalyzesWhenPermissionsMissing()
+    {
+        var (first, _, _, _) = FdroidAnalyzedPath();
+        var app = NewApp("fdheal", "FdHeal", "https://f-droid.org/packages/com.example.app/");
+        await first.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        // Simulate a pre-fix row: fully analyzed build recorded, permissions blank.
+        app.Permissions = [];
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var (second, downloads, aapt2, _) = FdroidAnalyzedPath();
+        Assert.Equal(EnrichOutcome.Enriched, (await second.EnrichAsync(app, T0)).Outcome);
+
+        Assert.Equal(1, downloads.Calls); // same APK re-downloaded once
+        Assert.Equal(1, aapt2.Calls); // and re-analyzed
+        Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
+    }
+
+    [Fact]
+    public async Task FdroidIndexOnlyRowStaysUpToDate()
+    {
+        // Index-only rows never had an analysis to replay (no SHA-256
+        // identity), so blank permissions must not trigger re-downloads.
+        var (first, _, _) = FdroidHappyPath();
+        var app = NewApp("fdidx", "FdIdx", "https://f-droid.org/packages/com.example.app/");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.Empty(app.Permissions);
+        Assert.Null(Primary(app).SigSha256);
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var (second, _, downloads) = FdroidHappyPath();
+        Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(0, downloads.Calls);
     }
 
     [Fact]
