@@ -50,7 +50,7 @@ public sealed class FdroidRepoClient(HttpClient http)
 /// </remarks>
 public sealed class FdroidIndexProvider(FdroidRepoClient client)
 {
-    private sealed record CachedIndex(string? Etag, IReadOnlyDictionary<string, FdroidPackageInfo> Packages);
+    private sealed record CachedIndex(string? Etag, IReadOnlyDictionary<string, IReadOnlyList<FdroidPackageInfo>> Packages);
 
     private readonly ConcurrentDictionary<string, CachedIndex> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
@@ -70,8 +70,26 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
             return null;
         }
 
-        cached.Packages.TryGetValue(packageId, out var package);
-        return (package, cached.Etag);
+        cached.Packages.TryGetValue(packageId, out var packages);
+        return (packages?.FirstOrDefault(), cached.Etag);
+    }
+
+    /// <returns>
+    /// Every package entry for the app (document order, newest versionCode
+    /// first; empty when absent) + index ETag, or null when the index
+    /// answered 304 with nothing cached.
+    /// </returns>
+    public async Task<(IReadOnlyList<FdroidPackageInfo> Packages, string? IndexEtag)?> GetPackagesAsync(
+        string repoBase, string packageId, string? seedEtag, CancellationToken ct = default)
+    {
+        var cached = await LoadIndexAsync(repoBase, seedEtag, ct);
+        if (cached is null)
+        {
+            return null;
+        }
+
+        cached.Packages.TryGetValue(packageId, out var packages);
+        return (packages ?? [], cached.Etag);
     }
 
     /// <summary>
@@ -84,8 +102,9 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
         string repoBase, string repoKey, CancellationToken ct = default)
     {
         var cached = await LoadIndexAsync(repoBase, seedEtag: null, ct);
-        return cached?.Packages.Values.FirstOrDefault(
-            p => SourceClassifier.RepoKey(p.SourceUrl) == repoKey);
+        return cached?.Packages.Values
+            .SelectMany(packages => packages)
+            .FirstOrDefault(p => SourceClassifier.RepoKey(p.SourceUrl) == repoKey);
     }
 
     /// <summary>
@@ -97,7 +116,7 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
         string repoBase, CancellationToken ct = default)
     {
         var cached = await LoadIndexAsync(repoBase, seedEtag: null, ct);
-        return cached?.Packages;
+        return cached?.Packages.ToDictionary(kv => kv.Key, kv => kv.Value[0], StringComparer.Ordinal);
     }
 
     private async Task<CachedIndex?> LoadIndexAsync(string repoBase, string? seedEtag, CancellationToken ct)

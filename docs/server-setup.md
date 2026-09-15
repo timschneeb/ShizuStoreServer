@@ -155,7 +155,23 @@ printf 'sdk.dir=/opt/android-sdk\n' | sudo tee tools/icon-render/local.propertie
 Knobs (`Enrichment:` section): `GradlePath` (default `gradle`),
 `IconToolDir` (default `tools/icon-render`), `PaparazziTimeout`
 (default 15min per icon; the Gradle daemon stays warm between
-renders). Smoke test from the repo root:
+renders), and `IconRenderCpuAffinity` (default null; set it to a
+`taskset -c` CPU list such as `0` to pin render builds to one core
+when the backfill competes with the desktop). After enabling the
+affinity, stop a daemon left over from before the change
+(`gradle --stop`) so the next launch starts it inside `taskset`.
+
+`RunLogPath` (default null, disabled) appends a human-readable
+section per sync pass: a header, one line per scanned app as it
+finishes (`[ 12/315] slug (Display Name)  OK|ok|skip|excluded|FAIL
+detail`), a totals footer, then the same catalog health snapshot as
+`GET /v1/issues` (see `docs/SPEC.md` §7.3). Each run is separated by
+a blank line. The log rotates at run boundaries once it reaches
+1 MiB, keeping exactly two files: `<path>` and `<path>.1` (the
+previous `.1` is overwritten), so no external logrotate is needed.
+Example: `Enrichment__RunLogPath=/var/log/shizu/enrichment-runs.log`.
+
+Smoke test from the repo root:
 
 ```bash
 gradle -p tools/icon-render renderIcon -PstagedRes=<res-dir> \

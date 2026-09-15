@@ -37,10 +37,12 @@ public static class Seeds
         string? authorUrl = null,
         List<string>? permissions = null,
         string? fullDescription = null,
-        string? versionName = null) => new()
+        string? versionName = null,
+        string? displayName = null) => new()
         {
             Slug = slug,
             Name = name ?? slug,
+            DisplayName = displayName,
             Url = url ?? $"https://github.com/example/{slug}",
             Description = $"{slug} description",
             License = license,

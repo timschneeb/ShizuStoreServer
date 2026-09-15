@@ -6,24 +6,6 @@ using System.Text.RegularExpressions;
 
 namespace ShizuAppStoreServer.Core.Sources;
 
-/// <summary>One <c>assets.links[]</c> entry from the GitLab Releases API.</summary>
-public sealed record GitLabAssetLink(string Name, string Url);
-
-/// <summary>
-/// Latest non-upcoming release of a GitLab project. <c>Assets</c> combines
-/// <c>assets.links</c> with APK links embedded in the release description
-/// (some projects, e.g. AuroraStore, publish only markdown links); relative
-/// <c>/uploads/…</c> paths resolve against the project. <c>Etag</c> is the
-/// response ETag, stored on the app row for conditional requests (GitLab
-/// largely ignores <c>If-None-Match</c>, so the enricher additionally
-/// short-circuits on an unchanged asset URL).
-/// </summary>
-public sealed record GitLabRelease(
-    string TagName,
-    DateTimeOffset? ReleasedAt,
-    string? Etag,
-    IReadOnlyList<GitLabAssetLink> Assets);
-
 /// <summary>Non-success response from the GitLab API (404 unknown project, 403 releases disabled, …).</summary>
 public sealed class GitLabApiException(HttpStatusCode status, string message) : Exception(message)
 {
@@ -36,16 +18,8 @@ public sealed class GitLabApiException(HttpStatusCode status, string message) : 
 /// </summary>
 public sealed record GitLabProjectStats(int? Stars);
 
-public interface IGitLabReleaseClient
+public interface IGitLabReleaseClient : IAppSource
 {
-    /// <returns>
-    /// Newest non-upcoming release, or null when the server answered
-    /// <c>304 Not Modified</c> for <paramref name="etag"/>.
-    /// </returns>
-    /// <exception cref="GitLabApiException">Unknown project, no usable release, …</exception>
-    Task<GitLabRelease?> GetLatestReleaseAsync(
-        string projectPath, string? etag, CancellationToken ct = default);
-
     /// <summary>
     /// Project metadata via <c>GET /projects/{urlencoded-path}</c>. Null on
     /// any failure; popularity is best-effort and never fails an enrich.
@@ -99,9 +73,10 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
         }
     }
 
-    public async Task<GitLabRelease?> GetLatestReleaseAsync(
-        string projectPath, string? etag, CancellationToken ct = default)
+    public async Task<SourceRelease?> GetLatestReleaseAsync(
+        SourceTarget target, string? etag, CancellationToken ct = default)
     {
+        var projectPath = target.Key;
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
             $"https://gitlab.com/api/v4/projects/{Uri.EscapeDataString(projectPath)}/releases?per_page=100");
@@ -131,13 +106,13 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
         }
 
         var responseEtag = response.Headers.ETag?.ToString();
-        var assets = new List<GitLabAssetLink>();
+        var assets = new List<SourceAsset>();
         foreach (var link in latest.Assets.Links)
         {
             var url = link.DirectAssetUrl ?? link.Url;
             if (!string.IsNullOrWhiteSpace(url))
             {
-                assets.Add(new GitLabAssetLink(link.Name, url));
+                assets.Add(new SourceAsset(link.Name, url));
             }
         }
 
@@ -161,17 +136,17 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
                 }
 
                 var name = match.Groups["name"].Value;
-                assets.Add(new GitLabAssetLink(
+                assets.Add(new SourceAsset(
                     string.IsNullOrWhiteSpace(name) ? FileNameOf(resolved) : name,
                     resolved));
             }
         }
 
-        return new GitLabRelease(
+        return new SourceRelease(
             latest.TagName,
             latest.ReleasedAt,
             responseEtag,
-            assets);
+            ApkAssetSelector.MarkPrimary(assets));
     }
 
     public async Task<GitLabProjectStats?> GetProjectStatsAsync(string projectPath, CancellationToken ct = default)

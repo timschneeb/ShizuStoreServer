@@ -54,11 +54,11 @@ public sealed class SourcesTests
     {
         var assets = new[]
         {
-            new GitHubAsset("app-arm64-v8a.apk", "https://x/arm64", 50_000_000, "application/vnd.android.package-archive"),
-            new GitHubAsset("app-release.apk", "https://x/rel", 30_000_000, "application/vnd.android.package-archive"),
-            new GitHubAsset("app-sources.jar", "https://x/jar", 90_000_000, "application/java-archive"),
+            new SourceAsset("app-arm64-v8a.apk", "https://x/arm64", Size: 50_000_000),
+            new SourceAsset("app-release.apk", "https://x/rel", Size: 30_000_000),
+            new SourceAsset("app-sources.jar", "https://x/jar", Size: 90_000_000),
         };
-        Assert.Equal("https://x/rel", ApkAssetSelector.PickApk(assets)!.BrowserDownloadUrl);
+        Assert.Equal("https://x/rel", ApkAssetSelector.PickApk(assets)!.Url);
     }
 
     [Fact]
@@ -66,15 +66,15 @@ public sealed class SourcesTests
     {
         var assets = new[]
         {
-            new GitHubAsset("app-arm64.apk", "https://x/small", 10_000_000, null),
-            new GitHubAsset("app-universal.APK", "https://x/big", 40_000_000, null),
+            new SourceAsset("app-arm64.apk", "https://x/small", Size: 10_000_000),
+            new SourceAsset("app-universal.APK", "https://x/big", Size: 40_000_000),
         };
-        Assert.Equal("https://x/big", ApkAssetSelector.PickApk(assets)!.BrowserDownloadUrl);
+        Assert.Equal("https://x/big", ApkAssetSelector.PickApk(assets)!.Url);
     }
 
     [Fact]
     public void ReturnsNullWithoutApks() =>
-        Assert.Null(ApkAssetSelector.PickApk([new GitHubAsset("notes.txt", "https://x/n", 5, null)]));
+        Assert.Null(ApkAssetSelector.PickApk([new SourceAsset("notes.txt", "https://x/n", Size: 5)]));
 
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
     {
@@ -143,7 +143,57 @@ public sealed class SourcesTests
         var asset = Assert.Single(release.Assets);
         Assert.Equal("app-release.apk", asset.Name);
         Assert.Equal(12345678, asset.Size);
-        Assert.Equal("application/vnd.android.package-archive", asset.ContentType);
+    }
+
+    [Fact]
+    public async Task MapsSha256DigestAndIgnoresOtherAlgorithms()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonArray(
+                new JsonObject
+                {
+                    ["tag_name"] = "v1",
+                    ["draft"] = false,
+                    ["prerelease"] = false,
+                    ["assets"] = new JsonArray(
+                        new JsonObject
+                        {
+                            ["name"] = "app.apk",
+                            ["browser_download_url"] = "https://x/app.apk",
+                            ["digest"] = "sha256:ABCDEF0123",
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "legacy.apk",
+                            ["browser_download_url"] = "https://x/legacy.apk",
+                            ["digest"] = null,
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "odd.apk",
+                            ["browser_download_url"] = "https://x/odd.apk",
+                            ["digest"] = "sha512:deadbeef",
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "bare.apk",
+                            ["browser_download_url"] = "https://x/bare.apk",
+                            ["digest"] = "sha256:",
+                        }),
+                }).ToJsonString()),
+        });
+
+        var latest = (await Client(stub).GetLatestReleaseAsync("o", "r", null))!;
+        var byName = latest.Assets.ToDictionary(a => a.Name, a => a.Sha256);
+        Assert.Equal("abcdef0123", byName["app.apk"]);
+        Assert.Null(byName["legacy.apk"]);
+        Assert.Null(byName["odd.apk"]);
+        Assert.Null(byName["bare.apk"]);
+
+        var all = await Client(stub).GetAllReleasesAsync(
+            new SourceTarget(SourceKind.GitHub, "o/r"), default);
+        Assert.Equal("abcdef0123", all.Single().Assets.Single(a => a.Name == "app.apk").Sha256);
     }
 
     [Fact]
@@ -467,9 +517,9 @@ public sealed class SourcesTests
     {
         var links = new[]
         {
-            new GitLabAssetLink("app-arm64.apk", "https://a/arm64"),
-            new GitLabAssetLink("app-release.apk", "https://a/rel"),
-            new GitLabAssetLink("notes.txt", "https://a/notes"),
+            new SourceAsset("app-arm64.apk", "https://a/arm64"),
+            new SourceAsset("app-release.apk", "https://a/rel"),
+            new SourceAsset("notes.txt", "https://a/notes"),
         };
         Assert.Equal("https://a/rel", ApkAssetSelector.PickApk(links, l => l.Name, _ => 0L)!.Url);
     }
@@ -479,8 +529,8 @@ public sealed class SourcesTests
     {
         var links = new[]
         {
-            new GitLabAssetLink("app-a.apk", "https://a/first"),
-            new GitLabAssetLink("app-b.apk", "https://a/second"),
+            new SourceAsset("app-a.apk", "https://a/first"),
+            new SourceAsset("app-b.apk", "https://a/second"),
         };
         Assert.Equal("https://a/first", ApkAssetSelector.PickApk(links, l => l.Name, _ => 0L)!.Url);
     }
@@ -490,8 +540,8 @@ public sealed class SourcesTests
     {
         var links = new[]
         {
-            new GitLabAssetLink("APK", "https://gitlab.com/narektor/other-releases/-/raw/main/batt/Batt-1.3.apk"),
-            new GitLabAssetLink("Source", "https://gitlab.com/narektor/batt/-/archive/1.3/batt-1.3.zip"),
+            new SourceAsset("APK", "https://gitlab.com/narektor/other-releases/-/raw/main/batt/Batt-1.3.apk"),
+            new SourceAsset("Source", "https://gitlab.com/narektor/batt/-/archive/1.3/batt-1.3.zip"),
         };
 
         Assert.Equal(
@@ -504,8 +554,8 @@ public sealed class SourcesTests
     {
         var links = new[]
         {
-            new GitLabAssetLink("APK", "https://gitlab.com/o/r/-/archive/1.0/r-1.0.zip"),
-            new GitLabAssetLink("Package", "https://gitlab.com/o/r/-/releases/1.0"),
+            new SourceAsset("APK", "https://gitlab.com/o/r/-/archive/1.0/r-1.0.zip"),
+            new SourceAsset("Package", "https://gitlab.com/o/r/-/releases/1.0"),
         };
 
         Assert.Null(ApkAssetSelector.PickApk(links, l => l.Name, _ => 0L, l => l.Url));

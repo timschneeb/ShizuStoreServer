@@ -49,16 +49,19 @@ public sealed class ReleasePollerTests : IDisposable
         _connection.Dispose();
     }
 
-    private sealed class StubGitHub(Func<string, string, string?, Task<GitHubRelease?>> fn) : IGitHubReleaseClient
+    private sealed class StubGitHub(Func<string, string, string?, Task<SourceRelease?>> fn) : IGitHubReleaseClient
     {
-        public Task<GitHubRelease?> GetLatestReleaseAsync(string owner, string repo, string? etag, CancellationToken ct = default) =>
-            fn(owner, repo, etag);
+        public Task<SourceRelease?> GetLatestReleaseAsync(SourceTarget target, string? etag, CancellationToken ct = default)
+        {
+            var (owner, repo) = target.SplitRepoKey();
+            return fn(owner, repo, etag);
+        }
     }
 
-    private sealed class StubGitLab(Func<string, string?, Task<GitLabRelease?>> fn) : IGitLabReleaseClient
+    private sealed class StubGitLab(Func<string, string?, Task<SourceRelease?>> fn) : IGitLabReleaseClient
     {
-        public Task<GitLabRelease?> GetLatestReleaseAsync(string projectPath, string? etag, CancellationToken ct = default) =>
-            fn(projectPath, etag);
+        public Task<SourceRelease?> GetLatestReleaseAsync(SourceTarget target, string? etag, CancellationToken ct = default) =>
+            fn(target.Key, etag);
     }
 
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
@@ -67,13 +70,13 @@ public sealed class ReleasePollerTests : IDisposable
             Task.FromResult(handler(request));
     }
 
-    private static GitHubRelease GitHubReleaseWith(string apkUrl) => new(
+    private static SourceRelease GitHubReleaseWith(string apkUrl) => new(
         "v2", null, "\"gh-etag\"",
-        [new GitHubAsset("app-arm64-v8a.apk", apkUrl, 1000, "application/vnd.android.package-archive")]);
+        [new SourceAsset("app-arm64-v8a.apk", apkUrl, Primary: true, Size: 1000)]);
 
-    private static GitLabRelease GitLabReleaseWith(string apkUrl) => new(
+    private static SourceRelease GitLabReleaseWith(string apkUrl) => new(
         "v2", null, "\"gl-etag\"",
-        [new GitLabAssetLink("app.apk", apkUrl)]);
+        [new SourceAsset("app.apk", apkUrl, Primary: true)]);
 
     private static HttpResponseMessage IndexResponse(string xml) => new(HttpStatusCode.OK)
     {
@@ -96,8 +99,25 @@ public sealed class ReleasePollerTests : IDisposable
         return app;
     }
 
-    private void SeedDownload(long appId, string apkUrl, SourceKind source, long? versionCode = null, bool primary = true)
+    private App SeedVariant(App root, string apkUrl)
     {
+        var variant = new App
+        {
+            Slug = "tuner-plugin",
+            Name = root.Name,
+            Url = root.Url,
+            Availability = Availability.DirectApk,
+            CategoryId = root.CategoryId,
+            RootAppId = root.Id,
+            PackageName = "com.acme.plugin",
+        };
+        _db.Apps.Add(variant);
+        _db.SaveChanges();
+        SeedDownload(variant.Id, apkUrl, SourceKind.GitHub);
+        return variant;
+    }
+
+    private void SeedDownload(long appId, string apkUrl, SourceKind source, long? versionCode = null, bool primary = true)    {
         _db.Downloads.Add(new AppDownload
         {
             AppId = appId,
@@ -160,7 +180,7 @@ public sealed class ReleasePollerTests : IDisposable
             Assert.Equal("acme", owner);
             Assert.Equal("tuner", repo);
             seenEtag = etag;
-            return Task.FromResult<GitHubRelease?>(GitHubReleaseWith(latest));
+            return Task.FromResult<SourceRelease?>(GitHubReleaseWith(latest));
         }));
 
         var changed = await poller.FindChangedAsync();
@@ -176,7 +196,7 @@ public sealed class ReleasePollerTests : IDisposable
         var app = SeedApp("tuner", "https://github.com/acme/tuner");
         SeedDownload(app.Id, url, SourceKind.GitHub);
         var poller = Poller(github: new StubGitHub((_, _, _) =>
-            Task.FromResult<GitHubRelease?>(GitHubReleaseWith(url))));
+            Task.FromResult<SourceRelease?>(GitHubReleaseWith(url))));
 
         Assert.Empty(await poller.FindChangedAsync());
     }
@@ -187,7 +207,7 @@ public sealed class ReleasePollerTests : IDisposable
         var app = SeedApp("tuner", "https://github.com/acme/tuner");
         SeedDownload(app.Id, "https://github.com/acme/tuner/releases/download/v1/app.apk", SourceKind.GitHub);
         var poller = Poller(github: new StubGitHub((_, _, _) =>
-            Task.FromResult<GitHubRelease?>(null)));
+            Task.FromResult<SourceRelease?>(null)));
 
         Assert.Empty(await poller.FindChangedAsync());
     }
@@ -208,11 +228,53 @@ public sealed class ReleasePollerTests : IDisposable
         var app = SeedApp("tuner", "https://github.com/acme/tuner");
         SeedDownload(app.Id, "https://github.com/acme/tuner/releases/download/v1/app.apk", SourceKind.GitHub);
         var poller = Poller(github: new StubGitHub((_, _, _) =>
-            Task.FromResult<GitHubRelease?>(new GitHubRelease(
+            Task.FromResult<SourceRelease?>(new SourceRelease(
                 "v2", null, null,
-                [new GitHubAsset("notes.txt", "https://example.com/notes.txt", 10, "text/plain")]))));
+                [new SourceAsset("notes.txt", "https://example.com/notes.txt", Size: 10)]))));
 
         Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task VariantRootUnchangedWhenAllApkUrlsRecorded()
+    {
+        const string main = "https://github.com/acme/tuner/releases/download/v1/app.apk";
+        const string plugin = "https://github.com/acme/tuner/releases/download/v1/plugin.apk";
+        var app = SeedApp("tuner", "https://github.com/acme/tuner");
+        SeedDownload(app.Id, main, SourceKind.GitHub);
+        SeedVariant(app, plugin);
+        var poller = Poller(github: new StubGitHub((_, _, _) => Task.FromResult<SourceRelease?>(
+            new SourceRelease("v1", null, "\"e\"", [
+                new SourceAsset("app.apk", main, Size: 10),
+                new SourceAsset("plugin.apk", plugin, Size: 10)]))));
+
+        Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task VariantRootDetectsNewPackageApk()
+    {
+        const string main = "https://github.com/acme/tuner/releases/download/v1/app.apk";
+        const string plugin = "https://github.com/acme/tuner/releases/download/v1/plugin.apk";
+        var app = SeedApp("tuner", "https://github.com/acme/tuner");
+        SeedDownload(app.Id, main, SourceKind.GitHub);
+        SeedVariant(app, plugin);
+        var poller = Poller(github: new StubGitHub((_, _, _) => Task.FromResult<SourceRelease?>(
+            new SourceRelease("v2", null, "\"e\"", [
+                new SourceAsset("app.apk", main, Size: 10),
+                new SourceAsset("plugin.apk", plugin.Replace("/v1/", "/v2/"), Size: 11)]))));
+
+        Assert.Equal([app.Id], await poller.FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task SmartspacerRepoIsNotForgePolled()
+    {
+        // SmartspacerPlugins ships a separate release per plugin, so the
+        // latest-release compare cannot see them and polling is skipped.
+        SeedApp("smartspacer", "https://github.com/KieronQuinn/SmartspacerPlugins");
+
+        Assert.Empty(await Poller().FindChangedAsync());
     }
 
     [Fact]
@@ -224,7 +286,7 @@ public sealed class ReleasePollerTests : IDisposable
         var poller = Poller(gitlab: new StubGitLab((project, _) =>
         {
             Assert.Equal("group/app", project);
-            return Task.FromResult<GitLabRelease?>(GitLabReleaseWith(latest));
+            return Task.FromResult<SourceRelease?>(GitLabReleaseWith(latest));
         }));
 
         var changed = await poller.FindChangedAsync();
@@ -261,7 +323,7 @@ public sealed class ReleasePollerTests : IDisposable
         var app = SeedApp("tuner", "https://github.com/acme/tuner", Availability.Excluded);
         SeedDownload(app.Id, "https://github.com/acme/tuner/releases/download/v1/app.apk", SourceKind.GitHub);
         var poller = Poller(github: new StubGitHub((_, _, _) =>
-            Task.FromResult<GitHubRelease?>(GitHubReleaseWith(latest))));
+            Task.FromResult<SourceRelease?>(GitHubReleaseWith(latest))));
 
         Assert.Empty(await poller.FindChangedAsync());
     }

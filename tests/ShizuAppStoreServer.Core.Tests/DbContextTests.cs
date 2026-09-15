@@ -199,4 +199,94 @@ public sealed class DbContextTests : IDisposable
 
         Assert.True(app.UpdatedAt > created);
     }
+
+    [Fact]
+    public async Task DisplayNameChangeBumpsUpdatedAt()
+    {
+        // The APK-derived display name is what clients show, so a rename
+        // detected by the enrich pass must reach them through /v1/changes.
+        var category = new Category { Name = "Audio", Slug = "audio", Section = CategorySection.Apps };
+        var created = new DateTimeOffset(2026, 9, 12, 6, 0, 0, TimeSpan.Zero);
+        _db.Categories.Add(category);
+        _db.Apps.Add(new App
+        {
+            Slug = "named",
+            Name = "Named",
+            Url = "https://example.com/named",
+            Listing = Listing.Main,
+            Type = AppType.App,
+            Category = category,
+            AddedAt = created,
+            UpdatedAt = created,
+            DisplayName = "Named",
+        });
+        await _db.SaveChangesAsync();
+
+        var app = await _db.Apps.SingleAsync(a => a.Slug == "named");
+        app.DisplayName = "Named (Repo)";
+        await _db.SaveChangesAsync();
+
+        Assert.True(app.UpdatedAt > created);
+    }
+
+    [Fact]
+    public async Task VariantCascadesWhenRootIsRemoved()
+    {
+        // Extra package rows are not list rows; deleting the root must not
+        // leave orphaned children behind.
+        var category = new Category { Name = "Audio", Slug = "audio", Section = CategorySection.Apps };
+        var created = new DateTimeOffset(2026, 9, 12, 6, 0, 0, TimeSpan.Zero);
+        var root = new App
+        {
+            Slug = "root",
+            Name = "Root",
+            Url = "https://example.com/root",
+            Listing = Listing.Main,
+            Type = AppType.App,
+            Category = category,
+            AddedAt = created,
+            UpdatedAt = created,
+        };
+        root.Variants.Add(new App
+        {
+            Slug = "root-plugin",
+            Name = "Root",
+            Url = "https://example.com/root",
+            Listing = Listing.Main,
+            Type = AppType.App,
+            Category = category,
+            AddedAt = created,
+            UpdatedAt = created,
+            Root = root,
+            PackageName = "com.example.plugin",
+        });
+        _db.Apps.Add(root);
+        await _db.SaveChangesAsync();
+
+        _db.Apps.Remove(root);
+        await _db.SaveChangesAsync();
+
+        Assert.Empty(await _db.Apps.ToListAsync());
+    }
+
+    [Fact]
+    public async Task PackageExceptionsSeedAndRoundTrip()
+    {
+        // EnsureCreated applies the HasData seed, so the rish-mcp allow entry
+        // is present in a fresh database and round-trips with its action.
+        var seeded = await _db.PackageExceptions.SingleAsync(e => e.PackageName == "kr.scin.rishmcp");
+        Assert.Equal(PackageExceptionAction.Allow, seeded.Action);
+
+        _db.PackageExceptions.Add(new PackageException
+        {
+            PackageName = "com.example.noshizuku",
+            Action = PackageExceptionAction.DontAudit,
+            Note = "audited",
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        });
+        await _db.SaveChangesAsync();
+
+        Assert.Equal(2, await _db.PackageExceptions.CountAsync());
+    }
 }

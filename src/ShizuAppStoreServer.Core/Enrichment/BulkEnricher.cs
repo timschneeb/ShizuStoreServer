@@ -13,21 +13,24 @@ public static class BulkEnricher
         IEnumerable<T> items,
         Func<T, CancellationToken, Task<EnrichResult>> enrichOne,
         int maxParallelism,
-        CancellationToken ct = default) =>
+        CancellationToken ct = default,
+        Action<T, EnrichResult>? onResult = null) =>
         EnrichManyAsync(items, enrichOne, maxParallelism,
-            ex => new EnrichResult(EnrichOutcome.Failed, $"enrich crashed: {ex.Message}"), ct);
+            ex => new EnrichResult(EnrichOutcome.Failed, $"enrich crashed: {ex.Message}"), ct, onResult);
 
     /// <summary>
     /// Result-generic fan-out (the icon-refresh prepare phase returns
     /// <c>PrepareIconResult</c>, not <c>EnrichResult</c>); crashes map via
-    /// <paramref name="onCrash"/>.
+    /// <paramref name="onCrash"/>. <paramref name="onResult"/> observes each
+    /// item as it finishes (the run log streams from it).
     /// </summary>
     public static async Task<IReadOnlyList<(T App, R Result)>> EnrichManyAsync<T, R>(
         IEnumerable<T> items,
         Func<T, CancellationToken, Task<R>> enrichOne,
         int maxParallelism,
         Func<Exception, R> onCrash,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Action<T, R>? onResult = null)
     {
         var list = items.ToList();
         var results = new (T, R)?[list.Count];
@@ -38,11 +41,15 @@ public static class BulkEnricher
             await gate.WaitAsync(ct);
             try
             {
-                results[index] = (list[index], await enrichOne(list[index], ct));
+                var result = await enrichOne(list[index], ct);
+                results[index] = (list[index], result);
+                onResult?.Invoke(list[index], result);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                results[index] = (list[index], onCrash(ex));
+                var result = onCrash(ex);
+                results[index] = (list[index], result);
+                onResult?.Invoke(list[index], result);
             }
             finally
             {

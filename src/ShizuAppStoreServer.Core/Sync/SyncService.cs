@@ -74,8 +74,11 @@ public sealed class SyncService(
     IReleasePoller poll,
     IPaparazziRenderer renderer,
     SyncOptions options,
-    EnrichmentOptions enrichment)
+    EnrichmentOptions enrichment,
+    IRunLog? runLog = null)
 {
+    private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
+
     /// <summary>Exclusion reason for apps listed in <c>pages/ARCHIVED.md</c>.</summary>
     public const string ArchivedReason = "Archived in the upstream list.";
 
@@ -103,6 +106,7 @@ public sealed class SyncService(
                 Error = error,
             });
             await db.SaveChangesAsync(ct);
+            _runLog.Skip(trigger, DateTimeOffset.UtcNow, $"pass failed: {ex.Message}");
             return new SyncPassResult(trigger, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, error);
         }
     }
@@ -147,12 +151,15 @@ public sealed class SyncService(
             var freshIds = (await PollChangedAsync(ct)).Except(dueIds).ToList();
             if (dueIds.Count == 0 && freshIds.Count == 0)
             {
+                _runLog.Skip(effectiveTrigger, now, "nothing due");
                 return new SyncPassResult(
                     effectiveTrigger, head, 0, 0, 0, 0, 0, 0, 0, 0, 0, true, null);
             }
 
+            _runLog.Begin(effectiveTrigger, fullRecheck, now, dueIds.Count + freshIds.Count);
             var (enriched, upToDate, failed, failedMessages) =
                 await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
+            await ApplyShizukuFilterAsync(ct);
             return await FinishRunAsync(effectiveTrigger, head,
                 0, 0, 0, enriched, upToDate, failed,
                 0, [], false, 0, now, ct, failedMessages);
@@ -175,15 +182,21 @@ public sealed class SyncService(
 
         var ids = fullRecheck
             ? await db.Apps.AsNoTracking()
-                .Where(a => a.Availability != Availability.Excluded)
+                // Rows excluded by the Shizuku gate stay selected so a later
+                // APK that declares the permission auto-heals them.
+                .Where(a => (a.Availability != Availability.Excluded
+                        || a.ExcludedReason == ShizukuPermission.Reason)
+                    && a.RootAppId == null)
                 .Select(a => a.Id)
                 .ToListAsync(ct)
             : await SelectDueAppIdsAsync(now, ct);
         // The nightly force-enriches everything already; polling would only
         // re-list what the pass enriches anyway.
         var extraIds = fullRecheck ? [] : (await PollChangedAsync(ct)).Except(ids).ToList();
+        _runLog.Begin(effectiveTrigger, fullRecheck, now, ids.Count + extraIds.Count);
         var (enrichedFull, upToDateFull, failedFull, failedMessagesFull) =
             await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
+        await ApplyShizukuFilterAsync(ct);
 
         return await FinishRunAsync(effectiveTrigger, head,
             counts.Added, counts.Updated, counts.Removed,
@@ -193,12 +206,15 @@ public sealed class SyncService(
 
     /// <summary>IDs due for enrichment (never-checked, or outside the success/failure window).</summary>
     /// <remarks>
-    /// Filtered client-side: the SQLite provider can't do
-    /// <c>DateTimeOffset</c> arithmetic in SQL (see M5), and the catalog is tiny.
+    /// Extra packages of a multi-app repo are enriched through their root's
+    /// pass, never selected directly. Filtered client-side: the SQLite provider
+    /// can't do <c>DateTimeOffset</c> arithmetic in SQL (see M5), and the
+    /// catalog is tiny.
     /// </remarks>
     private async Task<List<long>> SelectDueAppIdsAsync(DateTimeOffset now, CancellationToken ct)
     {
         var rows = await db.Apps.AsNoTracking()
+            .Where(a => a.RootAppId == null)
             .Select(a => new { a.Id, a.LastCheckedAt, a.LastError })
             .ToListAsync(ct);
         return rows
@@ -249,17 +265,28 @@ public sealed class SyncService(
         var upToDate = 0;
         var failed = 0;
         var failedMessages = new List<string>();
+
+        // Loaded before the batch so the run log can stream a line per app as
+        // it finishes; a row deleted mid-pass falls back to its id.
+        var meta = (await db.Apps.AsNoTracking()
+                .Where(a => ids.Contains(a.Id))
+                .Select(a => new { a.Id, a.Slug, a.Name, a.DisplayName })
+                .ToListAsync(ct))
+            .ToDictionary(a => a.Id);
+
         var results = await BulkEnricher.EnrichManyAsync(
-            ids, (id, c) => enrich.EnrichAsync(id, force, now, c), enrichment.MaxParallelism, ct);
-        var failedIds = results
-            .Where(x => x.Result.Outcome == EnrichOutcome.Failed && x.Result.Error is not null)
-            .Select(x => x.App)
-            .ToList();
-        var slugs = failedIds.Count == 0
-            ? new Dictionary<long, string>()
-            : await db.Apps.AsNoTracking()
-                .Where(a => failedIds.Contains(a.Id))
-                .ToDictionaryAsync(a => a.Id, a => a.Slug, ct);
+            ids, (id, c) => enrich.EnrichAsync(id, force, now, c), enrichment.MaxParallelism, ct,
+            onResult: (id, r) =>
+            {
+                if (meta.TryGetValue(id, out var m))
+                {
+                    _runLog.App(m.Slug, m.DisplayName ?? m.Name, r);
+                }
+                else
+                {
+                    _runLog.App($"[{id}]", null, r);
+                }
+            });
         foreach (var (id, r) in results)
         {
             switch (r.Outcome)
@@ -268,8 +295,8 @@ public sealed class SyncService(
                     failed++;
                     if (r.Error is not null)
                     {
-                        failedMessages.Add(slugs.TryGetValue(id, out var slug)
-                            ? $"[{slug}] {r.Error}"
+                        failedMessages.Add(meta.TryGetValue(id, out var m)
+                            ? $"[{m.Slug}] {r.Error}"
                             : $"[{id}] {r.Error}");
                     }
 
@@ -353,6 +380,60 @@ public sealed class SyncService(
         {
             CollectUrls(child, urls);
         }
+    }
+
+    /// <summary>
+    /// Direct-APK rows only stay available when the analyzed APK declares a
+    /// Shizuku permission; a multi-app repo can otherwise contribute non-Shizuku
+    /// APKs (plugins, companion builds) to a Shizuku store. Play/Link-only rows
+    /// carry no analyzed permissions and are never touched. Operators can keep a
+    /// package (<c>allow</c>) or silence its issue (<c>dontaudit</c>) through the
+    /// <c>package_exceptions</c> table.
+    /// </summary>
+    /// <remarks>
+    /// Runs after enrichment so it sees the fresh permission list, and before
+    /// issue collection so the two stay consistent in one pass. Rows excluded
+    /// here stay in the due/recheck selection (they carry this exact reason) so
+    /// a later APK that declares the permission auto-heals them.
+    /// </remarks>
+    private async Task<int> ApplyShizukuFilterAsync(CancellationToken ct)
+    {
+        var exceptions = await db.PackageExceptions.AsNoTracking()
+            .ToDictionaryAsync(e => e.PackageName, e => e.Action, StringComparer.Ordinal);
+        var apps = await db.Apps
+            .Where(a => a.PackageName != null
+                && (a.Availability == Availability.DirectApk
+                    || (a.Availability == Availability.Excluded
+                        && a.ExcludedReason == ShizukuPermission.Reason)))
+            .ToListAsync(ct);
+
+        var changed = 0;
+        foreach (var app in apps)
+        {
+            var allowed = ShizukuPermission.IsDeclared(app.Permissions)
+                || app.ExcludeOverride
+                || (exceptions.TryGetValue(app.PackageName!, out var action)
+                    && action == PackageExceptionAction.Allow);
+            if (allowed && app.ExcludedReason == ShizukuPermission.Reason)
+            {
+                app.Availability = Availability.DirectApk;
+                app.ExcludedReason = null;
+                changed++;
+            }
+            else if (!allowed && app.ExcludedReason != ShizukuPermission.Reason)
+            {
+                app.Availability = Availability.Excluded;
+                app.ExcludedReason = ShizukuPermission.Reason;
+                changed++;
+            }
+        }
+
+        if (changed > 0)
+        {
+            await db.SaveChangesAsync(ct);
+        }
+
+        return changed;
     }
 
     /// <summary>
@@ -531,6 +612,12 @@ public sealed class SyncService(
 
         db.SyncIssues.AddRange(issues);
         await db.SaveChangesAsync(ct);
+
+        // Close the run log section, then mirror GET /v1/issues so the file
+        // carries the same post-run health snapshot.
+        _runLog.End(now, enriched, upToDate, failed);
+        _runLog.Issues(run.Id, head, issues);
+
         return new SyncPassResult(trigger, head, added, updated, removed,
             enriched, upToDate, failed, drained, issues.Count(i => i.Kind == IssueKind.Parse),
             archivedChanged, false, null)
@@ -591,6 +678,37 @@ public sealed class SyncService(
                 AppId = finding.AppId,
                 Slug = finding.Slug,
                 Message = finding.Message,
+                CreatedAt = now,
+            });
+        }
+
+        // Direct-APK rows whose analyzed APK declares no Shizuku permission are
+        // flagged unless an operator entry exists. Either action suppresses the
+        // issue: `allow` keeps the row, `dontaudit` hides it silently.
+        var exceptionPackages = await db.PackageExceptions.AsNoTracking()
+            .Select(e => e.PackageName)
+            .ToListAsync(ct);
+        var exceptionSet = new HashSet<string>(exceptionPackages, StringComparer.Ordinal);
+        var shizukuCandidates = await db.Apps.AsNoTracking()
+            .Where(a => a.PackageName != null
+                && (a.Availability == Availability.DirectApk
+                    || (a.Availability == Availability.Excluded && a.ExcludedReason == ShizukuPermission.Reason)))
+            .Select(a => new { a.Id, a.Slug, a.Permissions, a.PackageName })
+            .ToListAsync(ct);
+        foreach (var row in shizukuCandidates)
+        {
+            if (ShizukuPermission.IsDeclared(row.Permissions) || exceptionSet.Contains(row.PackageName!))
+            {
+                continue;
+            }
+
+            issues.Add(new SyncIssue
+            {
+                Kind = IssueKind.Quality,
+                Rule = ShizukuPermission.Rule,
+                AppId = row.Id,
+                Slug = row.Slug,
+                Message = ShizukuPermission.Reason,
                 CreatedAt = now,
             });
         }

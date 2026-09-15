@@ -30,8 +30,8 @@ public sealed class EnrichmentRunnerTests : IDisposable
 
     private sealed class BoomGitHub : IGitHubReleaseClient
     {
-        public Task<GitHubRelease?> GetLatestReleaseAsync(
-            string owner, string repo, string? etag, CancellationToken ct) =>
+        public Task<SourceRelease?> GetLatestReleaseAsync(
+            SourceTarget target, string? etag, CancellationToken ct) =>
             throw new InvalidOperationException("boom");
     }
 

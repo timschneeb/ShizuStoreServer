@@ -43,7 +43,8 @@ public sealed record BatchRenderRequest(string DrawableName, string? RootFile)
 /// batch at seconds per icon. Any failure throws and the caller falls
 /// back to a letter avatar.
 /// </summary>
-public sealed class PaparazziRenderer(string gradlePath, string toolDir, TimeSpan timeout) : IPaparazziRenderer
+public sealed class PaparazziRenderer(
+    string gradlePath, string toolDir, TimeSpan timeout, string? cpuAffinity = null) : IPaparazziRenderer
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
 
@@ -176,13 +177,23 @@ public sealed class PaparazziRenderer(string gradlePath, string toolDir, TimeSpa
         Process? process;
         try
         {
+            // With an affinity set, launch through taskset so the build and
+            // the daemon it starts (workers inherit affinity) stay on the
+            // allowed cores. The warm daemon is kept.
             var startInfo = new ProcessStartInfo
             {
-                FileName = gradlePath,
+                FileName = cpuAffinity is null ? gradlePath : "taskset",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
             };
+            if (cpuAffinity is not null)
+            {
+                startInfo.ArgumentList.Add("-c");
+                startInfo.ArgumentList.Add(cpuAffinity);
+                startInfo.ArgumentList.Add(gradlePath);
+            }
+
             startInfo.ArgumentList.Add("-p");
             startInfo.ArgumentList.Add(toolDir);
             foreach (var arg in taskArgs)

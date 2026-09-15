@@ -13,6 +13,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<SyncIssue> SyncIssues => Set<SyncIssue>();
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
     public DbSet<RemovedApp> RemovedApps => Set<RemovedApp>();
+    public DbSet<PackageException> PackageExceptions => Set<PackageException>();
     public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
 
     public override int SaveChanges()
@@ -30,9 +31,9 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     }
 
     /// <summary>
-    /// Icon hashes, stars, download totals, the served APK version, and the
-    /// list-change date are part of the summary clients cache and reach them
-    /// through /v1/changes, which is keyed on UpdatedAt. Enrichment rewrites
+    /// Icon hashes, stars, download totals, the served APK version, the list-change
+    /// date and the APK-derived display name are part of the summary clients cache
+    /// and reach them through /v1/changes, which is keyed on UpdatedAt. Enrichment rewrites
     /// those columns without touching UpdatedAt, so bump it here for every
     /// producer at once.
     /// </summary>
@@ -56,7 +57,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
                 || entry.Property(nameof(App.AuthorName)).IsModified
                 || entry.Property(nameof(App.AuthorUrl)).IsModified
                 || entry.Property(nameof(App.AuthorKey)).IsModified
-                || entry.Property(nameof(App.VersionName)).IsModified;
+                || entry.Property(nameof(App.VersionName)).IsModified
+                || entry.Property(nameof(App.DisplayName)).IsModified;
             if (!isRelevant)
             {
                 continue;
@@ -116,6 +118,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Slug).HasColumnName("slug").HasMaxLength(200).IsRequired();
             e.HasIndex(x => x.Slug).IsUnique();
             e.Property(x => x.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
+            e.Property(x => x.DisplayName).HasColumnName("display_name").HasMaxLength(200);
+            e.Property(x => x.ApkLabel).HasColumnName("apk_label").HasMaxLength(200);
             e.Property(x => x.Description).HasColumnName("description").IsRequired();
             e.Property(x => x.License).HasColumnName("license").HasMaxLength(64);
             e.Property(x => x.Listing).HasColumnName("listing").HasConversion<string>().HasMaxLength(32).IsRequired();
@@ -128,6 +132,10 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.RequiresRoot).HasColumnName("requires_root");
             e.Property(x => x.ParentId).HasColumnName("parent_id");
             e.HasOne(x => x.Parent).WithMany(x => x.Children).HasForeignKey(x => x.ParentId).OnDelete(DeleteBehavior.Restrict);
+            // Extra packages from the same repo cascade with the list row.
+            e.Property(x => x.RootAppId).HasColumnName("root_app_id");
+            e.HasOne(x => x.Root).WithMany(x => x.Variants).HasForeignKey(x => x.RootAppId).OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => x.RootAppId);
             e.Property(x => x.Url).HasColumnName("url").HasMaxLength(2000).IsRequired();
             // NOTE: non-unique on purpose: the real list contains the same URL
             // in several categories (e.g. fluffy, krude, AlwaysOnDisplayToggle).
@@ -197,10 +205,12 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.SigSha256).HasColumnName("sig_sha256").HasMaxLength(512);
             e.Property(x => x.SigMd5).HasColumnName("sig_md5").HasMaxLength(512);
             e.Property(x => x.MinSdk).HasColumnName("min_sdk");
+            e.Property(x => x.Abi).HasColumnName("abi").HasMaxLength(32);
             e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
             e.Property(x => x.ResolvedAt).HasColumnName("resolved_at").IsRequired();
-            e.HasIndex(x => new { x.AppId, x.SigKey }).IsUnique();
+            // NULLS NOT DISTINCT so universal builds (abi null) still dedupe.
+            e.HasIndex(x => new { x.AppId, x.SigKey, x.Abi }).IsUnique().AreNullsDistinct(false);
             // At most one primary candidate per app; recomputed on every upsert.
             e.HasIndex(x => x.AppId).IsUnique().HasFilter("is_primary");
         });
@@ -289,6 +299,31 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Key).HasColumnName("key").HasMaxLength(200).IsRequired();
             e.Property(x => x.Value).HasColumnName("value").IsRequired();
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+        });
+
+        b.Entity<PackageException>(e =>
+        {
+            e.ToTable("package_exceptions");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(256).IsRequired();
+            e.HasIndex(x => x.PackageName).IsUnique();
+            e.Property(x => x.Action).HasColumnName("action").HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.Note).HasColumnName("note").HasMaxLength(500);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+
+            // rish-mcp talks to Shizuku through the rish shell gateway, so it
+            // declares no Shizuku permission but must stay available.
+            e.HasData(new PackageException
+            {
+                Id = 1,
+                PackageName = "kr.scin.rishmcp",
+                Action = PackageExceptionAction.Allow,
+                Note = "Uses the rish shell gateway instead of the Shizuku permission.",
+                CreatedAt = new DateTimeOffset(2026, 9, 15, 0, 0, 0, TimeSpan.Zero),
+                UpdatedAt = new DateTimeOffset(2026, 9, 15, 0, 0, 0, TimeSpan.Zero),
+            });
         });
     }
 }

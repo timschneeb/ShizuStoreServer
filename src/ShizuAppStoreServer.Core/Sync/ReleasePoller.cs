@@ -44,12 +44,16 @@ public sealed class ReleasePoller(
     // Same special cases as AppEnricher: instafel's list URL points at the
     // source monorepo while the updater releases live in u-rel, so poll that
     // feed; hlbmerge rebuilds only on GitCode, so skip the GitHub poll.
+    // SmartspacerPlugins spreads its apps across many releases, so one
+    // latest-release compare cannot see them; it stays on the due window.
     private const string InstafelListOwner = "mamiiblt";
     private const string InstafelListRepo = "instafel";
     private const string InstafelUpdaterOwner = "instafel";
     private const string InstafelUpdaterRepo = "u-rel";
     private const string HlbmergeOwner = "molihuan";
     private const string HlbmergeRepo = "hlbmerge_flutter";
+    private const string SmartspacerOwner = "KieronQuinn";
+    private const string SmartspacerRepo = "SmartspacerPlugins";
 
     private sealed record Candidate(long Id, string Url, string? SourceUrl, string? Etag);
     private sealed record ForgeTarget(Candidate App, string OwnerOrProject, string Repo, bool IsGitHub);
@@ -66,7 +70,7 @@ public sealed class ReleasePoller(
         }
 
         var apps = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded)
+            .Where(a => a.Availability != Availability.Excluded && a.RootAppId == null)
             .Select(a => new Candidate(a.Id, a.Url, a.SourceUrl, a.EnrichEtag))
             .ToListAsync(ct);
         if (apps.Count == 0)
@@ -77,6 +81,36 @@ public sealed class ReleasePoller(
         var downloads = await db.Downloads.AsNoTracking().ToListAsync(ct);
         var byApp = downloads.GroupBy(d => d.AppId)
             .ToDictionary(g => g.Key, g => g.ToList());
+
+        // Extra packages of a multi-app repo are polled through their root:
+        // every latest-release asset must already be recorded somewhere in the
+        // group, so a new app or a new build flips the root as changed.
+        var variantsByRoot = (await db.Apps.AsNoTracking()
+                .Where(a => a.RootAppId != null)
+                .Select(a => new { a.Id, RootId = a.RootAppId!.Value })
+                .ToListAsync(ct))
+            .GroupBy(v => v.RootId)
+            .ToDictionary(g => g.Key, g => g.Select(v => v.Id).ToList());
+
+        var groupDownloads = new Dictionary<long, List<AppDownload>>();
+        foreach (var app in apps)
+        {
+            var rows = byApp.TryGetValue(app.Id, out var rootRows)
+                ? new List<AppDownload>(rootRows)
+                : [];
+            if (variantsByRoot.TryGetValue(app.Id, out var variantIds))
+            {
+                foreach (var variantId in variantIds)
+                {
+                    if (byApp.TryGetValue(variantId, out var variantRows))
+                    {
+                        rows.AddRange(variantRows);
+                    }
+                }
+            }
+
+            groupDownloads[app.Id] = rows;
+        }
 
         var forge = new List<ForgeTarget>();
         var fdroid = new Dictionary<string, List<FdroidTarget>>(StringComparer.OrdinalIgnoreCase);
@@ -100,7 +134,8 @@ public sealed class ReleasePoller(
 
         var changed = new HashSet<long>();
         foreach (var (app, isChanged) in await BulkEnricher.EnrichManyAsync<ForgeTarget, bool>(
-            forge, (t, c) => PollForgeAsync(t, byApp, c),
+            forge,
+            (t, c) => PollForgeAsync(t, groupDownloads, variantsByRoot.ContainsKey(t.App.Id), c),
             Math.Max(1, sync.PollParallelism), _ => false, ct))
         {
             if (isChanged)
@@ -125,6 +160,13 @@ public sealed class ReleasePoller(
             // hlbmerge rebuilds only on GitCode, so a GitHub poll would
             // compare the wrong feed.
             if (owner == HlbmergeOwner && repo == HlbmergeRepo)
+            {
+                return null;
+            }
+
+            // SmartspacerPlugins publishes one app per release; a single
+            // latest-release compare would keep flagging the other apps.
+            if (owner == SmartspacerOwner && repo == SmartspacerRepo)
             {
                 return null;
             }
@@ -175,34 +217,52 @@ public sealed class ReleasePoller(
     }
 
     private async Task<bool> PollForgeAsync(
-        ForgeTarget target, Dictionary<long, List<AppDownload>> byApp, CancellationToken ct)
+        ForgeTarget target,
+        Dictionary<long, List<AppDownload>> groupDownloads,
+        bool hasVariants,
+        CancellationToken ct)
     {
         try
         {
-            string? latestUrl;
+            SourceRelease? release;
             if (target.IsGitHub)
             {
-                var release = await github.GetLatestReleaseAsync(
-                    target.OwnerOrProject, target.Repo, target.App.Etag, ct);
-                if (release is null)
-                {
-                    return false;
-                }
-
-                latestUrl = ApkAssetSelector.PickApk(release.Assets)?.BrowserDownloadUrl
-                    ?? ApkAssetSelector.PickZip(release.Assets, a => a.Name, a => a.Size)?.BrowserDownloadUrl;
+                release = await github.GetLatestReleaseAsync(
+                    new SourceTarget(SourceKind.GitHub, $"{target.OwnerOrProject}/{target.Repo}"),
+                    target.App.Etag, ct);
             }
             else
             {
-                var release = await gitlab.GetLatestReleaseAsync(target.OwnerOrProject, target.App.Etag, ct);
-                if (release is null)
+                release = await gitlab.GetLatestReleaseAsync(
+                    new SourceTarget(SourceKind.GitLab, target.OwnerOrProject), target.App.Etag, ct);
+            }
+
+            if (release is null)
+            {
+                return false;
+            }
+
+            var rows = groupDownloads.TryGetValue(target.App.Id, out var group) ? group : [];
+
+            // A multi-app repo ships several packages per release: the poll is
+            // stale as soon as any APK asset is not recorded on the group.
+            if (hasVariants)
+            {
+                var latest = release.Assets
+                    .Where(IsApkAsset)
+                    .Select(a => a.Url)
+                    .ToHashSet(StringComparer.Ordinal);
+                if (latest.Count == 0)
                 {
                     return false;
                 }
 
-                latestUrl = ApkAssetSelector.PickApk(
-                    release.Assets, l => l.Name, _ => 0L, l => l.Url)?.Url;
+                var recorded = rows.Select(d => d.ApkUrl).ToHashSet(StringComparer.Ordinal);
+                return !latest.IsSubsetOf(recorded);
             }
+
+            var latestUrl = ApkAssetSelector.PickApk(release.Assets)?.Url
+                ?? ApkAssetSelector.PickZip(release.Assets)?.Url;
 
             // No installable asset (or a feed we cannot map): due-only covers it.
             if (latestUrl is null)
@@ -210,9 +270,7 @@ public sealed class ReleasePoller(
                 return false;
             }
 
-            var primary = byApp.TryGetValue(target.App.Id, out var rows)
-                ? rows.FirstOrDefault(d => d.IsPrimary)
-                : null;
+            var primary = rows.FirstOrDefault(d => d.IsPrimary);
             return primary is null || primary.ApkUrl != latestUrl;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -221,6 +279,10 @@ public sealed class ReleasePoller(
             return false;
         }
     }
+
+    private static bool IsApkAsset(SourceAsset asset) =>
+        asset.Name.EndsWith(".apk", StringComparison.OrdinalIgnoreCase)
+        || asset.Url.EndsWith(".apk", StringComparison.OrdinalIgnoreCase);
 
     private async Task PollFdroidRepoAsync(
         string repoBase,

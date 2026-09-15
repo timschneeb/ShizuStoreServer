@@ -72,14 +72,14 @@ public sealed class AppEnricherTests : IDisposable
         }
     }
 
-    private sealed class FakeGitCodeClient(Func<GitCodeRelease> handler) : IGitCodeReleaseClient
+    private sealed class FakeGitCodeClient(Func<SourceRelease> handler) : IGitCodeReleaseClient
     {
         public int Calls;
-        public Task<GitCodeRelease?> GetLatestReleaseAsync(
-            string owner, string repo, string? etag = null, CancellationToken ct = default)
+        public Task<SourceRelease?> GetLatestReleaseAsync(
+            SourceTarget target, string? etag = null, CancellationToken ct = default)
         {
             Calls++;
-            return Task.FromResult<GitCodeRelease?>(handler());
+            return Task.FromResult<SourceRelease?>(handler());
         }
     }
 
@@ -122,21 +122,55 @@ public sealed class AppEnricherTests : IDisposable
         Signer #1 certificate MD5 digest: b10a8db164e0754105b7a99be72e3fe5
         """;
 
-    private static string ReleaseJson(string tag, string assetName, string assetUrl, long size) =>
-        new JsonArray(new JsonObject
+    private static string ReleaseJson(
+        string tag, string assetName, string assetUrl, long size,
+        string? digest = null, string publishedAt = "2024-06-01T00:00:00Z")
+    {
+        var asset = new JsonObject
+        {
+            ["name"] = assetName,
+            ["browser_download_url"] = assetUrl,
+            ["size"] = size,
+            ["content_type"] = "application/vnd.android.package-archive",
+        };
+        if (digest is not null)
+        {
+            asset["digest"] = digest;
+        }
+
+        return new JsonArray(new JsonObject
         {
             ["tag_name"] = tag,
             ["draft"] = false,
             ["prerelease"] = false,
-            ["published_at"] = "2024-06-01T00:00:00Z",
-            ["assets"] = new JsonArray(new JsonObject
-            {
-                ["name"] = assetName,
-                ["browser_download_url"] = assetUrl,
-                ["size"] = size,
-                ["content_type"] = "application/vnd.android.package-archive",
-            }),
+            ["published_at"] = publishedAt,
+            ["assets"] = new JsonArray(asset),
         }).ToJsonString();
+    }
+
+    private static string ReleaseJsonMultiAssets(params (string Name, string Url, long Size)[] assets)
+    {
+        var array = new JsonArray();
+        foreach (var asset in assets)
+        {
+            array.Add(new JsonObject
+            {
+                ["name"] = asset.Name,
+                ["browser_download_url"] = asset.Url,
+                ["size"] = asset.Size,
+                ["content_type"] = "application/vnd.android.package-archive",
+            });
+        }
+
+        return new JsonArray(new JsonObject
+        {
+            ["tag_name"] = "v1.0",
+            ["draft"] = false,
+            ["prerelease"] = false,
+            ["published_at"] = "2024-06-01T00:00:00Z",
+            ["assets"] = array,
+        }).ToJsonString();
+    }
 
     private static HttpResponseMessage JsonReleases(string json, string? etag = null)
     {
@@ -317,6 +351,226 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("1.2.3", version.VersionName);
         await _db.SaveChangesAsync();
         Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task EnrichesEveryArchApkAndPrefersArm64AsPrimary()
+    {
+        // BiliDownOut-style release: one APK per architecture and no universal
+        // build. The old selector analyzed only the largest asset (x86 here).
+        var arm64 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(128, 128, Color.Blue)));
+        var armeabi = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Green)));
+        var x86 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var abiByLength = new Dictionary<long, string>
+        {
+            [arm64.Length] = "arm64-v8a",
+            [armeabi.Length] = "armeabi-v7a",
+            [x86.Length] = "x86",
+        };
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-arm64-v8a-release.apk", "https://cdn.example/app-arm64-v8a-release.apk", arm64.Length),
+            ("app-armeabi-v7a-release.apk", "https://cdn.example/app-armeabi-v7a-release.apk", armeabi.Length),
+            ("app-x86-release.apk", "https://cdn.example/app-x86-release.apk", x86.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("arm64", StringComparison.Ordinal) ? arm64
+                : path.Contains("armeabi", StringComparison.Ordinal) ? armeabi
+                : x86;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(apkPath =>
+            TestAssets.CannedBadging(versionCode: "1004", abi: abiByLength[new FileInfo(apkPath).Length]));
+        var signer = new FakeSignerRunner(_ => SignerOutputA);
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: signer);
+        var app = NewApp("bilidownout", "BiliDownOut", "https://github.com/10miaomiao/bili-down-out");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(3, downloads.Calls);
+        Assert.Equal(3, aapt2.Calls);
+
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.All(rows, row => Assert.Equal(1004, row.VersionCode));
+        Assert.Equal(
+            ["arm64-v8a", "armeabi-v7a", "x86"],
+            rows.Select(row => row.Abi!).OrderBy(abi => abi, StringComparer.Ordinal).ToArray());
+
+        // ARM64 wins regardless of asset size, so the default install fits most devices.
+        var primary = Primary(app);
+        Assert.Equal("arm64-v8a", primary.Abi);
+        Assert.Equal("https://cdn.example/app-arm64-v8a-release.apk", primary.ApkUrl);
+
+        // Shared app fields still come from a sibling ABI of the same release.
+        Assert.Equal("com.example.app", app.PackageName);
+        Assert.Equal(["android.permission.INTERNET"], app.Permissions);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+    }
+
+    [Fact]
+    public async Task SignedMultiAbiReleaseAddsOneVersionRow()
+    {
+        // All ABIs share a signing key, so each sibling passes the same-variant
+        // guard and reaches AddVersionRowAsync. The pending row is invisible to
+        // AnyAsync, which used to insert a duplicate and roll the enrich back on
+        // IX_app_versions_app_id_version_code (EnrichmentRunner.SaveChanges).
+        var arm64 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(128, 128, Color.Blue)));
+        var armeabi = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Green)));
+        var x86 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var abiByHash = new Dictionary<string, string>
+        {
+            [Sha256(arm64)] = "arm64-v8a",
+            [Sha256(armeabi)] = "armeabi-v7a",
+            [Sha256(x86)] = "x86",
+        };
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-arm64-v8a-release.apk", "https://cdn.example/app-arm64-v8a-release.apk", arm64.Length),
+            ("app-armeabi-v7a-release.apk", "https://cdn.example/app-armeabi-v7a-release.apk", armeabi.Length),
+            ("app-x86-release.apk", "https://cdn.example/app-x86-release.apk", x86.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("arm64", StringComparison.Ordinal) ? arm64
+                : path.Contains("armeabi", StringComparison.Ordinal) ? armeabi
+                : x86;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(apkPath =>
+            TestAssets.CannedBadging(versionCode: "1004", abi: abiByHash[Sha256(File.ReadAllBytes(apkPath))]));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("bilidownout", "BiliDownOut", "https://github.com/10miaomiao/bili-down-out");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Single(_db.AppVersions.Where(v => v.AppId == app.Id).ToList());
+    }
+
+    [Fact]
+    public async Task PrefersPhoneApkOverTvAndWearFlavorsOfSamePackage()
+    {
+        // universal-installer-style release: the same package ships phone, TV
+        // and Wear builds. Only the phone build should be offered.
+        var phone = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(200, 200, Color.Blue)));
+        var tv = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(300, 300, Color.Green)));
+        var wear = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(400, 400, Color.Red)));
+        var badgingByHash = new Dictionary<string, string>
+        {
+            [Sha256(phone)] = TestAssets.CannedBadging(versionCode: "41", label: "Universal Installer"),
+            [Sha256(tv)] = TestAssets.CannedBadging(versionCode: "2031", label: "Universal Installer",
+                features: ["android.software.leanback"]),
+            [Sha256(wear)] = TestAssets.CannedBadging(versionCode: "1038", label: "Universal Installer",
+                features: ["android.hardware.type.watch"]),
+        };
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app-release.apk", phone.Length + 10_000),
+            ("tv-release.apk", "https://cdn.example/tv-release.apk", tv.Length),
+            ("wearos-release.apk", "https://cdn.example/wearos-release.apk", wear.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("wearos", StringComparison.Ordinal) ? wear
+                : path.Contains("tv", StringComparison.Ordinal) ? tv
+                : phone;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(apkPath => badgingByHash[Sha256(File.ReadAllBytes(apkPath))]);
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("universal-installer", "Universal Installer",
+            "https://github.com/pass-with-high-score/universal-installer");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var row = Assert.Single(_db.Downloads.Local.Where(d => d.AppId == app.Id).ToList());
+        Assert.Equal("https://cdn.example/app-release.apk", row.ApkUrl);
+        Assert.Equal(41, row.VersionCode);
+        Assert.Equal("Universal Installer", app.DisplayName);
+    }
+
+    [Fact]
+    public async Task KeepsWearOnlyBuildWhenNoPhoneFlavorExists()
+    {
+        var wear = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(400, 400, Color.Red)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "wearos-release.apk", "https://cdn.example/wearos-release.apk", wear.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(wear),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(
+            versionCode: "1038", label: "Watch App", features: ["android.hardware.type.watch"]));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("watchapp", "Watch App", "https://github.com/example/watchapp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var row = Assert.Single(_db.Downloads.Local.Where(d => d.AppId == app.Id).ToList());
+        Assert.Equal(1038, row.VersionCode);
+        Assert.Equal("Watch App", app.DisplayName);
+    }
+
+    [Fact]
+    public async Task WatchOnlyPackageSurvivesAlongsideAnotherPackagesPhoneBuild()
+    {
+        // The phone flavor only suppresses TV/watch builds of its own package:
+        // a watch-only sibling package still becomes a variant.
+        var phone = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(200, 200, Color.Blue)));
+        var watch = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(400, 400, Color.Red)));
+        var badgingByHash = new Dictionary<string, string>
+        {
+            [Sha256(phone)] = TestAssets.CannedBadging(package: "com.example.app", versionCode: "1", label: "Phone App"),
+            [Sha256(watch)] = TestAssets.CannedBadging(package: "com.example.plugin", versionCode: "2",
+                label: "Watch Plugin", features: ["android.hardware.type.watch"]),
+        };
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app-release.apk", phone.Length + 10_000),
+            ("plugin-watch-release.apk", "https://cdn.example/plugin-watch-release.apk", watch.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("plugin", StringComparison.Ordinal)
+                ? watch
+                : phone;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(apkPath => badgingByHash[Sha256(File.ReadAllBytes(apkPath))]);
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("toolbox", "Toolbox", "https://github.com/example/toolbox");
+
+        await enricher.EnrichAsync(app, T0);
+
+        var variant = Assert.Single(_db.Apps.Local.Where(a => a.RootAppId == app.Id).ToList());
+        Assert.Equal("com.example.plugin", variant.PackageName);
+        Assert.Equal("Watch Plugin (Toolbox)", variant.DisplayName);
+        Assert.Equal("Phone App (Toolbox)", app.DisplayName);
+    }
+
+    private static string ReleasesJson(params (string Tag, string Name, string Url, long Size)[] releases)
+    {
+        var array = new JsonArray();
+        foreach (var release in releases)
+        {
+            array.Add(new JsonObject
+            {
+                ["tag_name"] = release.Tag,
+                ["draft"] = false,
+                ["prerelease"] = false,
+                ["published_at"] = "2024-06-01T00:00:00Z",
+                ["assets"] = new JsonArray(new JsonObject
+                {
+                    ["name"] = release.Name,
+                    ["browser_download_url"] = release.Url,
+                    ["size"] = release.Size,
+                    ["content_type"] = "application/vnd.android.package-archive",
+                }),
+            });
+        }
+
+        return array.ToJsonString();
     }
 
     /// <summary>Zip archive holding one entry, used to model release zips with an APK inside.</summary>
@@ -541,10 +795,10 @@ public sealed class AppEnricherTests : IDisposable
         await first.EnrichAsync(app, T0);
         await _db.SaveChangesAsync();
 
-        // Same release again → re-enriched, but no duplicate version row.
+        // Same release again → checksum unchanged, so skipped, no duplicate row.
         Age(app);
         var (second, _, _, _, _) = HappyPath();
-        Assert.Equal(EnrichOutcome.Enriched, (await second.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
         await _db.SaveChangesAsync();
         Assert.Equal(1, await _db.AppVersions.CountAsync());
 
@@ -566,10 +820,10 @@ public sealed class AppEnricherTests : IDisposable
         // Live case (vFlow): v1.5.3-pr1 reused 1.5.2's versionCode. The check
         // matched (code, name) while the index is (app, code), so the insert
         // violated it and rolled back stars/permissions with the whole save.
-        AppEnricher Wiring(string tag, string versionName)
+        AppEnricher Wiring(string tag, string versionName, Color iconColor)
         {
             var zip = TestAssets.BuildApk(
-                (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+                (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, iconColor)));
             var github = new StubHandler(_ => JsonReleases(
                 ReleaseJson(tag, "app-release.apk", "https://cdn.example/app.apk", zip.Length),
                 "\"rel-etag\""));
@@ -583,13 +837,14 @@ public sealed class AppEnricherTests : IDisposable
         }
 
         var app = NewApp("retagged", "Retagged", "https://github.com/example/retagged");
-        Assert.Equal(EnrichOutcome.Enriched, (await Wiring("v1.0", "1.2.3").EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(EnrichOutcome.Enriched, (await Wiring("v1.0", "1.2.3", Color.Blue).EnrichAsync(app, T0)).Outcome);
         await _db.SaveChangesAsync();
         Assert.Equal(1, await _db.AppVersions.CountAsync());
 
         // Same code under a new tag/name: no duplicate row, enrich still lands.
+        // Different icon bytes keep the build distinct for the checksum guard.
         Age(app);
-        Assert.Equal(EnrichOutcome.Enriched, (await Wiring("v1.1-pr1", "1.2.4").EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(EnrichOutcome.Enriched, (await Wiring("v1.1-pr1", "1.2.4", Color.Red).EnrichAsync(app, T0)).Outcome);
         await _db.SaveChangesAsync();
         Assert.Equal(1, await _db.AppVersions.CountAsync());
     }
@@ -882,6 +1137,28 @@ public sealed class AppEnricherTests : IDisposable
         return response;
     }
 
+    private static string GitLabJsonMultiAssets(string tag, params (string Name, string Url)[] links)
+    {
+        var array = new JsonArray();
+        foreach (var (name, url) in links)
+        {
+            array.Add(new JsonObject
+            {
+                ["name"] = name,
+                ["url"] = url,
+                ["direct_asset_url"] = url,
+            });
+        }
+
+        return new JsonArray(new JsonObject
+        {
+            ["tag_name"] = tag,
+            ["upcoming_release"] = false,
+            ["released_at"] = "2024-06-01T00:00:00Z",
+            ["assets"] = new JsonObject { ["links"] = array },
+        }).ToJsonString();
+    }
+
     /// <summary>GitLab happy path: release link → APK download → badging → icon.</summary>
     private (AppEnricher Enricher, StubHandler Gitlab, StubHandler Downloads, FakeAapt2Runner Aapt2, byte[] Zip)
         GitLabHappyPath(string tag = "v1.0")
@@ -917,6 +1194,49 @@ public sealed class AppEnricherTests : IDisposable
               <size>1234567</size>
               <sdkver>26</sdkver>
               <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
+            </package>
+          </application>
+        </fdroid>
+        """;
+
+    // One release per architecture plus a genuinely older package (1.0) that
+    // must not be mistaken for an ABI sibling.
+    private const string FdroidIndexXmlWithArchSiblings = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <fdroid>
+          <application id="com.example.app">
+            <name>Example</name>
+            <icon>com.example.app.png</icon>
+            <source>https://github.com/example/aod</source>
+            <package>
+              <version>2.0</version>
+              <versioncode>2004</versioncode>
+              <apkname>com.example.app_2004.apk</apkname>
+              <hash type="sha256">aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111</hash>
+              <size>2222222</size>
+              <sdkver>26</sdkver>
+              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
+              <nativecode>arm64-v8a</nativecode>
+            </package>
+            <package>
+              <version>2.0</version>
+              <versioncode>2003</versioncode>
+              <apkname>com.example.app_2003.apk</apkname>
+              <hash type="sha256">bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222</hash>
+              <size>1111111</size>
+              <sdkver>26</sdkver>
+              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
+              <nativecode>armeabi-v7a</nativecode>
+            </package>
+            <package>
+              <version>1.0</version>
+              <versioncode>1000</versioncode>
+              <apkname>com.example.app_1000.apk</apkname>
+              <hash type="sha256">cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333</hash>
+              <size>999999</size>
+              <sdkver>26</sdkver>
+              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
+              <nativecode>x86</nativecode>
             </package>
           </application>
         </fdroid>
@@ -975,6 +1295,60 @@ public sealed class AppEnricherTests : IDisposable
         Assert.True(File.Exists(Path.Combine(_iconDir, $"{app.IconHash}.png")));
         var version = Assert.Single(app.Versions);
         Assert.Equal(42, version.VersionCode);
+    }
+
+    [Fact]
+    public async Task EnrichesEveryGitLabArchLinkAndPrefersArm64AsPrimary()
+    {
+        // GitLab release links carry no sizes, so the shared pipeline records
+        // every per-architecture APK and ABI order picks the default.
+        var arm64 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(128, 128, Color.Blue)));
+        var armeabi = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Green)));
+        var x86 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var abiByLength = new Dictionary<long, string>
+        {
+            [arm64.Length] = "arm64-v8a",
+            [armeabi.Length] = "armeabi-v7a",
+            [x86.Length] = "x86",
+        };
+        var gitlab = new StubHandler(_ => GitLabReleases(GitLabJsonMultiAssets(
+            "v1.0",
+            ("app-x86-release.apk", "https://cdn.example/app-x86-release.apk"),
+            ("app-armeabi-v7a-release.apk", "https://cdn.example/app-armeabi-v7a-release.apk"),
+            ("app-arm64-v8a-release.apk", "https://cdn.example/app-arm64-v8a-release.apk"))));
+        var downloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("arm64", StringComparison.Ordinal) ? arm64
+                : path.Contains("armeabi", StringComparison.Ordinal) ? armeabi
+                : x86;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(apkPath =>
+            TestAssets.CannedBadging(versionCode: "1004", abi: abiByLength[new FileInfo(apkPath).Length]));
+        var signer = new FakeSignerRunner(_ => SignerOutputA);
+        var enricher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            downloads, aapt2, gitlab,
+            new StubHandler(_ => throw new InvalidOperationException("must not fetch index")),
+            signer: signer);
+        var app = NewApp("glarch", "GlArch", "https://gitlab.com/example/glarch");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(3, downloads.Calls);
+        Assert.Equal(3, aapt2.Calls);
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(
+            ["arm64-v8a", "armeabi-v7a", "x86"],
+            rows.Select(row => row.Abi!).OrderBy(abi => abi, StringComparer.Ordinal).ToArray());
+        var primary = Primary(app);
+        Assert.Equal("arm64-v8a", primary.Abi);
+        Assert.Equal("https://cdn.example/app-arm64-v8a-release.apk", primary.ApkUrl);
+        Assert.Equal("com.example.app", app.PackageName);
+        Assert.Equal(["android.permission.INTERNET"], app.Permissions);
     }
 
     [Fact]
@@ -1351,6 +1725,56 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task EnrichesFdroidArchSiblingsAsIndexOnlyRows()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(FdroidIndexXmlWithArchSiblings),
+        });
+        var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = request.RequestUri!.ToString().Contains("/icons")
+                ? new ByteArrayContent(iconBytes)
+                : new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "2004", abi: "arm64-v8a"));
+        var signer = new FakeSignerRunner(_ => SignerOutputA);
+        var enricher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            downloads, aapt2,
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitLab")),
+            fdroid, signer: signer);
+        var app = NewApp("fdarch", "FdArch", "https://f-droid.org/packages/com.example.app/");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Equal(2, rows.Count);
+        Assert.DoesNotContain(rows, row => row.Abi == "x86");
+
+        var primary = Primary(app);
+        Assert.Equal("arm64-v8a", primary.Abi);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.NotNull(primary.Sha256);
+
+        var sibling = rows.Single(row => row.Abi == "armeabi-v7a");
+        Assert.False(sibling.IsPrimary);
+        Assert.Equal(2003, sibling.VersionCode);
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", sibling.SigMd5);
+        Assert.Equal("bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222", sibling.Sha256);
+
+        Assert.Equal("com.example.app", app.PackageName);
+        Assert.Equal(["android.permission.INTERNET"], app.Permissions);
+    }
+
+    [Fact]
     public async Task FdroidHealReanalyzesWhenPermissionsMissing()
     {
         var (first, _, _, _) = FdroidAnalyzedPath();
@@ -1632,12 +2056,11 @@ public sealed class AppEnricherTests : IDisposable
                 request.RequestUri!.ToString());
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) };
         });
-        var gitcode = new FakeGitCodeClient(() => new GitCodeRelease("v2.0.5", "\"gc-etag\"",
+        var gitcode = new FakeGitCodeClient(() => new SourceRelease("v2.0.5", null, "\"gc-etag\"",
         [
-            new GitCodeAsset("app-arm64-v8a-release.apk",
-                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk"),
-            new GitCodeAsset("app-x86_64-release.apk",
-                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-x86_64-release.apk"),
+            new SourceAsset("app-arm64-v8a-release.apk",
+                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
+                Primary: true),
         ]));
         var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "205"));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
@@ -1659,10 +2082,11 @@ public sealed class AppEnricherTests : IDisposable
     public async Task GitCodeUnchangedAssetSkipsDownload()
     {
         var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
-        var gitcode = new FakeGitCodeClient(() => new GitCodeRelease("v2.0.5", "\"gc-etag\"",
+        var gitcode = new FakeGitCodeClient(() => new SourceRelease("v2.0.5", null, "\"gc-etag\"",
         [
-            new GitCodeAsset("app-arm64-v8a-release.apk",
-                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk"),
+            new SourceAsset("app-arm64-v8a-release.apk",
+                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
+                Primary: true),
         ]));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
         AddDownload(app, SourceKind.Other,
@@ -1682,9 +2106,9 @@ public sealed class AppEnricherTests : IDisposable
     public async Task GitCodeWithoutApkAssetsFails()
     {
         var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
-        var gitcode = new FakeGitCodeClient(() => new GitCodeRelease("v2.0.5", null,
+        var gitcode = new FakeGitCodeClient(() => new SourceRelease("v2.0.5", null, null,
         [
-            new GitCodeAsset("source.zip",
+            new SourceAsset("source.zip",
                 "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/source.zip"),
         ]));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
@@ -2468,6 +2892,372 @@ public sealed class AppEnricherTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task SinglePackageReleaseUsesApkLabelAsDisplayName()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal("Example", app.ApkLabel);
+        Assert.Equal("Example", app.DisplayName);
+        Assert.DoesNotContain(_db.Apps.Local, a => a.RootAppId == app.Id);
+    }
+
+    [Fact]
+    public async Task MultiPackageReleaseCreatesVariantAppRows()
+    {
+        var mainApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var extraApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", mainApk.Length),
+            ("plugin-release.apk", "https://cdn.example/plugin.apk", extraApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("plugin", StringComparison.Ordinal)
+                ? extraApk
+                : mainApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == extraApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.plugin", label: "Plugin")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("smart-toolbox", "Smart Toolbox", "https://github.com/example/smart-toolbox");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+
+        var rows = _db.Apps.Local.Where(a => a.Id == app.Id || a.RootAppId == app.Id).ToList();
+        Assert.Equal(2, rows.Count);
+        var main = rows.Single(a => a.PackageName == "com.example.app");
+        var plugin = rows.Single(a => a.PackageName == "com.example.plugin");
+        Assert.Equal(Availability.DirectApk, plugin.Availability);
+        Assert.Equal(Availability.DirectApk, main.Availability);
+
+        // The list row keeps one of the packages; the other becomes a variant.
+        var variant = Assert.Single(rows, a => a.RootAppId == app.Id);
+        Assert.NotEqual(app.Id, variant.Id);
+        var root = rows.Single(a => a.Id == app.Id);
+        Assert.Equal("com-example-" + variant.PackageName!.Split('.')[^1], variant.Slug);
+
+        // More than one package is published, so each row carries the list name.
+        Assert.Equal($"{root.ApkLabel} (Smart Toolbox)", app.DisplayName);
+        Assert.Equal($"{variant.ApkLabel} (Smart Toolbox)", variant.DisplayName);
+
+        Assert.Equal("https://cdn.example/app.apk", Primary(main).ApkUrl);
+        Assert.Equal("https://cdn.example/plugin.apk", Primary(plugin).ApkUrl);
+    }
+
+    [Fact]
+    public async Task RemovesVariantWhenPackageDisappearsOnNextPass()
+    {
+        var mainApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var extraApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var json = ReleaseJsonMultiAssets(
+            // Declared sizes force the main app to win the primary pick so the
+            // root row owns com.example.app and the plugin becomes a variant.
+            ("app-release.apk", "https://cdn.example/app.apk", mainApk.Length + 1_000_000),
+            ("plugin-release.apk", "https://cdn.example/plugin.apk", extraApk.Length));
+        var github = new StubHandler(_ => JsonReleases(json, "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("plugin", StringComparison.Ordinal)
+                ? extraApk
+                : mainApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == extraApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.plugin", label: "Plugin")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("smart-toolbox", "Smart Toolbox", "https://github.com/example/smart-toolbox");
+
+        await enricher.EnrichAsync(app, T0);
+        Assert.Single(_db.Apps.Local, a => a.RootAppId == app.Id);
+        // Persist the first pass like the runner does, so removal has real keys.
+        await _db.SaveChangesAsync();
+
+        // The next release drops the second app; its variant and downloads go away.
+        Age(app);
+        json = ReleaseJson("v1.1", "app-release.apk", "https://cdn.example/app.apk", mainApk.Length);
+        var result = await enricher.EnrichAsync(app, T0);
+
+        // The kept APK is byte-identical so its analysis is skipped, but the
+        // vanished package still needs pruning and the display name re-settled.
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal("Example", app.DisplayName);
+        await _db.SaveChangesAsync();
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == app.Id).ToListAsync());
+        Assert.DoesNotContain(_db.Downloads.Local, d => d.ApkUrl.EndsWith("plugin.apk", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task HealsRootLabelWhenPrimaryIsNotInTheLatestRelease()
+    {
+        var oldApk = TestAssets.BuildApk((TestAssets.MdpiIcon, TestAssets.SolidPng(400, 400, Color.Red)));
+        var pluginApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v2.0", "plugin-release.apk", "https://cdn.example/plugin.apk", pluginApk.Length),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("old", StringComparison.Ordinal)
+                ? oldApk
+                : pluginApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == oldApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.root", versionCode: "5", label: "Root App")
+            : TestAssets.CannedBadging(package: "com.example.plugin", label: "Plugin"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("droidos", "DroidOS", "https://github.com/example/droidos");
+        app.PackageName = "com.example.root";
+        _db.SaveChanges();
+        AddDownload(app, SourceKind.GitHub, "https://cdn.example/old.apk", versionCode: 5, sigSha256: SignerOutputA);
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        // The release only carries the plugin, so the root's own package was
+        // never a representative asset; the heal analyzes the recorded primary.
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal("com.example.root", app.PackageName);
+        Assert.Equal("Root App", app.ApkLabel);
+        Assert.Contains("android.permission.INTERNET", app.Permissions);
+        Assert.Equal("Root App (DroidOS)", app.DisplayName);
+        Assert.Single(_db.Apps.Local, a => a.RootAppId == app.Id && a.PackageName == "com.example.plugin");
+    }
+
+    // ---- Checksum-gated enrichment: skip the expensive APK work when unchanged ----
+
+    [Fact]
+    public async Task MatchingSourceDigestSkipsDownloadAndAnalysis()
+    {
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var digest = "sha256:" + Sha256(zip);
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length, digest),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+
+        Age(app);
+        var second = await enricher.EnrichAsync(app, T0);
+        Assert.Equal(EnrichOutcome.UpToDate, second.Outcome);
+        Assert.Equal("APK unchanged, analysis skipped", second.Detail);
+
+        // The release digest matched the recorded hash, so neither the download
+        // nor any of aapt2/signer/icon ran again.
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+        Assert.Equal(T0, app.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task MatchingComputedHashDownloadsAgainButSkipsAnalysis()
+    {
+        // No source digest: the file still has to be fetched, but its hash
+        // proves the derived data is unchanged.
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        var second = await enricher.EnrichAsync(app, T0);
+        Assert.Equal(EnrichOutcome.UpToDate, second.Outcome);
+        Assert.Equal("APK unchanged, analysis skipped", second.Detail);
+        Assert.Equal(2, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+    }
+
+    [Fact]
+    public async Task ChangedSourceDigestReanalyzes()
+    {
+        var firstZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var secondZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var payload = firstZip;
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson(
+                "v1.0", "app-release.apk", "https://cdn.example/app.apk", payload.Length,
+                "sha256:" + Sha256(payload)),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(payload),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        // Same URL, new bytes: the declared digest moved, so the file is worked on.
+        Age(app);
+        payload = secondZip;
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(2, downloads.Calls);
+        Assert.Equal(2, aapt2.Calls);
+        Assert.Equal(Sha256(secondZip), Primary(app).Sha256);
+    }
+
+    [Fact]
+    public async Task MatchingDigestButMissingIconFileStillAnalyzes()
+    {
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var digest = "sha256:" + Sha256(zip);
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length, digest),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(1, aapt2.Calls);
+
+        // A vanished icon file must be rebuilt even though the bytes are the same.
+        var iconPath = Path.Combine(_iconDir, $"{app.IconHash}.png");
+        File.Delete(iconPath);
+        Age(app);
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(2, aapt2.Calls);
+        Assert.True(File.Exists(iconPath));
+    }
+
+    [Fact]
+    public async Task NewerReleaseWithIdenticalBytesStillAnalyzes()
+    {
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var digest = "sha256:" + Sha256(zip);
+        var publishedAt = "2024-06-01T00:00:00Z";
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length, digest, publishedAt),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        // A newer release date means a version bump is possible even when the
+        // artifact bytes are identical, so the checksum must not short-circuit.
+        Age(app);
+        publishedAt = "2024-07-01T00:00:00Z";
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(2, aapt2.Calls);
+        Assert.Equal(DateTimeOffset.Parse("2024-07-01T00:00:00Z"), app.VersionUpdatedAt);
+    }
+
+    [Fact]
+    public async Task SmartspacerScansAllReleasesAndGroupsPackages()
+    {
+        var glanceApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(400, 400, Color.Blue)));
+        var weatherApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(640, 640, Color.Red)));
+        var github = new StubHandler(_ => JsonReleases(ReleasesJson(
+            ("glance-v1", "at-a-glance-release.apk", "https://cdn.example/glance.apk", glanceApk.Length),
+            ("weather-v2", "weather-release.apk", "https://cdn.example/weather.apk", weatherApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("weather", StringComparison.Ordinal)
+                ? weatherApk
+                : glanceApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == weatherApk.Length
+            ? TestAssets.CannedBadging(package: "com.kieronquinn.plugin.weather", label: "Weather")
+            : TestAssets.CannedBadging(package: "com.kieronquinn.plugin.glance", label: "At a Glance"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("smartspacer-plugins", "SmartspacerPlugins",
+            "https://github.com/KieronQuinn/SmartspacerPlugins");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+
+        // Each plugin lives in its own release, so scanning only the newest
+        // release would have missed all but one of them.
+        var rows = _db.Apps.Local.Where(a => a.Id == app.Id || a.RootAppId == app.Id).ToList();
+        Assert.Equal(
+            ["com.kieronquinn.plugin.glance", "com.kieronquinn.plugin.weather"],
+            rows.Select(a => a.PackageName!).OrderBy(p => p, StringComparer.Ordinal).ToArray());
+        Assert.All(rows, row => Assert.Equal($"{row.ApkLabel} (SmartspacerPlugins)", row.DisplayName));
+        Assert.Equal("https://cdn.example/glance.apk", Primary(rows.Single(a => a.ApkLabel == "At a Glance")).ApkUrl);
+        Assert.Equal("https://cdn.example/weather.apk", Primary(rows.Single(a => a.ApkLabel == "Weather")).ApkUrl);
+    }
+
+    [Fact]
+    public async Task MultiPackageAnalysisFailureKeepsExistingVariants()
+    {
+        var mainApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var extraApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var json = ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", mainApk.Length),
+            ("plugin-release.apk", "https://cdn.example/plugin.apk", extraApk.Length));
+        var github = new StubHandler(_ => JsonReleases(json, "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (path.Contains("broken", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            var bytes = path.Contains("plugin", StringComparison.Ordinal) ? extraApk : mainApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == extraApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.plugin", label: "Plugin")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("smart-toolbox", "Smart Toolbox", "https://github.com/example/smart-toolbox");
+
+        await enricher.EnrichAsync(app, T0);
+
+        // A later scan still lists both assets but only the first downloads;
+        // the failed sibling must not be treated as vanished.
+        Age(app);
+        json = ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", mainApk.Length),
+            ("plugin-release.apk", "https://cdn.example/broken-plugin.apk", extraApk.Length));
+        await enricher.EnrichAsync(app, T0);
+
+        Assert.Single(_db.Apps.Local, a => a.RootAppId == app.Id);
+    }
 }
 
 public sealed class BulkEnricherTests

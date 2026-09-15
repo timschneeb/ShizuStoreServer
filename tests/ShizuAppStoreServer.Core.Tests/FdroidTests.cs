@@ -31,6 +31,7 @@ public sealed class FdroidTests
               <sdkver>26</sdkver>
               <targetSdkVersion>34</targetSdkVersion>
               <sig>deadbeef</sig>
+              <nativecode>arm64-v8a</nativecode>
             </package>
             <package version="1.0" versioncode="10">
               <apkname>com.example.app_10.apk</apkname>
@@ -88,7 +89,10 @@ public sealed class FdroidTests
         using var xml = new MemoryStream(Encoding.UTF8.GetBytes(IndexXml));
         var index = FdroidIndexParser.Parse(xml);
 
-        var app = index["com.example.app"];
+        var packages = index["com.example.app"];
+        Assert.Equal(2, packages.Count);
+        Assert.Equal(10, packages[1].VersionCode);
+        var app = packages[0];
         Assert.Equal("com.example.app", app.PackageName);
         Assert.Equal(20, app.VersionCode);
         Assert.Equal("2.0", app.VersionName);
@@ -99,6 +103,7 @@ public sealed class FdroidTests
         Assert.Equal("com.example.app.png", app.IconFile);
         Assert.Equal("deadbeef", app.SigMd5);
         Assert.Equal("https://github.com/Example/App.git", app.SourceUrl);
+        Assert.Equal("arm64-v8a", app.Abi);
     }
 
     [Fact]
@@ -128,7 +133,7 @@ public sealed class FdroidTests
         using var stream = new MemoryStream(Encoding.UTF8.GetBytes(xml));
         var index = FdroidIndexParser.Parse(stream);
 
-        var app = index["com.terokarvinen.x54ask"];
+        var app = index["com.terokarvinen.x54ask"][0];
         Assert.Equal(1010200, app.VersionCode);
         Assert.Equal("1.1.2 (fork of Simpletask)", app.VersionName);
         Assert.Equal("ea783373dbdfedc0a3b22116a6ed4646", app.SigMd5);
@@ -141,7 +146,7 @@ public sealed class FdroidTests
         using var xml = new MemoryStream(Encoding.UTF8.GetBytes(IndexXml));
         var index = FdroidIndexParser.Parse(xml);
 
-        var minimal = index["com.example.minimal"];
+        var minimal = index["com.example.minimal"][0];
         Assert.Equal(1, minimal.VersionCode);
         Assert.Equal("1", minimal.VersionName);
         Assert.Null(minimal.Sha256);

@@ -305,6 +305,209 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task VariantsAreNeverSelectedForEnrichment()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        var variant = new App
+        {
+            Slug = "com-acme-plugin",
+            Name = tuner.Name,
+            Url = tuner.Url,
+            Listing = tuner.Listing,
+            Type = tuner.Type,
+            CategoryId = tuner.CategoryId,
+            AddedAt = T0,
+            UpdatedAt = T0,
+            RootAppId = tuner.Id,
+            PackageName = "com.acme.plugin",
+            LastCheckedAt = T0.AddHours(-100),
+        };
+        _db.Apps.Add(variant);
+        await _db.SaveChangesAsync();
+
+        // The variant looks stale, but variants only ride their root's pass.
+        var due = await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        Assert.True(due.Skipped);
+        Assert.DoesNotContain(_runner.Calls, c => c.AppId == variant.Id);
+
+        var callsBefore = _runner.Calls.Count;
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+        Assert.Equal(2, _runner.Calls.Count - callsBefore);
+        Assert.DoesNotContain(_runner.Calls.Skip(callsBefore), c => c.AppId == variant.Id);
+    }
+
+    [Fact]
+    public async Task ShizukuGateExcludesDirectApkWithoutPermissionAndAuditsIt()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+        Assert.Equal(ShizukuPermission.Reason, tuner.ExcludedReason);
+        Assert.Contains(_db.SyncIssues.ToList(), i => i.Rule == ShizukuPermission.Rule && i.Slug == "tuner");
+    }
+
+    [Fact]
+    public async Task ShizukuGateKeepsAllowedPackageAndSuppressesItsIssue()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        _db.PackageExceptions.Add(new PackageException
+        {
+            PackageName = "com.acme.tuner",
+            Action = PackageExceptionAction.Allow,
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal(Availability.DirectApk, tuner.Availability);
+        Assert.Null(tuner.ExcludedReason);
+        Assert.DoesNotContain(_db.SyncIssues.ToList(), i => i.Rule == ShizukuPermission.Rule);
+    }
+
+    [Fact]
+    public async Task ShizukuGateDontAuditExcludesWithoutAnIssue()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        _db.PackageExceptions.Add(new PackageException
+        {
+            PackageName = "com.acme.tuner",
+            Action = PackageExceptionAction.DontAudit,
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+        Assert.Equal(ShizukuPermission.Reason, tuner.ExcludedReason);
+        Assert.DoesNotContain(_db.SyncIssues.ToList(), i => i.Rule == ShizukuPermission.Rule);
+    }
+
+    [Fact]
+    public async Task ShizukuGateExcludeOverrideActsAsAllow()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        tuner.ExcludeOverride = true;
+        await _db.SaveChangesAsync();
+
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal(Availability.DirectApk, tuner.Availability);
+        Assert.Null(tuner.ExcludedReason);
+    }
+
+    [Fact]
+    public async Task ShizukuGateAutoHealsWhenAnApkDeclaresThePermission()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+
+        tuner.Permissions = ["moe.shizuku.manager.permission.API_V23"];
+        tuner.LastCheckedAt = null;
+        await _db.SaveChangesAsync();
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(32));
+
+        Assert.Equal(Availability.DirectApk, tuner.Availability);
+        Assert.Null(tuner.ExcludedReason);
+        Assert.DoesNotContain(_db.SyncIssues.ToList(), i => i.Rule == ShizukuPermission.Rule);
+    }
+
+    [Fact]
+    public async Task ShizukuGateNeverClobbersAnotherExclusionReason()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        tuner.Availability = Availability.Excluded;
+        tuner.ExcludedReason = "Play Store is the only source; listed for transparency.";
+        await _db.SaveChangesAsync();
+
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal("Play Store is the only source; listed for transparency.", tuner.ExcludedReason);
+        Assert.DoesNotContain(_db.SyncIssues.ToList(), i => i.Rule == ShizukuPermission.Rule);
+    }
+
+    [Fact]
+    public async Task ShizukuExcludedRowsStaySelectedForEnrichment()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+
+        var callsBefore = _runner.Calls.Count;
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(32));
+
+        Assert.Contains(_runner.Calls.Skip(callsBefore), c => c.AppId == tuner.Id);
+    }
+
+    /// <summary>Runs a first pass, then turns the tuner row into an analyzed DirectApk without Shizuku.</summary>
+    private async Task<App> SeedDirectApkAsync()
+    {
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        var app = _db.Apps.Single(a => a.Slug == "tuner");
+        app.Availability = Availability.DirectApk;
+        app.PackageName = "com.acme.tuner";
+        app.Permissions = ["android.permission.INTERNET"];
+        await _db.SaveChangesAsync();
+        return app;
+    }
+
+    [Fact]
     public async Task MissingListPathYieldsErrorRun()
     {
         if (!InitRepo())
@@ -344,7 +547,51 @@ public sealed class SyncServiceTests : IDisposable
         Assert.False(request.Processed); // retried next loop
     }
 
-    private SyncService Service(string? listPath = null, IReleasePoller? poll = null) => new(
+    [Fact]
+    public async Task RunLogRecordsOneLinePerAppAndTheIssuesSnapshot()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var log = new RecordingRunLog();
+        await Service(runLog: log).RunAsync("scheduled", fullRecheck: false, T0);
+
+        var begin = Assert.Single(log.Begins);
+        Assert.Equal("scheduled", begin.Trigger);
+        Assert.False(begin.FullRecheck);
+        Assert.Equal(2, begin.AppCount);
+        Assert.Equal(2, log.Apps.Count);
+        Assert.Contains(log.Apps, a => a.Slug == "tuner");
+        Assert.Contains(log.Apps, a => a.Result.Outcome == EnrichOutcome.Enriched);
+        var end = Assert.Single(log.Ends);
+        Assert.Equal(2, end.Enriched);
+        Assert.Equal(0, end.Failed);
+        var issues = Assert.Single(log.IssueSnapshots);
+        Assert.Equal(1, issues.RunId);
+    }
+
+    [Fact]
+    public async Task RunLogRecordsSkippedPass()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        var log = new RecordingRunLog();
+        await Service(runLog: log).RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
+
+        Assert.Empty(log.Begins);
+        Assert.Equal("nothing due", Assert.Single(log.Skips).Reason);
+    }
+
+    private SyncService Service(string? listPath = null, IReleasePoller? poll = null, IRunLog? runLog = null) => new(
         _db,
         new CatalogUpserter(_db),
         new GitHistoryService(),
@@ -352,7 +599,8 @@ public sealed class SyncServiceTests : IDisposable
         poll ?? new FakePoller(),
         new ThrowingRenderer(),
         new SyncOptions { ListPath = listPath ?? _repo },
-        new EnrichmentOptions { MaxParallelism = 1 });
+        new EnrichmentOptions { MaxParallelism = 1 },
+        runLog);
 
     [Fact]
     public async Task RunnerCrashSurfacesMessageInResult()
@@ -414,6 +662,58 @@ public sealed class SyncServiceTests : IDisposable
         public Task<byte[]?[]> RenderBatchAsync(
             string stagedResDir, IReadOnlyList<BatchRenderRequest> batch, int sizePx, CancellationToken ct = default) =>
             throw new InvalidOperationException("renderer must stay untouched");
+    }
+
+    /// <summary>Records run-log calls; the run log itself is file IO, tested separately.</summary>
+    private sealed class RecordingRunLog : IRunLog
+    {
+        private readonly object _gate = new();
+
+        public List<(string Trigger, bool FullRecheck, DateTimeOffset Now, int AppCount)> Begins { get; } = [];
+        public List<(string Slug, string? DisplayName, EnrichResult Result)> Apps { get; } = [];
+        public List<(string Trigger, DateTimeOffset Now, string Reason)> Skips { get; } = [];
+        public List<(DateTimeOffset Now, int Enriched, int UpToDate, int Failed)> Ends { get; } = [];
+        public List<(long? RunId, string? Head, IReadOnlyList<SyncIssue> Issues)> IssueSnapshots { get; } = [];
+
+        public void Begin(string trigger, bool fullRecheck, DateTimeOffset now, int appCount)
+        {
+            lock (_gate)
+            {
+                Begins.Add((trigger, fullRecheck, now, appCount));
+            }
+        }
+
+        public void App(string slug, string? displayName, EnrichResult result)
+        {
+            lock (_gate)
+            {
+                Apps.Add((slug, displayName, result));
+            }
+        }
+
+        public void Skip(string trigger, DateTimeOffset now, string reason)
+        {
+            lock (_gate)
+            {
+                Skips.Add((trigger, now, reason));
+            }
+        }
+
+        public void End(DateTimeOffset now, int enriched, int upToDate, int failed)
+        {
+            lock (_gate)
+            {
+                Ends.Add((now, enriched, upToDate, failed));
+            }
+        }
+
+        public void Issues(long? runId, string? head, IReadOnlyList<SyncIssue> issues)
+        {
+            lock (_gate)
+            {
+                IssueSnapshots.Add((runId, head, issues));
+            }
+        }
     }
 
     /// <summary>Stub runner: records calls and marks rows checked (serial; shares the pass DbContext).</summary>

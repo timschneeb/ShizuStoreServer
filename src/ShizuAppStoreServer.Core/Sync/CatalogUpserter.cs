@@ -63,10 +63,15 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         var syncedListings = docs.Select(d => MapListing(d.ListingName)).ToHashSet();
 
         var categories = await db.Categories.ToListAsync(ct);
-        var apps = await db.Apps.ToListAsync(ct);
+        var allApps = await db.Apps.ToListAsync(ct);
+        // Extra packages of a multi-app repo are enrich-created children; they
+        // share their root's URL and must never take part in list matching or
+        // staling. Only the root rows are the list's rows.
+        var apps = allApps.Where(a => a.RootAppId is null).ToList();
         var tombstones = await db.RemovedApps.ToListAsync(ct);
+        // Variants own slugs too, so root slug generation must avoid them.
         var usedSlugs = new HashSet<string>(
-            categories.Select(c => c.Slug).Concat(apps.Select(a => a.Slug)), StringComparer.Ordinal);
+            categories.Select(c => c.Slug).Concat(allApps.Select(a => a.Slug)), StringComparer.Ordinal);
 
         // Id → category for rows loaded from the DB (navigations aren't included).
         var categoriesById = categories.Where(c => c.Id != 0).ToDictionary(c => c.Id);

@@ -208,6 +208,25 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
+    public async Task DisplayNameIsServedWhenPresent()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.Add(Seeds.NewApp("toolbox", audio, name: "Toolbox",
+                displayName: "Example Plugin (Toolbox)"));
+        });
+
+        var page = await GetPageAsync("?q=toolbox");
+        Assert.Equal("Example Plugin (Toolbox)", page.Items[0].Name);
+
+        var response = await factory.NewClient().GetAsync("/v1/apps/toolbox");
+        var detail = (await response.Content.ReadFromJsonAsync<AppDetailDto>(Json))!;
+        Assert.Equal("Example Plugin (Toolbox)", detail.Name);
+    }
+
+    [Fact]
     public async Task DetailReturnsFullShape()
     {
         await factory.ResetAsync(db =>

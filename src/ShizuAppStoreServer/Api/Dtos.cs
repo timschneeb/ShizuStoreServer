@@ -52,6 +52,7 @@ public sealed record DownloadDto(
     string? SigSha256,
     string? SigMd5,
     int? MinSdk,
+    string? Abi,
     bool Primary);
 
 /// <summary>

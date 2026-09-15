@@ -34,7 +34,12 @@ internal static class TestAssets
         {
             foreach (var (name, content) in entries)
             {
-                using var s = zip.CreateEntry(name).Open();
+                // Fixed timestamp: ZipArchive defaults entries to "now", which
+                // would make the same logical APK hash differently per call and
+                // defeat the checksum short-circuits under test.
+                var entry = zip.CreateEntry(name);
+                entry.LastWriteTime = new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
+                using var s = entry.Open();
                 s.Write(content);
             }
         }
@@ -46,16 +51,21 @@ internal static class TestAssets
     public const string XxxhdpiIcon = "res/mipmap-xxxhdpi-v4/ic_launcher.png";
 
     public static string CannedBadging(string package = "com.example.app", string versionCode = "42",
-        string? versionName = "1.2.3", string? minSdk = "24", string? iconPath = null) => $"""
+        string? versionName = "1.2.3", string? minSdk = "24", string? iconPath = null, string? abi = null,
+        string label = "Example", IReadOnlyList<string>? features = null) => $"""
         package: name='{package}' versionCode='{versionCode}' versionName='{versionName}' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
         minSdkVersion:'{minSdk}'
         targetSdkVersion:'34'
         uses-permission: name='android.permission.INTERNET'
-        application-label:'Example'
+        application-label:'{label}'
         application-icon-160:'{iconPath ?? MdpiIcon}'
         application-icon-640:'{iconPath ?? XxxhdpiIcon}'
-        application: label='Example' icon='{MdpiIcon}'
+        application: label='{label}' icon='{MdpiIcon}'
         launchable-activity: name='{package}.MainActivity'
+        feature-group: label=''
+          uses-feature-not-required: name='android.hardware.camera'
+        {(features is null ? "" : string.Join("\n", features.Select(f => $"  uses-feature: name='{f}'")))}
+        {(abi is null ? "" : $"native-code: '{abi}'")}
         """;
 }
 
@@ -100,6 +110,96 @@ public sealed class BadgingParserTests
         Assert.Null(info.VersionName);
         Assert.Null(info.MinSdk);
         Assert.Empty(info.Icons);
+    }
+
+    [Fact]
+    public void ParsesSingleNativeAbi()
+    {
+        var info = BadgingParser.Parse("package: name='com.x' versionCode='1'\nnative-code: 'arm64-v8a'\n");
+        Assert.Equal("arm64-v8a", info.Abi);
+    }
+
+    [Fact]
+    public void TreatsMultipleNativeAbisAsUniversal()
+    {
+        var info = BadgingParser.Parse("package: name='com.x' versionCode='1'\nnative-code: 'armeabi-v7a' 'x86'\n");
+        Assert.Null(info.Abi);
+    }
+
+    [Fact]
+    public void ParsesApplicationLabel()
+    {
+        var info = BadgingParser.Parse(TestAssets.CannedBadging());
+        Assert.Equal("Example", info.ApplicationLabel);
+    }
+
+    [Fact]
+    public void PrefersUnqualifiedApplicationLabelOverLocalized()
+    {
+        const string output = """
+            package: name='com.x' versionCode='1'
+            application-label:'Plain Name'
+            application-label-de:'Lokalisierter Name'
+            """;
+
+        Assert.Equal("Plain Name", BadgingParser.Parse(output).ApplicationLabel);
+    }
+
+    [Fact]
+    public void FallsBackToFirstLocalizedApplicationLabel()
+    {
+        const string output = """
+            package: name='com.x' versionCode='1'
+            application-label-en:'English Name'
+            application-label-fr:'Nom Francais'
+            """;
+
+        Assert.Equal("English Name", BadgingParser.Parse(output).ApplicationLabel);
+    }
+
+    [Fact]
+    public void ApplicationLabelIsNullWhenMissing() =>
+        Assert.Null(BadgingParser.Parse("package: name='com.x' versionCode='1'\n").ApplicationLabel);
+
+    [Fact]
+    public void ParsesRequiredFeaturesAndIgnoresNotRequired()
+    {
+        var info = BadgingParser.Parse(TestAssets.CannedBadging(
+            features: ["android.software.leanback", "android.hardware.type.watch"]));
+
+        Assert.Equal(["android.software.leanback", "android.hardware.type.watch"], info.Features);
+        Assert.True(info.IsTvFormFactor);
+        Assert.True(info.IsWearFormFactor);
+    }
+
+    [Fact]
+    public void ParsesVerbatimIndentedFeatureGroup()
+    {
+        // Byte shape of aapt2 output: features live inside an indented
+        // feature-group, and uses-implied-feature must not be mistaken for one.
+        const string output = """
+            package: name='com.x' versionCode='1'
+            feature-group: label=''
+              uses-feature: name='android.hardware.type.watch'
+              uses-feature: name='android.hardware.faketouch'
+              uses-implied-feature: name='android.hardware.faketouch' reason='default feature for all apps'
+            """;
+
+        var info = BadgingParser.Parse(output);
+
+        Assert.Equal(["android.hardware.type.watch", "android.hardware.faketouch"], info.Features);
+        Assert.True(info.IsWearFormFactor);
+        Assert.False(info.IsTvFormFactor);
+    }
+
+    [Fact]
+    public void NoRequiredFeaturesMeansPhoneFormFactor()
+    {
+        var info = BadgingParser.Parse(TestAssets.CannedBadging());
+
+        Assert.Empty(info.Features);
+        Assert.False(info.IsTvFormFactor);
+        Assert.False(info.IsWearFormFactor);
     }
 
     [Fact]

@@ -34,8 +34,10 @@ public sealed class EnrichmentRunner(IServiceScopeFactory scopes) : IEnrichmentR
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Infrastructure failure outside the enricher
-            var message = $"Enrichment host error: {ex.Message}";
+            // Infrastructure failure outside the enricher. Flatten the inner
+            // causes: the outer DbUpdateException message hides the real
+            // Postgres detail (constraint, column) needed to diagnose it.
+            var message = $"Enrichment host error: {Describe(ex)}";
             try
             {
                 if (app is not null)
@@ -52,6 +54,20 @@ public sealed class EnrichmentRunner(IServiceScopeFactory scopes) : IEnrichmentR
 
             return new EnrichResult(EnrichOutcome.Failed, message);
         }
+    }
+
+    private static string Describe(Exception ex)
+    {
+        var messages = new List<string>();
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (!messages.Contains(current.Message))
+            {
+                messages.Add(current.Message);
+            }
+        }
+
+        return string.Join(" -> ", messages);
     }
 
     public async Task<PrepareIconResult> PrepareIconRefreshAsync(

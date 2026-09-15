@@ -34,23 +34,27 @@ public sealed record FdroidPackageInfo(
     /// <summary>Signing-cert MD5 from <c>&lt;sig&gt;</c> (matches apksigner MD5).</summary>
     string? SigMd5,
     /// <summary>Upstream source repo URL from the application-level <c>&lt;source&gt;</c>.</summary>
-    string? SourceUrl = null);
+    string? SourceUrl = null,
+    /// <summary>Native ABI from <c>&lt;nativecode&gt;</c>; null for fat/universal builds.</summary>
+    string? Abi = null);
 
 /// <summary>
-/// Streaming parser for F-Droid repo <c>index.xml</c> (v1 format): takes the
-/// first <c>&lt;package&gt;</c> per <c>&lt;application&gt;</c> (the newest).
-/// Real indexes carry <c>version</c>/<c>versioncode</c> as child elements
-/// (package attributes are accepted as a fallback), plus <c>apkname</c>,
-/// <c>hash</c>, <c>size</c>, <c>sdkver</c> (min SDK), <c>sig</c> (signing-cert
-/// MD5) and the top-level <c>&lt;icon&gt;</c>/<c>&lt;source&gt;</c>.
-/// Unknown elements are ignored, so <c>&lt;localized&gt;</c> blocks and future
-/// fields don't break parsing.
+/// Streaming parser for F-Droid repo <c>index.xml</c> (v1 format): collects
+/// every <c>&lt;package&gt;</c> per <c>&lt;application&gt;</c> in document
+/// order (newest versionCode first). A release can ship one APK per
+/// architecture, so all siblings are kept and the caller decides which to
+/// analyze. Real indexes carry <c>version</c>/<c>versioncode</c> as child
+/// elements (package attributes are accepted as a fallback), plus
+/// <c>apkname</c>, <c>hash</c>, <c>size</c>, <c>sdkver</c> (min SDK),
+/// <c>sig</c> (signing-cert MD5), <c>nativecode</c> and the top-level
+/// <c>&lt;icon&gt;</c>/<c>&lt;source&gt;</c>. Unknown elements are ignored, so
+/// <c>&lt;localized&gt;</c> blocks and future fields don't break parsing.
 /// </summary>
 public static class FdroidIndexParser
 {
-    public static IReadOnlyDictionary<string, FdroidPackageInfo> Parse(Stream xml)
+    public static IReadOnlyDictionary<string, IReadOnlyList<FdroidPackageInfo>> Parse(Stream xml)
     {
-        var result = new Dictionary<string, FdroidPackageInfo>(StringComparer.Ordinal);
+        var result = new Dictionary<string, IReadOnlyList<FdroidPackageInfo>>(StringComparer.Ordinal);
         using var reader = XmlReader.Create(xml, new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Prohibit,
@@ -68,9 +72,9 @@ public static class FdroidIndexParser
                     continue;
                 }
 
-                if (ReadApplication(reader, id) is { } info)
+                if (ReadApplication(reader, id) is { Count: > 0 } packages)
                 {
-                    result[id] = info;
+                    result[id] = packages;
                 }
             }
         }
@@ -78,12 +82,12 @@ public static class FdroidIndexParser
         return result;
     }
 
-    private static FdroidPackageInfo? ReadApplication(XmlReader reader, string id)
+    private static List<FdroidPackageInfo> ReadApplication(XmlReader reader, string id)
     {
         var depth = reader.Depth;
         string? icon = null;
         string? source = null;
-        FdroidPackageInfo? package = null;
+        var packages = new List<FdroidPackageInfo>();
         while (reader.Read())
         {
             if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == depth)
@@ -101,23 +105,30 @@ public static class FdroidIndexParser
                 {
                     source = ReadLeafText(reader);
                 }
-                else if (reader.Name == "package" && package is null)
+                else if (reader.Name == "package" && ReadPackage(reader, id) is { } package)
                 {
-                    package = ReadPackage(reader, id);
+                    packages.Add(package);
                 }
             }
         }
 
-        if (package is null)
+        // The application-level icon/source are shared by every package, and
+        // may appear before or after the packages.
+        if (string.IsNullOrWhiteSpace(icon) && string.IsNullOrWhiteSpace(source))
         {
-            return null;
+            return packages;
         }
 
-        return package with
+        for (var i = 0; i < packages.Count; i++)
         {
-            IconFile = string.IsNullOrWhiteSpace(icon) ? package.IconFile : icon,
-            SourceUrl = string.IsNullOrWhiteSpace(source) ? package.SourceUrl : source,
-        };
+            packages[i] = packages[i] with
+            {
+                IconFile = string.IsNullOrWhiteSpace(icon) ? packages[i].IconFile : icon,
+                SourceUrl = string.IsNullOrWhiteSpace(source) ? packages[i].SourceUrl : source,
+            };
+        }
+
+        return packages;
     }
 
     private static FdroidPackageInfo? ReadPackage(XmlReader reader, string id)
@@ -137,6 +148,7 @@ public static class FdroidIndexParser
         long? size = null;
         int? minSdk = null;
         string? sigMd5 = null;
+        string? abi = null;
         while (reader.Read())
         {
             if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == depth)
@@ -181,6 +193,9 @@ public static class FdroidIndexParser
                     case "sig":
                         sigMd5 ??= CertFingerprint.Normalize(ReadLeafText(reader));
                         break;
+                    case "nativecode":
+                        abi ??= NullIfBlank(ReadLeafText(reader));
+                        break;
                 }
             }
         }
@@ -199,7 +214,8 @@ public static class FdroidIndexParser
             size,
             minSdk,
             IconFile: null,
-            SigMd5: sigMd5);
+            SigMd5: sigMd5,
+            Abi: abi);
     }
 
     private static string? NullIfBlank(string? value) =>

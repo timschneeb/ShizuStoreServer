@@ -1,8 +1,15 @@
 <!-- Sync Impact Report (scratch; remove before commit):
-  - Version change: 1.0.0 → 1.1.0 (new principle; MINOR per semver policy)
-  - Modified principles: none renamed (I–V text narrowed only to remove em-dashes, non-semantic)
-  - Added sections: VI. Comment and Language Economy
+  - Version change: 1.1.0 → 1.2.0 (principle text narrowed; MINOR per semver policy)
+  - Modified principles: V. Simplicity and Explicit Boundaries (removed the
+    "Prefer flat, explicit schema and code over abstraction" clause so shared
+    source abstractions are permitted; degradation clause retained verbatim)
+  - Added sections: none
   - Removed sections: none
+  - Rationale: enrichment repeated the same release/asset/ABI pipeline per
+    source. A shared source abstraction removes that duplication without
+    changing the boundaries the rest of the principle protects
+    (constructor-injected interfaces, no ASP.NET in `Core`, visible
+    degradation).
   - Follow-up TODOs: none. Note: pre-existing em-dashes in code/docs outside this file
     are out of scope for this command and remain for a separate cleanup pass.
 -->
@@ -56,10 +63,9 @@ client-side and documented where the provider forces them.
 ### V. Simplicity and Explicit Boundaries
 `Core` holds all domain logic with no ASP.NET references; the host
 boundary is crossed only through constructor-injected interfaces
-(runners, release clients, providers). Prefer flat, explicit schema
-and code over abstraction; degradation is best-effort and visible
-(null fingerprints, index-only records, `last_error` + backoff),
-never silent corruption. Hard requirements fail fast at startup
+(runners, release clients, providers). Degradation is best-effort and
+visible (null fingerprints, index-only records, `last_error` +
+backoff), never silent corruption. Hard requirements fail fast at startup
 with a message naming the missing piece. No Play scraping,
 whatsoever. No AGPL-licensed code or files enter the repo.
 
@@ -115,4 +121,4 @@ recorded in HANDOFF decisions, not silently adopted. Runtime
 guidance lives in `docs/SPEC.md`; this document governs, it does
 not re-specify.
 
-**Version**: 1.1.0 | **Ratified**: 2026-09-12 | **Last Amended**: 2026-09-12
+**Version**: 1.2.0 | **Ratified**: 2026-09-12 | **Last Amended**: 2026-09-15

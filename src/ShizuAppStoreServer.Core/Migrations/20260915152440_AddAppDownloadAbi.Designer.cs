@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260915152440_AddAppDownloadAbi")]
+    partial class AddAppDownloadAbi
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -34,11 +37,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Property<DateTimeOffset>("AddedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("added_at");
-
-                    b.Property<string>("ApkLabel")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("apk_label");
 
                     b.Property<string>("AuthorKey")
                         .HasMaxLength(200)
@@ -69,11 +67,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("description");
-
-                    b.Property<string>("DisplayName")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("display_name");
 
                     b.Property<long?>("DownloadTotal")
                         .HasColumnType("bigint")
@@ -178,10 +171,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("requires_root");
 
-                    b.Property<long?>("RootAppId")
-                        .HasColumnType("bigint")
-                        .HasColumnName("root_app_id");
-
                     b.Property<string>("Slug")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -244,8 +233,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.HasIndex("CategoryId");
 
                     b.HasIndex("ParentId");
-
-                    b.HasIndex("RootAppId");
 
                     b.HasIndex("Slug")
                         .IsUnique();
@@ -460,59 +447,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.ToTable("config_flags", (string)null);
                 });
 
-            modelBuilder.Entity("ShizuAppStoreServer.Core.Data.PackageException", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
-                        .HasColumnName("id");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<string>("Action")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("character varying(16)")
-                        .HasColumnName("action");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at");
-
-                    b.Property<string>("Note")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("note");
-
-                    b.Property<string>("PackageName")
-                        .IsRequired()
-                        .HasMaxLength(256)
-                        .HasColumnType("character varying(256)")
-                        .HasColumnName("package_name");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("PackageName")
-                        .IsUnique();
-
-                    b.ToTable("package_exceptions", (string)null);
-
-                    b.HasData(
-                        new
-                        {
-                            Id = 1L,
-                            Action = "Allow",
-                            CreatedAt = new DateTimeOffset(new DateTime(2026, 9, 15, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
-                            Note = "Uses the rish shell gateway instead of the Shizuku permission.",
-                            PackageName = "kr.scin.rishmcp",
-                            UpdatedAt = new DateTimeOffset(new DateTime(2026, 9, 15, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0))
-                        });
-                });
-
             modelBuilder.Entity("ShizuAppStoreServer.Core.Data.RemovedApp", b =>
                 {
                     b.Property<long>("Id")
@@ -718,16 +652,9 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasForeignKey("ParentId")
                         .OnDelete(DeleteBehavior.Restrict);
 
-                    b.HasOne("ShizuAppStoreServer.Core.Data.App", "Root")
-                        .WithMany("Variants")
-                        .HasForeignKey("RootAppId")
-                        .OnDelete(DeleteBehavior.Cascade);
-
                     b.Navigation("Category");
 
                     b.Navigation("Parent");
-
-                    b.Navigation("Root");
                 });
 
             modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppDownload", b =>
@@ -785,8 +712,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Navigation("Children");
 
                     b.Navigation("Downloads");
-
-                    b.Navigation("Variants");
 
                     b.Navigation("Versions");
                 });

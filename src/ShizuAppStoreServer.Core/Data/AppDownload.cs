@@ -1,11 +1,12 @@
 namespace ShizuAppStoreServer.Core.Data;
 
 /// <summary>
-/// One installable build candidate of an app, keyed by signing identity:
-/// at most one row per signature, always the per-signature newest version.
-/// Clients pick the row whose fingerprint matches the locally installed
-/// build; <see cref="IsPrimary"/> marks the default candidate for fresh
-/// installs (forge builds preferred over F-Droid rebuilds).
+/// One installable build candidate of an app, keyed by signing identity and
+/// ABI: at most one row per (signature, ABI), always that pair's newest
+/// version. Clients pick the row whose fingerprint matches the locally
+/// installed build and whose ABI the device supports; <see cref="IsPrimary"/>
+/// marks the default candidate for fresh installs (forge builds preferred
+/// over F-Droid rebuilds).
 /// </summary>
 public sealed class AppDownload
 {
@@ -37,6 +38,12 @@ public sealed class AppDownload
     public string? SigMd5 { get; set; }
 
     public int? MinSdk { get; set; }
+
+    /// <summary>
+    /// Native ABI the build targets, parsed from the APK's <c>native-code</c>
+    /// line; null means a fat/universal build that runs on any device.
+    /// </summary>
+    public string? Abi { get; set; }
 
     /// <summary>
     /// Dedupe key of the signing identity: lowercased first SHA-256

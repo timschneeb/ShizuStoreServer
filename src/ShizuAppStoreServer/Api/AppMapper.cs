@@ -8,12 +8,15 @@ public static class AppMapper
     /// <summary>Default candidate for clients without an installed-signature match.</summary>
     public static AppDownload? Primary(App a) => a.Downloads.FirstOrDefault(d => d.IsPrimary);
 
+    /// <summary>APK-derived display name when known, else the list name.</summary>
+    public static string DisplayName(App a) => a.DisplayName ?? a.Name;
+
     public static AppSummaryDto ToSummary(App a)
     {
         var primary = Primary(a);
         return new(
             a.Slug,
-            a.Name,
+            DisplayName(a),
             a.Description,
             a.License,
             ApiEnums.ToApiString(a.Listing),
@@ -55,7 +58,7 @@ public static class AppMapper
         var primary = Primary(a);
         return new(
             a.Slug,
-            a.Name,
+            DisplayName(a),
             a.Description,
             a.License,
             ApiEnums.ToApiString(a.Listing),
@@ -120,6 +123,7 @@ public static class AppMapper
         d.SigSha256,
         d.SigMd5,
         d.MinSdk,
+        d.Abi,
         d.IsPrimary);
 
     /// <summary>Root→leaf <c>(slug, name)</c> chain for a category (max depth 2 in real data).</summary>

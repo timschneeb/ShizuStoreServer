@@ -69,3 +69,13 @@ public enum Availability
     /// <summary>Play-sole-source entry; never sent to clients.</summary>
     Excluded,
 }
+
+/// <summary>Operator action for a package in the Shizuku-permission gate.</summary>
+public enum PackageExceptionAction
+{
+    /// <summary>Keep the row available even without a declared Shizuku permission, and emit no issue.</summary>
+    Allow,
+
+    /// <summary>Exclude the row like the default, but emit no issue for it.</summary>
+    DontAudit,
+}

@@ -16,6 +16,19 @@ public sealed class App
 
     public required string Name { get; set; }
 
+    /// <summary>
+    /// Name clients should show, derived from the served APK label when known.
+    /// Falls back to <see cref="Name"/> (the awesome-list name). Set on the
+    /// root row even when the row has no variants.
+    /// </summary>
+    public string? DisplayName { get; set; }
+
+    /// <summary>
+    /// Raw <c>application-label</c> from the served APK, kept separately so
+    /// the variant suffix can be recomputed when the group size changes.
+    /// </summary>
+    public string? ApkLabel { get; set; }
+
     public string Description { get; set; } = string.Empty;
 
     public string? License { get; set; }
@@ -34,6 +47,15 @@ public sealed class App
     public long? ParentId { get; set; }
     public App? Parent { get; set; }
     public List<App> Children { get; } = [];
+
+    /// <summary>
+    /// Set on rows that represent an extra Android package published by the
+    /// same source repo as the list entry. Points at the list row, which is
+    /// the only row the catalog upserter matches and stale-checks.
+    /// </summary>
+    public long? RootAppId { get; set; }
+    public App? Root { get; set; }
+    public List<App> Variants { get; } = [];
 
     /// <summary>Primary link from the list entry.</summary>
     public required string Url { get; set; }

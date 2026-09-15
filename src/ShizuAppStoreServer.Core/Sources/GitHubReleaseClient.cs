@@ -5,23 +5,6 @@ using System.Text.Json.Serialization;
 
 namespace ShizuAppStoreServer.Core.Sources;
 
-/// <summary>One release asset from the GitHub Releases API.</summary>
-public sealed record GitHubAsset(
-    string Name, string BrowserDownloadUrl, long Size, string? ContentType, long DownloadCount = 0);
-
-/// <summary>
-/// Latest release of a repo. <c>Etag</c> is the response ETag, stored
-/// on the app row for conditional requests on the next pass.
-/// <c>TotalDownloads</c> sums <c>download_count</c> over every non-draft
-/// release's assets (newest first is not required for the sum).
-/// </summary>
-public sealed record GitHubRelease(
-    string TagName,
-    DateTimeOffset? PublishedAt,
-    string? Etag,
-    IReadOnlyList<GitHubAsset> Assets,
-    long TotalDownloads = 0);
-
 /// <summary>Non-success response from the GitHub API (4xx/5xx, e.g. 404 unknown repo, 403 rate limit).</summary>
 public sealed class GitHubApiException(HttpStatusCode status, string message) : Exception(message)
 {
@@ -37,17 +20,8 @@ public sealed record GitHubRepoStats(
     string? OwnerLogin,
     string? OwnerUrl);
 
-public interface IGitHubReleaseClient
+public interface IGitHubReleaseClient : IAppSource
 {
-    /// <returns>
-    /// Newest non-draft release, or null when the server answered
-    /// <c>304 Not Modified</c> for <paramref name="etag"/>.
-    /// Prereleases count: many Shizuku apps ship only prereleases.
-    /// </returns>
-    /// <exception cref="GitHubApiException">Repo has no published release yet (404 on the list endpoint never happens; empty list), unknown repo, rate limit, …</exception>
-    Task<GitHubRelease?> GetLatestReleaseAsync(
-        string owner, string repo, string? etag, CancellationToken ct = default);
-
     /// <summary>
     /// Repo metadata via <c>GET /repos/{owner}/{repo}</c>. Null on any
     /// failure; popularity and developer details are best-effort and never
@@ -65,6 +39,15 @@ public interface IGitHubReleaseClient
     /// </summary>
     Task<string?> GetReadmeMarkdownAsync(string owner, string repo, CancellationToken ct = default) =>
         Task.FromResult<string?>(null);
+
+    /// <summary>
+    /// Every non-draft release, newest first, each with its own assets. Used
+    /// only for repos that ship several distinct apps, one release per app.
+    /// Empty by default so test doubles that only serve the latest release
+    /// keep compiling.
+    /// </summary>
+    Task<IReadOnlyList<SourceRelease>> GetAllReleasesAsync(SourceTarget target, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<SourceRelease>>([]);
 }
 
 /// <summary>
@@ -102,9 +85,10 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         }
     }
 
-    public async Task<GitHubRelease?> GetLatestReleaseAsync(
-        string owner, string repo, string? etag, CancellationToken ct = default)
+    public async Task<SourceRelease?> GetLatestReleaseAsync(
+        SourceTarget target, string? etag, CancellationToken ct = default)
     {
+        var (owner, repo) = target.SplitRepoKey();
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
             $"https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
@@ -140,13 +124,65 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         var totalDownloads = releases
             .Where(r => !r.Draft)
             .Sum(r => r.Assets.Sum(a => a.DownloadCount));
-        return new GitHubRelease(
+        var assets = release.Assets
+            .Select(a => new SourceAsset(
+                a.Name, a.BrowserDownloadUrl, Size: a.Size,
+                Sha256: NormalizeDigest(a.Digest), ReleasedAt: release.PublishedAt))
+            .ToList();
+        return new SourceRelease(
             release.TagName,
             release.PublishedAt,
             responseEtag,
-            release.Assets.Select(a => new GitHubAsset(
-                a.Name, a.BrowserDownloadUrl, a.Size, a.ContentType, a.DownloadCount)).ToList(),
+            ApkAssetSelector.MarkPrimary(assets),
             totalDownloads);
+    }
+
+    public async Task<IReadOnlyList<SourceRelease>> GetAllReleasesAsync(
+        SourceTarget target, CancellationToken ct = default)
+    {
+        var (owner, repo) = target.SplitRepoKey();
+        var result = new List<SourceRelease>();
+        const int pageSize = 100;
+        // Repos with one release per app stay well under this; the cap stops a
+        // pathological history from paging forever.
+        const int maxPages = 5;
+
+        for (var page = 1; page <= maxPages; page++)
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"https://api.github.com/repos/{owner}/{repo}/releases?per_page={pageSize}&page={page}");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await ReadBodySafe(response, ct);
+                throw new GitHubApiException(response.StatusCode,
+                    $"GitHub API {(int)response.StatusCode} for {owner}/{repo}: {body}");
+            }
+
+            var releases = await JsonSerializer.DeserializeAsync<List<ReleaseDto>>(
+                await response.Content.ReadAsStreamAsync(ct), Json, ct)
+                ?? [];
+
+            foreach (var release in releases.Where(r => !r.Draft))
+            {
+                var assets = release.Assets
+                    .Select(a => new SourceAsset(
+                        a.Name, a.BrowserDownloadUrl, Size: a.Size,
+                        Sha256: NormalizeDigest(a.Digest), ReleasedAt: release.PublishedAt))
+                    .ToList();
+                result.Add(new SourceRelease(release.TagName, release.PublishedAt, null, assets));
+            }
+
+            if (releases.Count < pageSize)
+            {
+                break;
+            }
+        }
+
+        return result;
     }
 
     public async Task<GitHubRepoStats?> GetRepoStatsAsync(string owner, string repo, CancellationToken ct = default)
@@ -237,6 +273,29 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         }
     }
 
+    /// <summary>
+    /// GitHub reports an asset checksum as <c>sha256:&lt;hex&gt;</c> (null for
+    /// assets uploaded before the field existed). Normalize to bare lowercase
+    /// hex so it compares directly with <c>AppDownload.Sha256</c>; any other
+    /// algorithm is ignored.
+    /// </summary>
+    private static string? NormalizeDigest(string? digest)
+    {
+        if (string.IsNullOrWhiteSpace(digest))
+        {
+            return null;
+        }
+
+        const string prefix = "sha256:";
+        if (!digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var hex = digest[prefix.Length..].Trim();
+        return hex.Length == 0 ? null : hex.ToLowerInvariant();
+    }
+
     private static string? ReadString(JsonElement element, string name) =>
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
@@ -289,5 +348,8 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
 
         [JsonPropertyName("download_count")]
         public long DownloadCount { get; set; }
+
+        [JsonPropertyName("digest")]
+        public string? Digest { get; set; }
     }
 }

@@ -7,6 +7,7 @@ using System.Xml;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Parsing;
 using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Enrichment;
@@ -27,7 +28,14 @@ public enum EnrichOutcome
     SkippedFresh,
 }
 
-public sealed record EnrichResult(EnrichOutcome Outcome, string? Error);
+public sealed record EnrichResult(EnrichOutcome Outcome, string? Error)
+{
+    /// <summary>
+    /// Optional human-readable reason for a non-action outcome, e.g. why a run
+    /// skipped an app or only skipped APK analysis. Written to the run log.
+    /// </summary>
+    public string? Detail { get; init; }
+}
 
 /// <summary>
 /// Phase-A outcome of a batched icon refresh: either final already
@@ -89,6 +97,11 @@ public sealed class AppEnricher(
     private const string HlbmergeGitCodeOwner = "bigmolihuan";
     private const string HlbmergeGitCodeRepo = "hlbmerge_flutter";
 
+    // One repo, several distinct apps, each in its own GitHub release; the
+    // newest release only carries one of them, so scan them all.
+    private const string SmartspacerOwner = "KieronQuinn";
+    private const string SmartspacerRepo = "SmartspacerPlugins";
+
     // READMEs are unbounded; the full-description screen only needs a sane
     // excerpt, so cap what we persist and send.
     private const int MaxFullDescriptionChars = 200_000;
@@ -113,7 +126,7 @@ public sealed class AppEnricher(
             && app.LastCheckedAt is { } checkedAt
             && checkedAt + (app.LastError is null ? options.SuccessRecheckInterval : options.FailedRecheckInterval) > now)
         {
-            return new EnrichResult(EnrichOutcome.SkippedFresh, null);
+            return new EnrichResult(EnrichOutcome.SkippedFresh, null) { Detail = "within recheck window" };
         }
 
         try
@@ -278,20 +291,27 @@ public sealed class AppEnricher(
     private async Task<EnrichResult> EnrichFromGitHubAsync(
         App app, string owner, string repo, DateTimeOffset now, CancellationToken ct)
     {
+        var target = new SourceTarget(SourceKind.GitHub, $"{owner}/{repo}");
+
+        if (owner == SmartspacerOwner && repo == SmartspacerRepo)
+        {
+            return await EnrichFromAllReleasesAsync(app, owner, repo, target, now, ct);
+        }
+
         // A failing release list must not gate repo metadata: rate limits or
         // missing releases would otherwise also blank stars and developer.
-        GitHubRelease? latest;
+        SourceRelease? latest;
         try
         {
-            latest = await github.GetLatestReleaseAsync(owner, repo, app.EnrichEtag, ct);
+            latest = await github.GetLatestReleaseAsync(target, app.EnrichEtag, ct);
         }
         catch (GitHubApiException ex)
         {
             await RefreshGitHubStatsAsync(app, owner, repo, ct);
-            return await HandleGitHubFailureAsync(ex);
+            return await HandleGitHubFailureAsync(app, ex, now, ct);
         }
 
-        GitHubRelease release;
+        SourceRelease release;
         try
         {
             await RefreshGitHubStatsAsync(app, owner, repo, ct);
@@ -315,7 +335,7 @@ public sealed class AppEnricher(
                 {
                     try
                     {
-                        latest = await github.GetLatestReleaseAsync(owner, repo, null, ct);
+                        latest = await github.GetLatestReleaseAsync(target, null, ct);
                     }
                     catch (GitHubApiException)
                     {
@@ -326,7 +346,7 @@ public sealed class AppEnricher(
                 if (latest is null)
                 {
                     app.LastCheckedAt = now;
-                    return new EnrichResult(EnrichOutcome.UpToDate, null);
+                    return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "release feed not modified" };
                 }
             }
 
@@ -335,52 +355,104 @@ public sealed class AppEnricher(
         }
         catch (GitHubApiException ex)
         {
-            return await HandleGitHubFailureAsync(ex);
+            return await HandleGitHubFailureAsync(app, ex, now, ct);
         }
 
-        async Task<EnrichResult> HandleGitHubFailureAsync(GitHubApiException ex)
+        if (await EnrichFromReleaseAsync(app, SourceKind.GitHub, release, urlIdentifiesVersion: false, now, ct) is { } enriched)
         {
-            // No releases / unknown repo: the app may be F-Droid-only. A
-            // transient API error (rate limit, 5xx) must not lock the source.
-            if (ex.Status == HttpStatusCode.NotFound
-                && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
-            {
-                return rescued;
-            }
-
-            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-            {
-                return play;
-            }
-
-            return Fail(app, now, $"GitHub: {ex.Message}");
+            return enriched;
         }
 
-        var asset = ApkAssetSelector.PickApk(release.Assets);
-        if (asset is null)
+        if (await TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
         {
-            // Some projects attach only a zip with the APK inside.
-            var zip = ApkAssetSelector.PickZip(release.Assets, a => a.Name, a => a.Size);
-            if (zip is not null
-                && await TryEnrichFromZipAsync(app, zip.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct, releasedAt: release.PublishedAt) is { } zipped)
-            {
-                return zipped;
-            }
-
-            if (await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
-            {
-                return rescued;
-            }
-
-            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-            {
-                return play;
-            }
-
-            return Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
+            return fdroidFallback;
         }
 
-        return await EnrichFromApkAsync(app, asset.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct, release.PublishedAt);
+        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
+        {
+            return playFallback;
+        }
+
+        return Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
+    }
+
+    /// <summary>
+    /// A release-list failure must not lock the source: an app with no
+    /// releases may still be F-Droid-only, and a transient API error (rate
+    /// limit, 5xx) is not a content change.
+    /// </summary>
+    private async Task<EnrichResult> HandleGitHubFailureAsync(
+        App app, GitHubApiException ex, DateTimeOffset now, CancellationToken ct)
+    {
+        if (ex.Status == HttpStatusCode.NotFound
+            && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
+        {
+            return rescued;
+        }
+
+        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
+        {
+            return play;
+        }
+
+        return Fail(app, now, $"GitHub: {ex.Message}");
+    }
+
+    /// <summary>
+    /// SmartspacerPlugins publishes each plugin as its own GitHub release, so
+    /// the newest release only carries one of the packages. Scan every release
+    /// and let the shared pipeline group the assets by package.
+    /// </summary>
+    private async Task<EnrichResult> EnrichFromAllReleasesAsync(
+        App app, string owner, string repo, SourceTarget target, DateTimeOffset now, CancellationToken ct)
+    {
+        await RefreshGitHubStatsAsync(app, owner, repo, ct);
+
+        // Raw markdown, not rendered HTML: the client renders markdown.
+        if (NeedsReadmeRefresh(app.FullDescription)
+            && await github.GetReadmeMarkdownAsync(owner, repo, ct) is { Length: > 0 } readme)
+        {
+            app.FullDescription = readme.Length > MaxFullDescriptionChars
+                ? readme[..MaxFullDescriptionChars]
+                : readme;
+        }
+
+        IReadOnlyList<SourceRelease> releases;
+        try
+        {
+            releases = await github.GetAllReleasesAsync(target, ct);
+        }
+        catch (GitHubApiException ex)
+        {
+            return await HandleGitHubFailureAsync(app, ex, now, ct);
+        }
+
+        if (releases.Count == 0)
+        {
+            app.LastCheckedAt = now;
+            return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "no releases" };
+        }
+
+        app.DownloadTotal = releases.Sum(r => r.TotalDownloads);
+        var assets = releases.SelectMany(r => r.Assets).ToList();
+        if (await EnrichFromAssetsAsync(
+                app, SourceKind.GitHub, assets, null, releaseReleasedAt: null,
+                urlIdentifiesVersion: false, alwaysAnalyzePrimary: false, now, ct) is { } enriched)
+        {
+            return enriched;
+        }
+
+        if (await TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
+        {
+            return fdroidFallback;
+        }
+
+        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
+        {
+            return playFallback;
+        }
+
+        return Fail(app, now, $"GitHub repo {owner}/{repo} has no .apk asset.");
     }
 
     /// <summary>
@@ -391,15 +463,16 @@ public sealed class AppEnricher(
     private async Task<EnrichResult> EnrichFromGitCodeAsync(
         App app, DateTimeOffset now, CancellationToken ct)
     {
-        GitCodeRelease release;
+        SourceRelease release;
         try
         {
-            var latest = await gitcode!.GetLatestReleaseAsync(
-                HlbmergeGitCodeOwner, HlbmergeGitCodeRepo, ct: ct);
+            var target = new SourceTarget(
+                SourceKind.Other, $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo}");
+            var latest = await gitcode!.GetLatestReleaseAsync(target, app.EnrichEtag, ct);
             if (latest is null)
             {
                 app.LastCheckedAt = now;
-                return new EnrichResult(EnrichOutcome.UpToDate, null);
+                return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "release feed not modified" };
             }
 
             release = latest;
@@ -409,23 +482,13 @@ public sealed class AppEnricher(
             return Fail(app, now, $"GitCode: {ex.Message}");
         }
 
-        var asset = ApkAssetSelector.PickApk(release.Assets, a => a.Name, _ => 0L);
-        if (asset is null)
+        if (await EnrichFromReleaseAsync(app, SourceKind.Other, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
         {
-            return Fail(app, now, $"GitCode release {release.TagName} of "
-                + $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo} has no .apk asset.");
+            return enriched;
         }
 
-        var current = await PrimaryDownloadAsync(app, ct);
-        if (current is not null && asset.Url == current.ApkUrl && current.VersionCode is not null
-            && !NeedsPermissionHeal(app, current))
-        {
-            app.EnrichEtag = release.Etag;
-            app.LastCheckedAt = now;
-            return new EnrichResult(EnrichOutcome.UpToDate, null);
-        }
-
-        return await EnrichFromApkAsync(app, asset.Url, release.Etag, SourceKind.Other, now, ct);
+        return Fail(app, now, $"GitCode release {release.TagName} of "
+            + $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo} has no .apk asset.");
     }
 
     private async Task<EnrichResult> EnrichFromGitLabAsync(
@@ -433,10 +496,12 @@ public sealed class AppEnricher(
     {
         ApplyGitLabAuthor(app, projectPath);
 
-        GitLabRelease? latest;
+        var target = new SourceTarget(SourceKind.GitLab, projectPath);
+
+        SourceRelease? latest;
         try
         {
-            latest = await gitlab.GetLatestReleaseAsync(projectPath, app.EnrichEtag, ct);
+            latest = await gitlab.GetLatestReleaseAsync(target, app.EnrichEtag, ct);
         }
         catch (GitLabApiException ex)
         {
@@ -455,7 +520,7 @@ public sealed class AppEnricher(
             return Fail(app, now, $"GitLab: {ex.Message}");
         }
 
-        GitLabRelease release;
+        SourceRelease release;
         try
         {
             await RefreshGitLabStatsAsync(app, projectPath, ct);
@@ -479,7 +544,7 @@ public sealed class AppEnricher(
                 {
                     try
                     {
-                        latest = await gitlab.GetLatestReleaseAsync(projectPath, null, ct);
+                        latest = await gitlab.GetLatestReleaseAsync(target, null, ct);
                     }
                     catch (GitLabApiException)
                     {
@@ -490,7 +555,7 @@ public sealed class AppEnricher(
                 if (latest is null)
                 {
                     app.LastCheckedAt = now;
-                    return new EnrichResult(EnrichOutcome.UpToDate, null);
+                    return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "release feed not modified" };
                 }
             }
 
@@ -512,33 +577,667 @@ public sealed class AppEnricher(
             return Fail(app, now, $"GitLab: {ex.Message}");
         }
 
-        var link = ApkAssetSelector.PickApk(release.Assets, l => l.Name, _ => 0L, l => l.Url);
-        if (link is null)
+        if (await EnrichFromReleaseAsync(app, SourceKind.GitLab, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
         {
-            if (await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
-            {
-                return rescued;
-            }
-
-            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-            {
-                return play;
-            }
-
-            return Fail(app, now, $"GitLab release {release.TagName} of {projectPath} has no .apk asset link.");
+            return enriched;
         }
 
-        // GitLab largely ignores If-None-Match: same recorded asset URL means nothing new.
-        var gitlabCurrent = await PrimaryDownloadAsync(app, ct);
-        if (gitlabCurrent is not null && link.Url == gitlabCurrent.ApkUrl && gitlabCurrent.VersionCode is not null
-            && !NeedsPermissionHeal(app, gitlabCurrent))
+        if (await TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
         {
-            app.EnrichEtag = release.Etag;
-            app.LastCheckedAt = now;
+            return fdroidFallback;
+        }
+
+        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
+        {
+            return playFallback;
+        }
+
+        return Fail(app, now, $"GitLab release {release.TagName} of {projectPath} has no .apk asset link.");
+    }
+
+    /// <summary>
+    /// Shared release pipeline for every forge source: analyze the release's
+    /// primary asset plus every sibling APK, group the results by Android
+    /// package (one repo can ship several distinct apps) and apply each
+    /// analysis to the row that owns its package. Returns null when the
+    /// release carries no usable .apk or .zip so the caller can run fallbacks.
+    /// </summary>
+    private async Task<EnrichResult?> EnrichFromReleaseAsync(
+        App app, SourceKind kind, SourceRelease release, bool urlIdentifiesVersion,
+        DateTimeOffset now, CancellationToken ct) =>
+        await EnrichFromAssetsAsync(
+            app, kind, release.Assets, release.Etag, release.ReleasedAt, urlIdentifiesVersion,
+            alwaysAnalyzePrimary: true, now, ct);
+
+    /// <summary>
+    /// Shared forge/index asset pipeline. Artifacts whose checksum matches the
+    /// recorded one are skipped before the expensive tools run: the source
+    /// digest avoids the download too, and when the source exposes none the
+    /// file is hashed straight after download. A newer release, or a row whose
+    /// package/icon is missing (or whose icon file vanished), always analyzes
+    /// once so a version bump or a partial record still heals.
+    /// </summary>
+    private async Task<EnrichResult?> EnrichFromAssetsAsync(
+        App app, SourceKind kind, IReadOnlyList<SourceAsset> assets, string? etag,
+        DateTimeOffset? releaseReleasedAt, bool urlIdentifiesVersion, bool alwaysAnalyzePrimary,
+        DateTimeOffset now, CancellationToken ct)
+    {
+        var downloads = await LoadGroupDownloadsAsync(app, ct);
+        var ownerById = new Dictionary<long, App> { [app.Id] = app };
+        foreach (var variant in await LoadVariantGroupAsync(app, ct))
+        {
+            ownerById[variant.Id] = variant;
+        }
+
+        var storedByUrl = new Dictionary<string, AppDownload>(StringComparer.Ordinal);
+        foreach (var download in downloads)
+        {
+            storedByUrl[download.ApkUrl] = download;
+        }
+
+        var known = storedByUrl.Keys.ToHashSet(StringComparer.Ordinal);
+
+        // The row that owns a recorded artifact, so a skipped file stamps the
+        // right row (the list row or one of its variants).
+        App? OwnerOf(AppDownload download) =>
+            download.App
+            ?? (download.AppId != 0 && ownerById.TryGetValue(download.AppId, out var owner) ? owner : null);
+
+        // Complete = the recorded derived data is all present and the recorded
+        // release is not older than the one being scanned, so nothing would be
+        // recomputed by analyzing identical bytes.
+        bool Complete(App row, AppDownload download, DateTimeOffset? releasedAt) =>
+            download.Sha256 is not null
+            && row.PackageName is not null
+            && row.IconHash is not null
+            && IconFileExists(row.IconHash)
+            && !NeedsPermissionHeal(row, download)
+            && !ReleasedNewerThan(releasedAt, row);
+
+        void Stamp(App row)
+        {
+            row.LastCheckedAt = now;
+            row.LastError = null;
+            if (etag is not null)
+            {
+                app.EnrichEtag = etag;
+            }
+        }
+
+        // Source-declared digest match: skip the download entirely.
+        bool TrySkipByChecksum(SourceAsset candidate, DateTimeOffset? releasedAt)
+        {
+            if (candidate.Sha256 is not { Length: > 0 }
+                || !storedByUrl.TryGetValue(candidate.Url, out var download)
+                || OwnerOf(download) is not { } owner
+                || !Complete(owner, download, releasedAt)
+                || !HashMatches(download.Sha256, candidate.Sha256))
+            {
+                return false;
+            }
+
+            Stamp(owner);
+            return true;
+        }
+
+        string? ExpectedFor(SourceAsset candidate, DateTimeOffset? releasedAt) =>
+            storedByUrl.TryGetValue(candidate.Url, out var download)
+            && OwnerOf(download) is { } owner
+            && Complete(owner, download, releasedAt)
+                ? download.Sha256
+                : null;
+
+        void StampUrl(string url, DateTimeOffset? releasedAt)
+        {
+            if (storedByUrl.TryGetValue(url, out var download) && OwnerOf(download) is { } owner)
+            {
+                Stamp(owner);
+            }
+            else if (etag is not null)
+            {
+                app.EnrichEtag = etag;
+            }
+        }
+
+        var asset = assets.FirstOrDefault(a => a.Primary) ?? ApkAssetSelector.PickApk(assets);
+        if (asset is null)
+        {
+            // Some projects attach only a zip with the APK inside.
+            var zip = ApkAssetSelector.PickZip(assets);
+            if (zip is null)
+            {
+                return null;
+            }
+
+            var zipReleasedAt = zip.ReleasedAt ?? releaseReleasedAt;
+            if (TrySkipByChecksum(zip, zipReleasedAt))
+            {
+                return new EnrichResult(EnrichOutcome.UpToDate, null)
+                {
+                    Detail = "APK unchanged, analysis skipped",
+                };
+            }
+
+            // Best effort: a broken or APK-less archive must not fail the app
+            // (null lets the caller run its fallbacks), matching the forge
+            // sibling handling below.
+            var zipResult = await DownloadAndAnalyzeZipAsync(
+                zip.Url, etag, kind, zipReleasedAt, ExpectedFor(zip, zipReleasedAt), ct);
+            if (zipResult.Unchanged)
+            {
+                StampUrl(zip.Url, zipReleasedAt);
+                return new EnrichResult(EnrichOutcome.UpToDate, null)
+                {
+                    Detail = "APK unchanged, analysis skipped",
+                };
+            }
+
+            return zipResult.Analysis is null
+                ? null
+                : await ApplyAnalysesAsync(app, kind, [zipResult.Analysis], etag, null, permitRemoval: false, now, ct);
+        }
+
+        // Sources that ignore If-None-Match (GitLab, GitCode) treat the
+        // recorded asset URL as the change signal, but only when every sibling
+        // is already recorded: a newly added architecture must not be skipped.
+        if (urlIdentifiesVersion)
+        {
+            var current = await PrimaryDownloadAsync(app, ct);
+            if (current is not null && asset.Url == current.ApkUrl
+                && current.VersionCode is not null && !NeedsPermissionHeal(app, current))
+            {
+                if (assets.All(a => known.Contains(a.Url) || !IsApkAsset(a)))
+                {
+                    app.EnrichEtag = etag;
+                    app.LastCheckedAt = now;
+                    return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "asset URL unchanged" };
+                }
+            }
+        }
+
+        var analyses = new List<ArtifactAnalysis>();
+        var failed = 0;
+
+        // A pass whose artifacts were all unchanged is reported as a skip in
+        // the run log; otherwise the outcome stays Enriched.
+        var unchanged = false;
+
+        if (alwaysAnalyzePrimary || !known.Contains(asset.Url))
+        {
+            var releasedAt = asset.ReleasedAt ?? releaseReleasedAt;
+            if (TrySkipByChecksum(asset, releasedAt))
+            {
+                unchanged = true;
+            }
+            else
+            {
+                var result = await DownloadAndAnalyzeApkAsync(
+                    asset.Url, etag, kind, releasedAt, ExpectedFor(asset, releasedAt), ct);
+                if (result.Unchanged)
+                {
+                    StampUrl(asset.Url, releasedAt);
+                    unchanged = true;
+                }
+                else if (result.Analysis is null)
+                {
+                    return Fail(app, now, result.Error ?? "APK analysis failed.");
+                }
+                else
+                {
+                    analyses.Add(result.Analysis);
+                }
+            }
+        }
+
+        // Some releases ship one APK per architecture and no universal build.
+        // Record every sibling as its own candidate so the client can pick the
+        // device's ABI; recorded URLs are skipped unless their declared
+        // checksum changed, so repeat passes stay cheap.
+        foreach (var extra in assets)
+        {
+            if (extra.Primary || !IsApkAsset(extra) || extra.Url == asset.Url)
+            {
+                continue;
+            }
+
+            var releasedAt = extra.ReleasedAt ?? releaseReleasedAt;
+            if (known.Contains(extra.Url))
+            {
+                var reuploaded = extra.Sha256 is { Length: > 0 }
+                    && storedByUrl.TryGetValue(extra.Url, out var recorded)
+                    && !HashMatches(recorded.Sha256, extra.Sha256);
+                if (!reuploaded)
+                {
+                    continue;
+                }
+            }
+
+            if (!extra.Analyze)
+            {
+                await UpsertIndexAssetAsync(app, kind, extra, now, ct);
+                continue;
+            }
+
+            if (TrySkipByChecksum(extra, releasedAt))
+            {
+                unchanged = true;
+                continue;
+            }
+
+            var result = await DownloadAndAnalyzeApkAsync(
+                extra.Url, null, kind, releasedAt, ExpectedFor(extra, releasedAt), ct);
+            if (result.Unchanged)
+            {
+                StampUrl(extra.Url, releasedAt);
+                unchanged = true;
+                continue;
+            }
+
+            if (result.Analysis is null)
+            {
+                failed++;
+                continue;
+            }
+
+            analyses.Add(result.Analysis);
+        }
+
+        // Run the finalizer even when nothing was analyzed: the scanned asset
+        // set still drives variant pruning and display names, so a release
+        // that dropped a package prunes its row on the checksum-skip path too.
+        var applied = await ApplyAnalysesAsync(
+            app, kind, analyses, etag, assets, permitRemoval: failed == 0, now, ct);
+        app.LastCheckedAt = now;
+        app.LastError = null;
+        if (unchanged && applied.Outcome == EnrichOutcome.UpToDate)
+        {
+            return applied with { Detail = "APK unchanged, analysis skipped" };
+        }
+
+        return applied;
+    }
+
+    /// <summary>
+    /// Applies one analyzed artifact to a target row: records the signature
+    /// keyed download, optionally recomputes the primary, then writes the
+    /// shared presentation fields only when this analysis still represents
+    /// the target's primary (same artifact or same signing identity/version)
+    /// so an older sibling can never overwrite a newer primary.
+    /// </summary>
+    private async Task<EnrichResult> ApplyAnalysisAsync(
+        App target, ArtifactAnalysis analysis, bool asRepresentative, bool recomputePrimary, bool setEtag,
+        DateTimeOffset now, CancellationToken ct, bool recordDownload = true)
+    {
+        // A metadata heal re-analyzes a recorded primary to refill presentation
+        // fields; recording it again could rewrite the row's version and flip
+        // the primary on a later recompute, so the heal leaves rows untouched.
+        if (recordDownload)
+        {
+            await UpsertDownloadAsync(target, new DownloadCandidate(
+                analysis.LockSource, null, analysis.ArtifactUrl, analysis.ArchiveEntry,
+                analysis.Badging.VersionCode, analysis.Badging.VersionName,
+                analysis.FileSize, analysis.FileSha256, analysis.SigSha256, analysis.SigMd5,
+                analysis.Badging.MinSdk, analysis.Badging.Abi), now, ct);
+        }
+
+        if (recomputePrimary)
+        {
+            await RecomputePrimaryAsync(target, ct);
+        }
+
+        // A completed analysis stamps the check even when it changes nothing
+        // user-visible: otherwise an app whose analyzed build never becomes
+        // primary stays due forever and is re-downloaded every pass.
+        target.LastCheckedAt = now;
+        target.LastError = null;
+
+        if (!asRepresentative)
+        {
+            return new EnrichResult(EnrichOutcome.Enriched, null);
+        }
+
+        var primary = await PrimaryDownloadAsync(target, ct);
+        var sameArtifact = primary is not null && primary.ApkUrl == analysis.ArtifactUrl;
+        var sameVariant = primary is not null
+            && primary.SigKey == ComputeSigKey(analysis.SigSha256, analysis.SigMd5, analysis.ArtifactUrl)
+            && analysis.Badging.VersionCode is not null
+            && primary.VersionCode == analysis.Badging.VersionCode;
+        if (!sameArtifact && !sameVariant)
+        {
             return new EnrichResult(EnrichOutcome.UpToDate, null);
         }
 
-        return await EnrichFromApkAsync(app, link.Url, release.Etag, SourceKind.GitLab, now, ct, release.ReleasedAt);
+        var oldIcon = target.IconHash;
+        target.PackageName = analysis.Badging.PackageName;
+        target.ApkLabel = analysis.Badging.ApplicationLabel;
+        target.Permissions = analysis.Badging.Permissions.ToList();
+        if (analysis.Icon is not null)
+        {
+            await WriteIconFileAsync(analysis.Icon, ct);
+            target.IconHash = analysis.Icon.Sha256;
+            target.IconAdaptive = analysis.Icon.Adaptive;
+        }
+
+        target.Availability = Availability.DirectApk;
+        if (setEtag && analysis.Etag is not null)
+        {
+            target.EnrichEtag = analysis.Etag;
+        }
+
+        target.ExcludedReason = null;
+
+        if (recordDownload)
+        {
+            await AddVersionRowAsync(target, analysis.Badging.VersionCode, analysis.Badging.VersionName, analysis.ArtifactUrl, now, ct);
+        }
+
+        // Only a real release date moves the app up "recently updated";
+        // metadata refreshes never touch this, and sources without dates stay
+        // unknown.
+        if (analysis.ReleasedAt is not null &&
+            (target.VersionUpdatedAt is null || analysis.ReleasedAt > target.VersionUpdatedAt))
+        {
+            target.VersionUpdatedAt = analysis.ReleasedAt;
+        }
+
+        if (analysis.Icon is not null)
+        {
+            await DeleteIconIfOrphanedAsync(target, oldIcon, ct);
+        }
+
+        return new EnrichResult(EnrichOutcome.Enriched, null);
+    }
+
+    /// <summary>
+    /// Groups the analyses by package, resolves the owning row for each (the
+    /// list row or one of its variants), applies them and then finalizes the
+    /// display names. A package no longer present in the scanned release is
+    /// dropped, but only when every asset analyzed cleanly.
+    /// </summary>
+    private async Task<EnrichResult> ApplyAnalysesAsync(
+        App root, SourceKind kind, IReadOnlyList<ArtifactAnalysis> analyses, string? etag,
+        IReadOnlyList<SourceAsset>? scannedAssets, bool permitRemoval, DateTimeOffset now, CancellationToken ct)
+    {
+        var result = new EnrichResult(EnrichOutcome.UpToDate, null);
+        var presented = new List<App>();
+        // A repo can ship the same package for phone, TV and watch (for example
+        // universal-installer's app/tv/wearos release APKs); the phone build is
+        // the one a phone store should offer, so a package that also ships a
+        // phone build drops its TV and watch flavors.
+        foreach (var analysis in PreferPhoneAnalyses(analyses))
+        {
+            var target = await ResolveTargetForPackageAsync(root, kind, analysis.Badging.PackageName, now, ct);
+            var applied = await ApplyAnalysisAsync(
+                target, analysis, asRepresentative: true, recomputePrimary: true, setEtag: true, now, ct);
+            if (applied.Outcome == EnrichOutcome.Enriched)
+            {
+                result = applied;
+                presented.Add(target);
+            }
+        }
+
+        // Removal runs first so display names reflect the packages that survive
+        // this pass (a repo that drops its second app goes back to a bare label).
+        var variants = await LoadVariantGroupAsync(root, ct);
+        if (permitRemoval && scannedAssets is { Count: > 0 })
+        {
+            await RemoveVanishedVariantsAsync(root, variants, scannedAssets, ct);
+            variants = await LoadVariantGroupAsync(root, ct);
+        }
+
+        var members = new List<App> { root };
+        members.AddRange(variants);
+        await HealRootPresentationAsync(root, kind, analyses, now, ct);
+        var multi = members.Count > 1;
+        foreach (var member in members)
+        {
+            member.DisplayName = BuildDisplayName(member, root, multi);
+        }
+
+        // Letter-avatars need the final display name, so they are generated
+        // after the names settle rather than during the analysis.
+        foreach (var target in presented)
+        {
+            if (target.IconHash is null)
+            {
+                var avatar = LetterAvatarGenerator.Generate(target.DisplayName ?? target.Name);
+                await WriteIconFileAsync(avatar, ct);
+                target.IconHash = avatar.Sha256;
+                target.IconAdaptive = false;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Drops TV and Wear OS artifacts when the same package also ships a phone
+    /// build. A package that only ships a TV or watch build is kept: then that
+    /// form factor is the app. Grouped by package so a multi-app repo's phone
+    /// variant never suppresses another package's watch-only variant.
+    /// </summary>
+    private static List<ArtifactAnalysis> PreferPhoneAnalyses(IReadOnlyList<ArtifactAnalysis> analyses)
+    {
+        var kept = new List<ArtifactAnalysis>(analyses.Count);
+        foreach (var group in analyses.GroupBy(a => a.Badging.PackageName ?? string.Empty, StringComparer.Ordinal))
+        {
+            var hasPhone = group.Any(a => !a.Badging.IsTvFormFactor && !a.Badging.IsWearFormFactor);
+            foreach (var analysis in group)
+            {
+                if (hasPhone && (analysis.Badging.IsTvFormFactor || analysis.Badging.IsWearFormFactor))
+                {
+                    continue;
+                }
+
+                kept.Add(analysis);
+            }
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// Fills the list row's presentation fields when the scanned release no
+    /// longer carries its primary artifact. The primary guard deliberately
+    /// skips those fields for non-representative assets, which otherwise
+    /// leaves a row whose package moved to an older release without a label
+    /// or permissions. The recorded primary is analyzed once; after that the
+    /// row is complete and the heal is a no-op.
+    /// </summary>
+    private async Task HealRootPresentationAsync(
+        App root, SourceKind kind, IReadOnlyList<ArtifactAnalysis> analyses,
+        DateTimeOffset now, CancellationToken ct)
+    {
+        if (root.ApkLabel is not null)
+        {
+            return;
+        }
+
+        var primary = await PrimaryDownloadAsync(root, ct);
+        if (primary is null || analyses.Any(a => a.ArtifactUrl == primary.ApkUrl))
+        {
+            return;
+        }
+
+        var result = await DownloadAndAnalyzeApkAsync(primary.ApkUrl, null, kind, null, null, ct);
+        if (result.Analysis is null)
+        {
+            return;
+        }
+
+        // recomputePrimary false and recordDownload false: a metadata heal must
+        // never reorder or rewrite candidates.
+        await ApplyAnalysisAsync(
+            root, result.Analysis, asRepresentative: true, recomputePrimary: false, setEtag: false,
+            now, ct, recordDownload: false);
+    }
+
+    private static string BuildDisplayName(App member, App root, bool multi)
+    {
+        var label = string.IsNullOrWhiteSpace(member.ApkLabel) ? member.Name : member.ApkLabel;
+        // The parenthetical only disambiguates; drop it when the APK label is
+        // already the list name (naming a row "DroidOS (DroidOS)" helps nobody).
+        return multi && !string.Equals(label, root.Name, StringComparison.OrdinalIgnoreCase)
+            ? $"{label} ({root.Name})"
+            : label;
+    }
+
+    /// <summary>
+    /// The list row keeps its package; a new package becomes a variant row
+    /// that mirrors the list entry's metadata and points back at it.
+    /// </summary>
+    private async Task<App> ResolveTargetForPackageAsync(
+        App root, SourceKind kind, string packageName, DateTimeOffset now, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(packageName)
+            || string.IsNullOrEmpty(root.PackageName)
+            || root.PackageName == packageName)
+        {
+            return root;
+        }
+
+        var variants = await LoadVariantGroupAsync(root, ct);
+        var existing = variants.FirstOrDefault(v => v.PackageName == packageName);
+        if (existing is not null)
+        {
+            return existing;
+        }
+
+        var variant = new App
+        {
+            Slug = await UniqueVariantSlugAsync(root, packageName, ct),
+            Name = root.Name,
+            DisplayName = root.Name,
+            Url = root.Url,
+            Description = root.Description,
+            License = root.License,
+            Listing = root.Listing,
+            Type = root.Type,
+            SourceUrl = root.SourceUrl,
+            SourceKind = kind,
+            CategoryId = root.CategoryId,
+            ParentId = root.ParentId,
+            AuthorName = root.AuthorName,
+            AuthorUrl = root.AuthorUrl,
+            AuthorKey = root.AuthorKey,
+            Stars = root.Stars,
+            DownloadTotal = root.DownloadTotal,
+            FullDescription = root.FullDescription,
+            AddedAt = now,
+            UpdatedAt = now,
+            Root = root,
+            PackageName = packageName,
+        };
+
+        // Add before wiring downloads: EF assigns a distinct temporary key so
+        // each new variant's downloads stay separated in the change tracker.
+        db.Apps.Add(variant);
+        return variant;
+    }
+
+    private async Task<List<App>> LoadVariantGroupAsync(App root, CancellationToken ct)
+    {
+        // The query still sees a variant marked for removal (the DELETE has not
+        // been flushed), so filter deleted rows out of the group.
+        var rows = (await db.Apps.Where(a => a.RootAppId == root.Id).ToListAsync(ct))
+            .Where(a => db.Entry(a).State != EntityState.Deleted)
+            .ToList();
+        foreach (var local in db.Apps.Local)
+        {
+            if (local.RootAppId == root.Id
+                && db.Entry(local).State != EntityState.Deleted
+                && !rows.Contains(local))
+            {
+                rows.Add(local);
+            }
+        }
+
+        return rows;
+    }
+
+    private async Task<List<AppDownload>> LoadGroupDownloadsAsync(App root, CancellationToken ct)
+    {
+        var rows = await LoadDownloadsAsync(root, ct);
+        foreach (var variant in await LoadVariantGroupAsync(root, ct))
+        {
+            rows.AddRange(await LoadDownloadsAsync(variant, ct));
+        }
+
+        return rows;
+    }
+
+    private async Task<string> UniqueVariantSlugAsync(App root, string packageName, CancellationToken ct)
+    {
+        var baseSlug = Slug.Slugify(packageName);
+        var used = new HashSet<string>(await db.Apps.Select(a => a.Slug).ToListAsync(ct), StringComparer.Ordinal);
+        foreach (var local in db.Apps.Local)
+        {
+            used.Add(local.Slug);
+        }
+
+        var candidate = baseSlug;
+        var i = 2;
+        while (!used.Add(candidate))
+        {
+            candidate = $"{baseSlug}-{i++}";
+        }
+
+        return candidate.Length > 200 ? candidate[..200] : candidate;
+    }
+
+    private async Task RemoveVanishedVariantsAsync(
+        App root, IReadOnlyList<App> variants, IReadOnlyList<SourceAsset> scannedAssets, CancellationToken ct)
+    {
+        var scannedUrls = scannedAssets
+            .Where(IsApkAsset)
+            .Select(a => a.Url)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var variant in variants)
+        {
+            var downloads = await LoadDownloadsAsync(variant, ct);
+            if (downloads.Count == 0 || downloads.Any(d => scannedUrls.Contains(d.ApkUrl)))
+            {
+                continue;
+            }
+
+            log?.LogInformation(
+                "Removing variant {Slug}: package {Package} is no longer published by {Root}.",
+                variant.Slug, variant.PackageName, root.Slug);
+            var icon = variant.IconHash;
+            variant.IconHash = null;
+            if (icon is not null)
+            {
+                await DeleteIconIfOrphanedAsync(variant, icon, ct);
+            }
+
+            db.Apps.Remove(variant);
+        }
+    }
+
+    private static bool IsApkAsset(SourceAsset asset) =>
+        asset.Name.EndsWith(".apk", StringComparison.OrdinalIgnoreCase)
+        || asset.Url.EndsWith(".apk", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Records an index-only (not downloaded) candidate, used for the
+    /// per-architecture siblings of an F-Droid package.
+    /// </summary>
+    private async Task UpsertIndexAssetAsync(
+        App app, SourceKind kind, SourceAsset asset, DateTimeOffset now, CancellationToken ct)
+    {
+        await UpsertDownloadAsync(app, new DownloadCandidate(
+            kind,
+            asset.Name,
+            asset.Url,
+            ArchiveEntry: null,
+            VersionCode: asset.VersionCode,
+            VersionName: asset.VersionName,
+            SizeBytes: asset.Size,
+            Sha256: asset.Sha256,
+            SigSha256: null,
+            SigMd5: asset.SigMd5,
+            MinSdk: null,
+            Abi: asset.Abi), now, ct);
     }
 
     /// <summary>
@@ -706,7 +1405,8 @@ public sealed class AppEnricher(
         string? Sha256,
         string? SigSha256,
         string? SigMd5,
-        int? MinSdk);
+        int? MinSdk,
+        string? Abi = null);
 
     /// <summary>
     /// Signing identity of a candidate: the first SHA-256 token, else the
@@ -721,6 +1421,42 @@ public sealed class AppEnricher(
 
     private static string? FirstFingerprint(string? value) =>
         value?.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.ToLowerInvariant();
+
+    /// <summary>
+    /// Compares two artifact checksums, tolerating a <c>algo:</c> prefix and
+    /// case so a source digest and the recorded bare hex compare equal.
+    /// </summary>
+    private static bool HashMatches(string? left, string? right)
+    {
+        var a = NormalizeHash(left);
+        var b = NormalizeHash(right);
+        return a is not null && b is not null && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? NormalizeHash(string? hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash))
+        {
+            return null;
+        }
+
+        var value = hash.Trim();
+        var colon = value.IndexOf(':');
+        if (colon >= 0)
+        {
+            value = value[(colon + 1)..].Trim();
+        }
+
+        return value.Length == 0 ? null : value.ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// A release newer than the one already recorded means a version bump may
+    /// still be pending even when the artifact bytes match, so the checksum
+    /// short-circuits must not fire.
+    /// </summary>
+    private static bool ReleasedNewerThan(DateTimeOffset? releasedAt, App row) =>
+        releasedAt is not null && (row.VersionUpdatedAt is null || releasedAt > row.VersionUpdatedAt);
 
     // IzzyOnDroid hosts the developers' own upstream builds (same signing key
     // as forge releases); only f-droid.org rebuilds use a different key.
@@ -739,10 +1475,14 @@ public sealed class AppEnricher(
 
     private async Task<List<AppDownload>> LoadDownloadsAsync(App app, CancellationToken ct)
     {
-        var rows = await db.Downloads.Where(d => d.AppId == app.Id).ToListAsync(ct);
+        // A variant created in this pass has no database key yet, so its
+        // pending rows are matched by navigation rather than by AppId.
+        var rows = app.Id == 0
+            ? []
+            : await db.Downloads.Where(d => d.AppId == app.Id).ToListAsync(ct);
         foreach (var local in db.Downloads.Local)
         {
-            if (local.AppId == app.Id && !rows.Contains(local))
+            if (!rows.Contains(local) && IsForApp(local, app))
             {
                 rows.Add(local);
             }
@@ -750,6 +1490,9 @@ public sealed class AppEnricher(
 
         return rows;
     }
+
+    private static bool IsForApp(AppDownload row, App app) =>
+        app.Id != 0 ? row.AppId == app.Id : ReferenceEquals(row.App, app);
 
     private async Task<AppDownload?> PrimaryDownloadAsync(App app, CancellationToken ct) =>
         (await LoadDownloadsAsync(app, ct)).FirstOrDefault(d => d.IsPrimary);
@@ -768,11 +1511,13 @@ public sealed class AppEnricher(
         var sigKey = ComputeSigKey(candidate.SigSha256, candidate.SigMd5, candidate.ApkUrl);
         var md5 = FirstFingerprint(candidate.SigMd5);
         var rows = await LoadDownloadsAsync(app, ct);
-        var row = rows.FirstOrDefault(d => d.SigKey == sigKey)
-            ?? (md5 is null ? null : rows.FirstOrDefault(d => FirstFingerprint(d.SigMd5) == md5));
+        // ABI is part of the key: one release can ship several per-arch APKs
+        // that share a signing identity.
+        var row = rows.FirstOrDefault(d => d.SigKey == sigKey && d.Abi == candidate.Abi)
+            ?? (md5 is null ? null : rows.FirstOrDefault(d => FirstFingerprint(d.SigMd5) == md5 && d.Abi == candidate.Abi));
         if (row is null)
         {
-            row = new AppDownload { AppId = app.Id, SigKey = sigKey, ApkUrl = candidate.ApkUrl };
+            row = new AppDownload { App = app, SigKey = sigKey, ApkUrl = candidate.ApkUrl, Abi = candidate.Abi };
             db.Downloads.Add(row);
         }
         else
@@ -798,6 +1543,7 @@ public sealed class AppEnricher(
         row.SigSha256 = candidate.SigSha256;
         row.SigMd5 = candidate.SigMd5;
         row.MinSdk = candidate.MinSdk;
+        row.Abi = candidate.Abi;
         row.ResolvedAt = now;
     }
 
@@ -837,8 +1583,27 @@ public sealed class AppEnricher(
             return av > bv ? a : b;
         }
 
+        var aAbi = AbiOrder(a.Abi);
+        var bAbi = AbiOrder(b.Abi);
+        if (aAbi != bAbi)
+        {
+            return aAbi < bAbi ? a : b;
+        }
+
         return SourceOrder(a.Source) <= SourceOrder(b.Source) ? a : b;
     }
+
+    // Universal builds run anywhere, so they lead the fresh-install default;
+    // arm64-v8a covers most devices when the release ships only splits.
+    private static int AbiOrder(string? abi) => abi?.ToLowerInvariant() switch
+    {
+        null => 0,
+        "arm64-v8a" => 1,
+        "armeabi-v7a" => 2,
+        "x86_64" => 3,
+        "x86" => 4,
+        _ => 5,
+    };
 
     private async Task RemoveDownloadAsync(App app, SourceKind source, CancellationToken ct)
     {
@@ -846,6 +1611,86 @@ public sealed class AppEnricher(
         foreach (var row in rows.Where(r => r.Source == source))
         {
             db.Downloads.Remove(row);
+        }
+    }
+
+    /// <summary>
+    /// F-Droid index siblings of the primary package: same version name, a
+    /// distinct non-null ABI and not a newer version code, so an index-only
+    /// row can never outrank the analyzed primary.
+    /// </summary>
+    private static List<FdroidPackageInfo> FdroidSiblings(
+        IReadOnlyList<FdroidPackageInfo> packages, FdroidPackageInfo primary)
+    {
+        var siblings = new List<FdroidPackageInfo>();
+        if (primary.VersionName is null)
+        {
+            return siblings;
+        }
+
+        foreach (var candidate in packages)
+        {
+            if (ReferenceEquals(candidate, primary)
+                || candidate.Abi is null
+                || string.Equals(candidate.Abi, primary.Abi, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(candidate.VersionName, primary.VersionName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (candidate.VersionCode is { } code
+                && primary.VersionCode is { } primaryCode
+                && code > primaryCode)
+            {
+                continue;
+            }
+
+            siblings.Add(candidate);
+        }
+
+        return siblings;
+    }
+
+    /// <summary>
+    /// Records every per-architecture sibling of an F-Droid primary as an
+    /// index-only download row and drops arch rows that vanished from the
+    /// index for that package.
+    /// </summary>
+    private async Task UpsertFdroidSiblingsAsync(
+        App app, SourceKind kind, string repoBase, string packageId,
+        IReadOnlyList<FdroidPackageInfo> packages, FdroidPackageInfo primary,
+        DateTimeOffset now, CancellationToken ct)
+    {
+        var siblings = FdroidSiblings(packages, primary);
+        foreach (var sibling in siblings)
+        {
+            await UpsertDownloadAsync(app, new DownloadCandidate(
+                kind,
+                packageId,
+                $"{repoBase.TrimEnd('/')}/{sibling.ApkName}",
+                null,
+                sibling.VersionCode,
+                sibling.VersionName,
+                sibling.Size,
+                sibling.Sha256,
+                null,
+                sibling.SigMd5,
+                sibling.MinSdk,
+                sibling.Abi), now, ct);
+        }
+
+        var keep = siblings.Select(s => s.ApkName).Append(primary.ApkName).ToHashSet(StringComparer.Ordinal);
+        foreach (var row in await LoadDownloadsAsync(app, ct))
+        {
+            if (row.Source == kind
+                && row.SourceRef == packageId
+                && row.Abi is not null
+                && row.ApkUrl.LastIndexOf('/') is var slash
+                && slash >= 0
+                && !keep.Contains(row.ApkUrl[(slash + 1)..]))
+            {
+                db.Downloads.Remove(row);
+            }
         }
     }
 
@@ -877,10 +1722,10 @@ public sealed class AppEnricher(
     private async Task<EnrichResult> EnrichFromFdroidAsync(
         App app, string repoBase, string packageId, DateTimeOffset now, CancellationToken ct)
     {
-        (FdroidPackageInfo? Package, string? IndexEtag)? fetched;
+        (IReadOnlyList<FdroidPackageInfo> Packages, string? IndexEtag)? fetched;
         try
         {
-            fetched = await fdroid.GetPackageAsync(repoBase, packageId, app.EnrichEtag, ct);
+            fetched = await fdroid.GetPackagesAsync(repoBase, packageId, app.EnrichEtag, ct);
         }
         catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
         {
@@ -897,7 +1742,7 @@ public sealed class AppEnricher(
             {
                 try
                 {
-                    fetched = await fdroid.GetPackageAsync(repoBase, packageId, null, ct);
+                    fetched = await fdroid.GetPackagesAsync(repoBase, packageId, null, ct);
                 }
                 catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
                 {
@@ -908,11 +1753,12 @@ public sealed class AppEnricher(
             if (fetched is null)
             {
                 app.LastCheckedAt = now;
-                return new EnrichResult(EnrichOutcome.UpToDate, null);
+                return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "index not modified" };
             }
         }
 
-        var (package, indexEtag) = fetched.Value;
+        var (packages, indexEtag) = fetched.Value;
+        var package = packages.FirstOrDefault();
         if (package is null)
         {
             return Fail(app, now, $"F-Droid: package {packageId} not in the {repoBase} index.");
@@ -928,17 +1774,28 @@ public sealed class AppEnricher(
         }
 
         var apkUrl = $"{repoBase.TrimEnd('/')}/{package.ApkName}";
+        var siblings = FdroidSiblings(packages, package);
+        var recorded = await LoadDownloadsAsync(app, ct);
+        var siblingsRecorded = siblings.All(s => recorded.Any(d =>
+            d.Source == kind
+            && d.SourceRef == packageId
+            && d.Abi == s.Abi
+            && d.ApkUrl.EndsWith('/' + s.ApkName, StringComparison.Ordinal)));
         var current = await PrimaryDownloadAsync(app, ct);
         if (current is not null
             && current.Source == kind
             && current.ApkUrl == apkUrl
             && current.VersionCode == package.VersionCode
             && current.Sha256 is not null
-            && !NeedsPermissionHeal(app, current))
+            && (package.Sha256 is null || HashMatches(current.Sha256, package.Sha256))
+            && app.PackageName is not null
+            && app.IconHash is not null && IconFileExists(app.IconHash)
+            && !NeedsPermissionHeal(app, current)
+            && siblingsRecorded)
         {
             app.EnrichEtag = indexEtag;
             app.LastCheckedAt = now;
-            return new EnrichResult(EnrichOutcome.UpToDate, null);
+            return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "index unchanged" };
         }
 
         // Changed version: analyze the actual APK (same quality bar as forge
@@ -977,7 +1834,8 @@ public sealed class AppEnricher(
             analyzed?.FileSha256 ?? package.Sha256,
             sigSha256,
             sigMd5,
-            minSdk), now, ct);
+            minSdk,
+            analyzed?.Badging.Abi ?? package.Abi), now, ct);
         await RecomputePrimaryAsync(app, ct);
 
         app.PackageName = package.PackageName;
@@ -995,6 +1853,11 @@ public sealed class AppEnricher(
         app.ExcludedReason = null;
         app.LastCheckedAt = now;
         app.LastError = null;
+
+        // The index lists one package per architecture; record the siblings as
+        // index-only rows so the client can pick the device's ABI.
+        await UpsertFdroidSiblingsAsync(app, kind, repoBase, packageId, packages, package, now, ct);
+        await RecomputePrimaryAsync(app, ct);
 
         await AddVersionRowAsync(app, versionCode, versionName, apkUrl, now, ct);
 
@@ -1028,15 +1891,17 @@ public sealed class AppEnricher(
         }
 
         FdroidPackageInfo? package;
+        IReadOnlyList<FdroidPackageInfo> packages = [];
         try
         {
-            var fetched = await fdroid.GetPackageAsync(FdroidRepos.FDroidBase, app.PackageName, seedEtag: null, ct);
+            var fetched = await fdroid.GetPackagesAsync(FdroidRepos.FDroidBase, app.PackageName, seedEtag: null, ct);
             if (fetched is null)
             {
                 return; // 304 with nothing cached: no new information.
             }
 
-            package = fetched.Value.Package;
+            packages = fetched.Value.Packages;
+            package = packages.FirstOrDefault();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1051,6 +1916,8 @@ public sealed class AppEnricher(
         }
 
         var apkUrl = $"{FdroidRepos.FDroidBase.TrimEnd('/')}/{package.ApkName}";
+        await UpsertFdroidSiblingsAsync(
+            app, SourceKind.FDroid, FdroidRepos.FDroidBase, package.PackageName, packages, package, now, ct);
         var existing = (await LoadDownloadsAsync(app, ct))
             .FirstOrDefault(d => d.Source == SourceKind.FDroid
                 && d.ApkUrl == apkUrl
@@ -1064,6 +1931,7 @@ public sealed class AppEnricher(
                 existing.ResolvedAt = now;
             }
 
+            await RecomputePrimaryAsync(app, ct);
             return;
         }
 
@@ -1080,7 +1948,8 @@ public sealed class AppEnricher(
                 analyzed.FileSha256,
                 CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256)),
                 CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5,
-                analyzed.Badging.MinSdk)
+                analyzed.Badging.MinSdk,
+                analyzed.Badging.Abi)
             : new DownloadCandidate(
                 SourceKind.FDroid,
                 package.PackageName,
@@ -1092,7 +1961,8 @@ public sealed class AppEnricher(
                 package.Sha256,
                 null,
                 package.SigMd5,
-                package.MinSdk);
+                package.MinSdk,
+                package.Abi);
         await UpsertDownloadAsync(app, candidate, now, ct);
         await RecomputePrimaryAsync(app, ct);
     }
@@ -1113,7 +1983,8 @@ public sealed class AppEnricher(
         {
             if (SourceClassifier.TryParseGitHubRepo(sourceUrl, out var owner, out var repo))
             {
-                var release = await github.GetLatestReleaseAsync(owner, repo, null, ct);
+                var target = new SourceTarget(SourceKind.GitHub, $"{owner}/{repo}");
+                var release = await github.GetLatestReleaseAsync(target, null, ct);
                 if (release is null)
                 {
                     return;
@@ -1122,11 +1993,11 @@ public sealed class AppEnricher(
                 var asset = ApkAssetSelector.PickApk(release.Assets);
                 if (asset is not null)
                 {
-                    await RunArtifactAsync(app, asset.BrowserDownloadUrl, null, release.Etag, SourceKind.GitHub, now, ct, asPrimary: false);
+                    await ResolveCandidateApkAsync(app, asset.Url, release.Etag, SourceKind.GitHub, now, ct);
                 }
-                else if (ApkAssetSelector.PickZip(release.Assets, a => a.Name, a => a.Size) is { } zip)
+                else if (ApkAssetSelector.PickZip(release.Assets) is { } zip)
                 {
-                    await TryEnrichFromZipAsync(app, zip.BrowserDownloadUrl, release.Etag, SourceKind.GitHub, now, ct, asPrimary: false);
+                    await ResolveCandidateZipAsync(app, zip.Url, release.Etag, SourceKind.GitHub, now, ct);
                 }
 
                 return;
@@ -1134,16 +2005,17 @@ public sealed class AppEnricher(
 
             if (SourceClassifier.TryParseGitLabRepo(sourceUrl, out var projectPath))
             {
-                var release = await gitlab.GetLatestReleaseAsync(projectPath, null, ct);
+                var release = await gitlab.GetLatestReleaseAsync(
+                    new SourceTarget(SourceKind.GitLab, projectPath), null, ct);
                 if (release is null)
                 {
                     return;
                 }
 
-                var link = ApkAssetSelector.PickApk(release.Assets, l => l.Name, _ => 0L, l => l.Url);
+                var link = ApkAssetSelector.PickApk(release.Assets);
                 if (link is not null)
                 {
-                    await RunArtifactAsync(app, link.Url, null, release.Etag, SourceKind.GitLab, now, ct, asPrimary: false);
+                    await ResolveCandidateApkAsync(app, link.Url, release.Etag, SourceKind.GitLab, now, ct);
                 }
             }
         }
@@ -1171,23 +2043,56 @@ public sealed class AppEnricher(
         }
     }
 
-    private Task<EnrichResult> EnrichFromApkAsync(
-        App app, string apkUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
-        DateTimeOffset? releasedAt = null) =>
-        RunArtifactAsync(app, apkUrl, archiveEntry: null, etag, lockSource, now, ct, releasedAt: releasedAt);
+    private sealed record ArtifactAnalysis(
+        string ArtifactUrl,
+        string? ArchiveEntry,
+        SourceKind LockSource,
+        string? Etag,
+        BadgingInfo Badging,
+        string FileSha256,
+        long FileSize,
+        string? SigSha256,
+        string? SigMd5,
+        DateTimeOffset? ReleasedAt,
+        ProcessedIcon? Icon);
+
+    /// <summary>
+    /// Outcome of downloading and analyzing one artifact. <c>Unchanged</c> is
+    /// true when the computed checksum matched the recorded one, in which case
+    /// no badging, signer or icon work ran and <c>Analysis</c> is null.
+    /// </summary>
+    private sealed record ArtifactResult(ArtifactAnalysis? Analysis, bool Unchanged, string? Error);
+
+    private async Task<ArtifactResult> DownloadAndAnalyzeApkAsync(
+        string url, string? etag, SourceKind lockSource, DateTimeOffset? releasedAt,
+        string? expectedSha256, CancellationToken ct)
+    {
+        var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
+        try
+        {
+            await DownloadAsync(url, tempApk, ct);
+            return await AnalyzeArtifactAsync(url, null, tempApk, tempApk, etag, lockSource, releasedAt, expectedSha256, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ArtifactResult(null, false, $"Download: {ex.Message}");
+        }
+        finally
+        {
+            try { File.Delete(tempApk); } catch { /* best effort */ }
+        }
+    }
 
     /// <summary>
     /// Some releases attach only a zip with the APK inside (e.g.
     /// AppControl-X v3.0.0). Downloads the archive, picks the best
     /// <c>.apk</c> entry and analyzes it like a direct download; the
     /// recorded URL/size/hash stay the archive's and
-    /// <see cref="App.ApkArchiveEntry"/> names the APK inside. Null when
-    /// the archive is unusable or carries no APK (caller falls through
-    /// to the next source).
+    /// <see cref="App.ApkArchiveEntry"/> names the APK inside.
     /// </summary>
-    private async Task<EnrichResult?> TryEnrichFromZipAsync(
-        App app, string zipUrl, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
-        bool asPrimary = true, DateTimeOffset? releasedAt = null)
+    private async Task<ArtifactResult> DownloadAndAnalyzeZipAsync(
+        string zipUrl, string? etag, SourceKind lockSource, DateTimeOffset? releasedAt,
+        string? expectedSha256, CancellationToken ct)
     {
         var tempZip = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.zip");
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
@@ -1198,17 +2103,17 @@ public sealed class AppEnricher(
             var entry = ApkAssetSelector.PickApk(zip.Entries, e => e.FullName, e => e.Length);
             if (entry is null)
             {
-                return null;
+                return new ArtifactResult(null, false, null);
             }
 
             entry.ExtractToFile(tempApk, overwrite: true);
-            return await AnalyzeTempApkAsync(app, zipUrl, entry.FullName, tempZip, tempApk, etag, lockSource, now, ct, asPrimary, releasedAt);
+            return await AnalyzeArtifactAsync(zipUrl, entry.FullName, tempZip, tempApk, etag, lockSource, releasedAt, expectedSha256, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Best effort: a broken or APK-less candidate zip must not stop
             // the F-Droid fallback (the caller reports no .apk asset if all fail).
-            return null;
+            return new ArtifactResult(null, false, ex.Message);
         }
         finally
         {
@@ -1217,54 +2122,23 @@ public sealed class AppEnricher(
         }
     }
 
-    private async Task<EnrichResult> RunArtifactAsync(
-        App app, string url, string? archiveEntry, string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct,
-        bool asPrimary = true, DateTimeOffset? releasedAt = null)
-    {
-        var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
-        try
-        {
-            await DownloadAsync(url, tempApk, ct);
-            return await AnalyzeTempApkAsync(app, url, archiveEntry, tempApk, tempApk, etag, lockSource, now, ct, asPrimary, releasedAt);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Candidate-only resolutions must not mark the app failed.
-            var message = $"Download: {ex.Message}";
-            return asPrimary
-                ? Fail(app, now, message)
-                : new EnrichResult(EnrichOutcome.Failed, message);
-        }
-        finally
-        {
-            try { File.Delete(tempApk); } catch { /* best effort */ }
-        }
-    }
-
     /// <summary>
-    /// Shared analysis tail: badging, artifact hash/size, icon, signatures
-    /// and the recorded fields. <paramref name="apkPath"/> is the APK that
-    /// gets analyzed, <paramref name="artifactPath"/> the file clients
-    /// download (same file unless the APK came out of an archive). The build
-    /// is always upserted as a signature-keyed download candidate; app-level
-    /// presentation is only written when <paramref name="asPrimary"/> is set.
+    /// Shared analysis: artifact hash/size first (returning <c>Unchanged</c>
+    /// when it matches <paramref name="expectedSha256"/>), then badging and
+    /// (best-effort) signer certs and launcher icon. <paramref name="apkPath"/>
+    /// is the APK that gets analyzed, <paramref name="artifactPath"/> the file
+    /// clients download (same file unless the APK came out of an archive). Does
+    /// not mutate the app row; the caller routes the analysis to the row that
+    /// owns its package.
     /// </summary>
-    private async Task<EnrichResult> AnalyzeTempApkAsync(
-        App app, string artifactUrl, string? archiveEntry, string artifactPath, string apkPath,
-        string? etag, SourceKind lockSource, DateTimeOffset now, CancellationToken ct, bool asPrimary = true,
-        DateTimeOffset? releasedAt = null)
+    private async Task<ArtifactResult> AnalyzeArtifactAsync(
+        string artifactUrl, string? archiveEntry, string artifactPath, string apkPath,
+        string? etag, SourceKind lockSource, DateTimeOffset? releasedAt,
+        string? expectedSha256, CancellationToken ct)
     {
-        BadgingInfo badging;
-        try
-        {
-            badging = BadgingParser.Parse(await aapt2.DumpBadgingAsync(apkPath, ct));
-        }
-        catch (Exception ex) when (ex is Aapt2Exception or BadgingParseException)
-        {
-            var message = $"aapt2: {ex.Message}";
-            return asPrimary ? Fail(app, now, message) : new EnrichResult(EnrichOutcome.Failed, message);
-        }
-
+        // Hash first: when the file is byte-identical to what is already
+        // recorded, every derived field (badging, signers, icon) is unchanged
+        // too, so the expensive tools can be skipped entirely.
         string artifactSha256;
         long artifactSize;
         try
@@ -1278,69 +2152,87 @@ public sealed class AppEnricher(
         }
         catch (IOException ex)
         {
-            var message = $"APK unreadable: {ex.Message}";
-            return asPrimary ? Fail(app, now, message) : new EnrichResult(EnrichOutcome.Failed, message);
+            return new ArtifactResult(null, false, $"APK unreadable: {ex.Message}");
+        }
+
+        if (expectedSha256 is not null && HashMatches(artifactSha256, expectedSha256))
+        {
+            return new ArtifactResult(null, true, null);
+        }
+
+        BadgingInfo badging;
+        try
+        {
+            badging = BadgingParser.Parse(await aapt2.DumpBadgingAsync(apkPath, ct));
+        }
+        catch (Exception ex) when (ex is Aapt2Exception or BadgingParseException)
+        {
+            return new ArtifactResult(null, false, $"aapt2: {ex.Message}");
         }
 
         var signers = await TryExtractSignersAsync(apkPath, ct);
         var sigSha256 = CertFingerprint.Join(signers.Select(s => s.Sha256));
         var sigMd5 = CertFingerprint.Join(signers.Select(s => s.Md5));
-        await UpsertDownloadAsync(app, new DownloadCandidate(
-            lockSource, null, artifactUrl, archiveEntry, badging.VersionCode, badging.VersionName,
-            artifactSize, artifactSha256, sigSha256, sigMd5, badging.MinSdk), now, ct);
-        await RecomputePrimaryAsync(app, ct);
+        var icon = await launcherIcons.ResolveAsync(apkPath, badging, ct);
 
-        // A completed analysis stamps the check even when it changes nothing
-        // user-visible: without this, an app whose analyzed build never
-        // becomes primary stays due forever and is re-downloaded every pass
-        // (seen live: two rows pinned at null LastCheckedAt that the new
-        // never_checked report surfaced). The ETag is deliberately left
-        // alone here; it belongs to the primary source's conditional requests.
-        if (!asPrimary)
+        return new ArtifactResult(new ArtifactAnalysis(
+            artifactUrl, archiveEntry, lockSource, etag, badging, artifactSha256, artifactSize,
+            sigSha256, sigMd5, releasedAt, icon), false, null);
+    }
+
+    /// <summary>
+    /// Records an extra source for an app without letting the candidate
+    /// disturb the primary: download, upsert the signature keyed row and
+    /// stamp the check, nothing else.
+    /// </summary>
+    private async Task ResolveCandidateApkAsync(
+        App app, string url, string? etag, SourceKind kind, DateTimeOffset now, CancellationToken ct)
+    {
+        var result = await DownloadAndAnalyzeApkAsync(
+            url, etag, kind, null, await ExpectedCandidateHashAsync(app, url, ct), ct);
+        await ApplyCandidateAsync(app, result, now, ct);
+    }
+
+    private async Task ResolveCandidateZipAsync(
+        App app, string url, string? etag, SourceKind kind, DateTimeOffset now, CancellationToken ct)
+    {
+        var result = await DownloadAndAnalyzeZipAsync(
+            url, etag, kind, null, await ExpectedCandidateHashAsync(app, url, ct), ct);
+        await ApplyCandidateAsync(app, result, now, ct);
+    }
+
+    /// <summary>
+    /// Stored checksum of a candidate URL when the app row already looks
+    /// complete, so re-resolving an unchanged alternate-source build skips the
+    /// download's expensive analysis.
+    /// </summary>
+    private async Task<string?> ExpectedCandidateHashAsync(App app, string url, CancellationToken ct)
+    {
+        var row = (await LoadDownloadsAsync(app, ct)).FirstOrDefault(d => d.ApkUrl == url);
+        return row is not null
+            && row.Sha256 is not null
+            && app.PackageName is not null
+            && app.IconHash is not null
+            && IconFileExists(app.IconHash)
+            && !NeedsPermissionHeal(app, row)
+                ? row.Sha256
+                : null;
+    }
+
+    private async Task ApplyCandidateAsync(App app, ArtifactResult result, DateTimeOffset now, CancellationToken ct)
+    {
+        if (result.Unchanged)
         {
             app.LastCheckedAt = now;
             app.LastError = null;
-            return new EnrichResult(EnrichOutcome.Enriched, null);
+            return;
         }
 
-        // An older analysis must not overwrite a newer primary's presentation.
-        var primary = await PrimaryDownloadAsync(app, ct);
-        if (primary is null
-            || primary.ApkUrl != artifactUrl
-            || primary.SigKey != ComputeSigKey(sigSha256, sigMd5, artifactUrl))
+        if (result.Analysis is not null)
         {
-            app.LastCheckedAt = now;
-            app.LastError = null;
-            return new EnrichResult(EnrichOutcome.UpToDate, null);
+            await ApplyAnalysisAsync(
+                app, result.Analysis, asRepresentative: false, recomputePrimary: true, setEtag: false, now, ct);
         }
-
-        var icon = await launcherIcons.ResolveAsync(apkPath, badging, ct)
-            ?? LetterAvatarGenerator.Generate(app.Name);
-        await WriteIconFileAsync(icon, ct);
-
-        var oldIcon = app.IconHash;
-        app.PackageName = badging.PackageName;
-        app.Permissions = badging.Permissions.ToList();
-        app.IconHash = icon.Sha256;
-        app.IconAdaptive = icon.Adaptive;
-        app.Availability = Availability.DirectApk;
-        app.EnrichEtag = etag;
-        app.ExcludedReason = null;
-        app.LastCheckedAt = now;
-        app.LastError = null;
-
-        await AddVersionRowAsync(app, badging.VersionCode, badging.VersionName, artifactUrl, now, ct);
-
-        // Only a real release date moves the app up "recently updated"; metadata
-        // refreshes never touch this, and sources without dates stay unknown.
-        if (releasedAt is not null &&
-            (app.VersionUpdatedAt is null || releasedAt > app.VersionUpdatedAt))
-        {
-            app.VersionUpdatedAt = releasedAt;
-        }
-
-        await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
-        return new EnrichResult(EnrichOutcome.Enriched, null);
     }
 
     /// <summary>
@@ -1369,7 +2261,7 @@ public sealed class AppEnricher(
             {
                 try
                 {
-                    var storeAvatar = LetterAvatarGenerator.Generate(app.Name);
+                    var storeAvatar = LetterAvatarGenerator.Generate(app.DisplayName ?? app.Name);
                     if (storeAvatar.Sha256 == app.IconHash)
                     {
                         app.IconAdaptive = false; // avatars are never adaptive
@@ -1414,7 +2306,7 @@ public sealed class AppEnricher(
                 // avatar file 404s forever while the pass reports
                 // UpToDate.
                 var icon = await launcherIcons.ResolveAsync(analyzed.ApkPath, analyzed.Badging, ct)
-                    ?? LetterAvatarGenerator.Generate(app.Name);
+                    ?? LetterAvatarGenerator.Generate(app.DisplayName ?? app.Name);
                 // Provenance always syncs, even when the bytes match: one
                 // pass heals stale flags without any icon churn.
                 app.IconAdaptive = icon.Adaptive;
@@ -1511,7 +2403,7 @@ public sealed class AppEnricher(
             : await TryPlayIconAsync(app, now, ct);
         if (!hasIcon)
         {
-            var avatar = LetterAvatarGenerator.Generate(app.Name);
+            var avatar = LetterAvatarGenerator.Generate(app.DisplayName ?? app.Name);
             await WriteIconFileAsync(avatar, ct);
             app.IconHash = avatar.Sha256;
             app.IconAdaptive = false;
@@ -1678,17 +2570,26 @@ public sealed class AppEnricher(
         // upstreams re-tag the same build (vFlow's v1.5.3-pr1 reuses 1.5.2's
         // code), and matching on the name too inserted a duplicate row whose
         // unique violation rolled back the whole enrich (stars, permissions).
-        if (!await db.AppVersions.AnyAsync(v =>
-            v.AppId == app.Id && v.VersionCode == versionCode, ct))
+        // Pending rows are invisible to AnyAsync, so a multi-ABI release (same
+        // versionCode per ABI, same signing key) would insert the row twice.
+        var exists = app.Versions.Any(v => v.VersionCode == versionCode)
+            || db.AppVersions.Local.Any(v =>
+                (ReferenceEquals(v.App, app) || (app.Id != 0 && v.AppId == app.Id))
+                && v.VersionCode == versionCode)
+            || await db.AppVersions.AnyAsync(v =>
+                v.AppId == app.Id && v.VersionCode == versionCode, ct);
+        if (exists)
         {
-            app.Versions.Add(new AppVersion
-            {
-                VersionCode = versionCode,
-                VersionName = versionName,
-                ApkUrl = apkUrl,
-                DetectedAt = now,
-            });
+            return;
         }
+
+        app.Versions.Add(new AppVersion
+        {
+            VersionCode = versionCode,
+            VersionName = versionName,
+            ApkUrl = apkUrl,
+            DetectedAt = now,
+        });
     }
 
     private async Task DownloadAsync(string url, string tempApk, CancellationToken ct)

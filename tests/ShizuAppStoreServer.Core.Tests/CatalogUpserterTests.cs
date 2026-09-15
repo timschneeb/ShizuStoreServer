@@ -276,6 +276,59 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.True(hail.AddedAt.Year >= 2022);
     }
 
+    [Fact]
+    public async Task VariantsSurviveListSyncAndAreNotStaled()
+    {
+        // Extra packages share their root's URL, so a sync that only sees the
+        // list row must neither match nor stale the enrich-created children.
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var root = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        _db.Apps.Add(NewVariant(root, "com.example.plugin", T0));
+        await _db.SaveChangesAsync();
+
+        var counts = await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 0, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Equal(5, await _db.Apps.CountAsync());
+        Assert.Equal(1, await _db.Apps.CountAsync(a => a.RootAppId == root.Id));
+    }
+
+    [Fact]
+    public async Task VariantIsRemovedWhenRootLeavesList()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var root = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        _db.Apps.Add(NewVariant(root, "com.example.plugin", T0));
+        await _db.SaveChangesAsync();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+            """;
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Contains("micup", counts.RemovedSlugs);
+        Assert.Null(await _db.Apps.FirstOrDefaultAsync(a => a.Slug == "com-example-plugin"));
+    }
+
+    private static App NewVariant(App root, string package, DateTimeOffset now) => new()
+    {
+        Slug = package.Replace('.', '-'),
+        Name = root.Name,
+        Url = root.Url,
+        Listing = root.Listing,
+        Type = root.Type,
+        CategoryId = root.CategoryId,
+        AddedAt = now,
+        UpdatedAt = now,
+        RootAppId = root.Id,
+        PackageName = package,
+    };
+
     private static string? FindFile(string repoDir, string relative)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

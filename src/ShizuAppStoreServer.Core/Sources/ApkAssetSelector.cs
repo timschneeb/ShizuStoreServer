@@ -8,8 +8,25 @@ namespace ShizuAppStoreServer.Core.Sources;
 /// </summary>
 public static class ApkAssetSelector
 {
-    public static GitHubAsset? PickApk(IReadOnlyList<GitHubAsset> assets) =>
-        PickApk(assets, a => a.Name, a => a.Size);
+    public static SourceAsset? PickApk(IReadOnlyList<SourceAsset> assets) =>
+        PickApk(assets, a => a.Name, a => a.Size, a => a.Url);
+
+    public static SourceAsset? PickZip(IReadOnlyList<SourceAsset> assets) =>
+        PickZip(assets, a => a.Name, a => a.Size);
+
+    /// <summary>
+    /// Copies <paramref name="assets"/> with the picked APK flagged
+    /// <see cref="SourceAsset.Primary"/>, so the shared enrichment pipeline can
+    /// treat every source's asset list uniformly. A zip-only release stays
+    /// unmarked and is handled by the pipeline's zip fallback.
+    /// </summary>
+    public static IReadOnlyList<SourceAsset> MarkPrimary(IReadOnlyList<SourceAsset> assets)
+    {
+        var primary = PickApk(assets);
+        return primary is null
+            ? assets
+            : assets.Select(a => a.Url == primary.Url ? a with { Primary = true } : a).ToList();
+    }
 
     /// <summary>
     /// Generic pick over any asset shape (GitLab links carry no size, so

@@ -19,7 +19,8 @@ src/ShizuAppStoreServer.Core/     All domain logic (no ASP.NET references)
   Parsing/      Markdig awesome-list parser
   Data/         EF Core entities + ShizuDbContext + Migrations/
   History/      git-history backfill (added_at/updated_at)
-  Sources/      URL classifier, GitHub/GitLab clients, APK picker, F-Droid index
+  Sources/      URL classifier, IAppSource clients (GitHub/GitLab/GitCode/
+              F-Droid), APK picker, shared release pipeline
   Enrichment/   aapt2/apksigner runners + parsers, DrawableStager,
               Paparazzi renderer client, icons, avatars, AppEnricher
   Sync/         SyncService, SyncOptions, IEnrichmentRunner
@@ -31,7 +32,7 @@ tests/ShizuAppStoreServer.Web.Tests/    Endpoint tests (full host, SQLite-swappe
 
 Core never references ASP.NET: everything the host needs crosses the
 boundary through constructor injection (`IAapt2Runner`,
-`IApkSignerRunner`, `IGitHubReleaseClient`, `IGitLabReleaseClient`,
+`IApkSignerRunner`, `IAppSource` source clients,
 `FdroidIndexProvider`, `IEnrichmentRunner`, `IPaparazziRenderer`).
 
 ## 2. Runtime architecture
@@ -79,6 +80,18 @@ bundle` is rebuilt per deploy, never committed.
   identity is `(listing, url)`. When the source lists the same URL under
   several categories, the first occurrence owns the row and the rest are
   ignored, so the catalog never shows the same app twice.
+  - Multi-app repos: enrichment creates one extra `apps` row per
+    distinct package found among the release's APK assets (§5.2). A
+    variant row copies the root's list-facing fields, points
+    `root_app_id` at the list row, and carries its own `package_name`,
+    downloads and icon. Only root rows (`root_app_id` null) take part
+    in list matching and staling; variants cascade-delete with their
+    root.
+  - `display_name` is what clients show (`name` stays the awesome-list
+    name): the analyzed APK's `application-label`, or for a
+    multi-package root `label (root list name)` unless the label already
+    equals the list name. `apk_label` keeps the
+    raw label.
   - List fields: `name`, `description`, `license`, `listing`
     (`main|closed_source`), `type` (`app|library|flow`), flags
     (`is_recommended`, `has_paid`, `has_iap`, `has_ads`,
@@ -87,12 +100,12 @@ bundle` is rebuilt per deploy, never committed.
   - Enrichment fields: `package_name`, `icon_hash`, `icon_adaptive`,
     `author_key`/`author_name`/`author_url` (stable developer identity:
     `github:<owner>` or `gitlab:<group>`; summary-visible so clients can
-    group by developer), `permissions` (the primary APK's
-    `uses-permission` list, extracted with aapt2 only, never F-Droid),
-    `full_description` (README markdown, or scraped plain-text Play
+    group by developer),     `permissions` (the analyzed APK's `uses-permission` list, aapt2
+    analysis only, never F-Droid index metadata; recorded for every
+    analyzed build whatever its source),
+    `full_description` (GitHub/GitLab README markdown, or scraped plain-text Play
     description, sent only on the detail endpoint), `enrich_etag` (conditional-request ETag
-    reuse), `stars` (GitHub
-    stargazers), `download_total` (popularity, §8), `install_count`
+    reuse), `stars` (GitHub stargazers or GitLab star count), `download_total` (popularity, §8), `install_count`
     (successful installs reported by clients via
     `POST /v1/apps/{slug}/installs`; monotonic, never bumps `updated_at`), `version_updated_at`
     (release date of the currently served APK version; null when the
@@ -106,7 +119,7 @@ bundle` is rebuilt per deploy, never committed.
     history, §4; `updated_at` is the change clock, not the release
     date).
   - Indexes on `url`, `updated_at`, `availability`, `category_id`.
-- **app_downloads** - one row per signing identity of an app's
+- **app_downloads** - one row per (signing identity, ABI) of an app's
   installable builds. Replaces the removed per-candidate `apps`
   columns (`version_code`, `version_name`, `apk_url`, `apk_size`,
   `apk_sha256`, `apk_archive_entry`, `min_sdk`, `sig_sha256`,
@@ -114,23 +127,33 @@ bundle` is rebuilt per deploy, never committed.
   columns). Columns: `id`, `app_id` (FK cascade), `source`
   (`GitHub|GitLab|Codeberg|FDroid|Izzy|Play|Other`), `source_ref`,
   `apk_url`, `archive_entry`, `version_code`, `version_name`,
-  `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `min_sdk`,
+  `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `min_sdk`, `abi`,
   `sig_key`, `is_primary`, `resolved_at`.
   - `sig_key` = lowercased first space-token of `sig_sha256`, else of
-    `sig_md5`, else `url:<apk_url>`; unique `(app_id, sig_key)`, so
-    same-signature candidates (reproducible F-Droid builds, Izzy
-    mirrors of forge builds) collapse into one row.
-  - Upsert: same `sig_key` updates in place only when the new
+    `sig_md5`, else `url:<apk_url>`; `abi` = the analyzed APK's
+    `native-code` ABI (null for fat/universal builds, or the F-Droid
+    `nativecode` element on index-only rows). Unique
+    `(app_id, sig_key, abi)` with NULLS NOT DISTINCT, so
+    same-signature same-ABI candidates (reproducible F-Droid builds,
+    Izzy mirrors of forge builds) collapse into one row while the
+    per-architecture APKs of one release stay separate.
+  - Upsert: same `(sig_key, abi)` updates in place only when the new
     `version_code` is higher; on an equal `version_code` the preferred
     source's URL is kept; lower versions are ignored.
   - `is_primary` = fresh-install/no-match default. Selection prefers
     non-F-Droid sources (GitHub/GitLab/Izzy/Codeberg/Other count as
-    forge-like), then higher `version_code`, then a fixed source
-    order. Exactly one primary per app (partial unique index on
-    `app_id` where `is_primary`).
+    forge-like), then higher `version_code`, then ABI (`null` universal
+    first, then `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then
+    others), then a fixed source order. Exactly one primary per app
+    (partial unique index on `app_id` where `is_primary`).
 - **app_versions** - (`app_id`, `version_code`, `version_name`,
   `apk_url`, `detected_at`); a row is appended only when the
-  (code, name) pair is unseen for the app (append-only history).
+  `version_code` is unseen for the app (append-only history). The
+  enricher must consult pending tracked rows, not only the database:
+  a multi-ABI release applies one version code once per ABI within a
+  single pass, and a duplicate insert would violate
+  `IX_app_versions_app_id_version_code` and roll back the whole
+  enrich.
 - **sync_runs** - audit log of passes: `trigger`, `head_commit`,
   per-bucket counts (added/updated/removed/enriched/up-to-date/
   failed, drained requests, parse warnings, archived changes),
@@ -155,6 +178,10 @@ bundle` is rebuilt per deploy, never committed.
   Known keys: `use_install_counts_for_popularity` (`true` makes
   clients sort popularity by `install_count` and show it in list
   subtitles; default false).
+- **package_exceptions** - operator overrides for the Shizuku-permission
+  gate (§5.3): `package_name` unique, `action` (`allow` or `dontaudit`),
+  optional `note`, timestamps. Seeded by migration (`rish-mcp` is
+  `allow`), edited with SQL; no admin endpoint.
 
 ## 4. List ingestion
 
@@ -182,7 +209,10 @@ bundle` is rebuilt per deploy, never committed.
   rename keeps id + slug and moves the row to the new category; a URL
   repeated in another category is a duplicate and is skipped. Stale
   `(url, category)` pairs, including duplicates created by earlier
-  syncs, are hard-deleted and reported by slug.
+  syncs, are hard-deleted and reported by slug. Only root rows
+  (`root_app_id` null) are matched or swept: a variant shares its
+  root's URL, so it must never look like a duplicate or go stale on
+  its own.
 - **ARCHIVED.md** (`pages/ARCHIVED.md`, applied after upsert):
   listed URLs (entry + source links, recursive incl. children) are
   marked `Excluded` with a fixed reason; un-listed apps are
@@ -205,7 +235,14 @@ Conditional source requests replay the stored `enrich_etag` via
 parses with `EntityTagHeaderValue.TryParse`: GitHub weak validators
 (`W/"..."`) are replayed and malformed tags are skipped instead of
 throwing (one bad tag previously failed that app's pass forever). A 304
-reuses the prior result; for GitHub it still refreshes `stars`.
+reuses the prior result; forge 304s still refresh `stars` (and the
+GitLab README while missing). Rows with a fully analyzed build on
+record (SHA-256 identity) but blank permissions re-analyze once: the
+F-Droid path never persisted them before, and the same-asset and 304
+short-circuits would otherwise keep them blank forever (live:
+FindMyDevice). A 304 heal refetches once without the validator (the
+release list for GitHub/GitLab, the index for F-Droid), so steady
+state stays validator-gated.
 
 When a forge fails with no usable APK (no release, no `.apk` asset
 and no archive carrying one), the app falls back to the F-Droid main
@@ -236,6 +273,13 @@ therefore treats Izzy as forge-like.
   `size_bytes`/`sha256` describe the archive, and `archive_entry`
   names the APK inside. An unusable archive with
   no APK falls through to the F-Droid fallback, else `Failed`.
+  Every other `.apk` asset in the release is analyzed as its own
+  candidate (non-primary), so one-APK-per-architecture releases
+  expose every ABI (§6); assets naming different packages from a
+  multi-app repo become variant rows (§5.2). Each asset's `digest`
+  is mapped to `SourceAsset.Sha256` when it is a `sha256:` value
+  (bare lowercase hex), which lets an unchanged asset skip its
+  download entirely (checksum short-circuit, §5.1).
 - **GitLab** (`GitLabReleaseClient`, `PRIVATE-TOKEN` from config or
   `SHIZU_GITLAB_TOKEN`): skips `upcoming` releases, prefers
   `direct_asset_url`. APK links embedded in the release description
@@ -246,24 +290,36 @@ therefore treats Izzy as forge-like.
   name or URL, so generic labels like `APK` still resolve (e.g.
   narektor/batt links to `Batt-1.3.apk`). GitLab largely
   ignores `If-None-Match`, so an unchanged recorded asset URL
-  short-circuits to `UpToDate`. No `.apk` link → F-Droid fallback,
+  short-circuits to `UpToDate`. Project metadata (`GET
+  /projects/{urlencoded-path}`) refreshes `stars` from `star_count` on
+  every pass, even when the release list fails; the README comes from
+  the project's `readme_url` through `/repository/files/…/raw`
+  (markdown source, like GitHub). Every `.apk` link becomes a
+  candidate (primary plus per-architecture siblings, analyzed through
+  the shared release pipeline). No `.apk` link → F-Droid fallback,
   else `Failed`.
 - **F-Droid/Izzy** (`FdroidRepoClient` + singleton
   `FdroidIndexProvider`): conditional GET of `{base}/index.xml`
   (cached or seed ETag; 304 without cache → `UpToDate`; one
   in-flight fetch per repo so parallel enrichments don't stampede).
-  The streaming parser takes the first `<package>` per
-  `<application>` (the newest); version/versioncode/sig are child
+  The streaming parser collects every `<package>` per
+  `<application>` (document order, newest first); version/versioncode/sig are child
   **elements** (package attributes accepted as fallback), `<sig>`
   is the 32-hex signing-cert MD5. Same apk URL + version code →
-  `UpToDate` with zero downloads. Otherwise the APK is downloaded
+  `UpToDate` with zero downloads (tightened to also require the
+  recorded SHA-256 to match the index `sha256` when the index
+  declares one, and a complete row: `package_name` and `icon_hash`
+  set, the `{icon_hash}.png` file present, no pending permission
+  heal). Otherwise the APK is downloaded
   and fully analyzed like a forge build (§5.1); unparseable files
   fall back to the index-only record, a package-name mismatch
   fails the pass (index row and file disagree), a package missing
   from the index fails with `not in`. A hit upserts a signature-keyed
   `app_downloads` row (`source` = FDroid/Izzy, `source_ref` = package
-  id, §6). Index lookups by source URL (`FindPackageBySourceAsync`)
-  power the forge fallback.
+  id, §6). Siblings that share the primary's version name and carry a
+  distinct `nativecode` ABI are recorded as index-only candidates (no
+  download); stale sibling rows are pruned. Index lookups by source URL
+  (`FindPackageBySourceAsync`) power the forge fallback.
 - **Fallback** (no forge/F-Droid APK available): letter-avatar icon,
   `LinkOnly` - or `PlayRedirect` with `StoreUrl` for Play entries.
   When a Play listing is linked (including on apps whose forge has no
@@ -324,7 +380,10 @@ against a misbehaving renderer). Renders are serialized through one
 Gradle invocation per pass (`renderIconBatch` over a manifest of
 `name|root|out` lines with per-app filename prefixes; a single
 `renderIcon` remains for one-offs), because each invocation pays a
-full task graph + test-JVM + LayoutLib boot. F-Droid primaries fall back to
+full task graph + test-JVM + LayoutLib boot. When
+`Enrichment:IconRenderCpuAffinity` is set, the renderer launches
+Gradle through `taskset -c <list>`, so the warm daemon and its
+forked test JVMs stay within the allowed cores. F-Droid primaries fall back to
 the mirrored repo icon before the avatar. A null renderer
 (unit tests) disables the XML path. → fill row → append
 `app_versions` row when new → delete orphaned old icon file
@@ -337,6 +396,25 @@ Upstream timeouts (slow downloads, stalled feeds) record `last_error`
 like any failure and retry on backoff, as do transport failures
 (DNS, TLS, reset, with the cause attached); they never fail silently.
 Genuine shutdown cancellation still aborts the pass.
+
+Checksum short-circuit: a full re-check must not redo APK work when
+the bytes are unchanged. When the source declares the artifact
+checksum (GitHub assets expose `digest`, `sha256:<hex>`, normalized
+to bare lowercase hex on `SourceAsset.Sha256`; F-Droid exposes the
+index `sha256`), the download is skipped entirely when the recorded
+download for that exact asset URL carries the same `sha256` and its
+owning row is complete: `package_name` and `icon_hash` set, the
+`{icon_hash}.png` file present on disk, no pending permission heal,
+and the scanned release is not newer than the row's
+`version_updated_at` (`ReleasedNewerThan`). When the source declares
+no checksum, the artifact is downloaded anyway and its SHA-256 is
+computed first: a match against the recorded or source-declared hash
+returns `Unchanged`, so aapt2, apksigner and the icon render are all
+skipped. A skipped artifact still stamps `last_checked_at`, and the
+apply pass still runs so vanished variants prune and display names
+recompute. A newer release date or a changed checksum always
+re-analyzes; any gap (missing package, icon hash, or icon file)
+heals on the next pass.
 
 Outcomes: `Enriched`, `UpToDate`, `AvatarFallback`, `Excluded`,
 `Failed` (`last_error` set, previous good values kept),
@@ -366,20 +444,107 @@ framing); plain vectors render full-bleed too but stay false, as do
 decoded rasters and avatars (framed in a squircle box). Refresh
 passes re-sync the flag without icon churn.
 
+### 5.2 Multi-app repos (one list entry, several packages)
+
+A repo may ship several distinct applications. Every `.apk` asset of the
+scanned release is analyzed (not only the primary), and the analyses are
+grouped by the APK's `package_name`: the package matching the root's
+current `package_name` (or the first analysis when the root has none)
+updates the root row, and every other package becomes a variant `apps`
+row (§3) with its own slug (the slugified package, deduped), downloads
+and icon. The root's `display_name` and every variant's is the APK's
+`application-label`; when a root has more than one package the label is
+qualified as `label (root list name)` so the extra apps stay traceable
+to their list entry, except when the label already equals the list name
+(then the parenthetical is dropped, never `Name (Name)`). A package that
+disappears from the release is
+pruned with its downloads, but only when no sibling analysis failed (a
+partial fetch must not delete rows). Candidate-only resolution (the
+opposite-signature candidate side, §5) never creates variants.
+
+`KieronQuinn/SmartspacerPlugins` publishes one plugin per GitHub
+release, so the newest-release scan cannot see them: it is a hard-coded
+special case that fetches **all** non-draft releases, flattens their
+assets, and feeds them through the same grouping. Because a
+latest-release compare is meaningless there, `ReleasePoller` skips that
+repo and it stays on the due window (§7.2).
+
+Root presentation heal: a repo whose newest release no longer carries
+the root's recorded primary artifact (for example DroidOS, whose latest
+release is F-Droid-only while the Pro launcher sits on an older release)
+would otherwise leave the root row with a null `apk_label` and stale
+permissions, because the primary guard only writes presentation fields
+for a representative analysis. When the root's `apk_label` is null and
+none of the scanned analyses covers the recorded primary URL, the
+enricher downloads and analyzes that recorded primary once and fills
+`package_name`, `apk_label`, `permissions` and the icon. The heal never
+records the download, never recomputes the primary, and never sets the
+etag, so it cannot reorder candidates or rewrite a row's version; once
+the label is set it is a no-op.
+
+Form factors: a release may ship the same package as phone, TV and Wear
+builds (for example universal-installer's `app`, `tv` and `wearos`
+release APKs). The APK's required `uses-feature` entries identify them
+(`android.software.leanback` or `android.hardware.type.television` is
+TV, `android.hardware.type.watch` is Wear). When a package also ships a
+phone build, its TV and Wear artifacts are dropped before the analyses
+are applied, so the phone build stays the offered candidate; a package
+that only ships a TV or Wear build is kept, because then that form
+factor is the app. The filter is grouped by package, so one package's
+phone build never suppresses another package's watch-only variant.
+
+### 5.3 Shizuku-permission gate
+
+A repo can also ship APKs that do not need Shizuku at all, so every
+`DirectApk` row must prove it declares a Shizuku permission. After
+enrichment each pass, `SyncService.ApplyShizukuFilterAsync` looks at the
+rows whose analyzed `permissions` are known: a row whose permissions
+contain `shizuku` (case-insensitive, covering `moe.shizuku`,
+`rikka.shizuku`, `dev.rikka.shizuku`, `af.shizuku`, `moe.shizuku.api`)
+stays available. AndroidX
+`*.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` entries are artifacts and
+never match.
+
+Only `DirectApk` rows are gated: Play-redirect and link-only rows carry
+no analyzed permissions. A gated row with no permission and no operator
+exception is set to `Excluded` with reason
+`APK does not declare a Shizuku permission.`; the same reason on an
+older row is cleared (back to `DirectApk`) as soon as a later APK
+declares the permission. The gate never touches another exclusion reason
+(for example the ARCHIVED one), and `exclude_override` acts as an
+implicit allow.
+
+`package_exceptions` holds operator overrides keyed by `package_name`
+(table §3), seeded by migration and edited with SQL. `allow` keeps the
+row available and emits no issue; `dontaudit` excludes it like the
+default but emits no issue. Rows excluded by this gate stay in the due
+and full-recheck selection, so a new release that declares the
+permission auto-heals them (the checksum short-circuit keeps the repeat
+check cheap).
+
+`GET /v1/issues` reports a `shizuku_permission_missing` quality issue
+for every gated row that lacks the permission and has no
+`package_exceptions` row, whichever action; the message is the exclusion
+reason above. This check runs in `CollectIssuesAsync` rather than
+`CatalogHealthCheck` because the latter ignores excluded rows.
+
 ## 6. Signature-keyed downloads
 
-Each `app_downloads` row is one signing identity. `sig_key` is the
-lowercased first space-token of `sig_sha256`, else of `sig_md5`, else
-`url:<apk_url>`; unique `(app_id, sig_key)`, so same-signature
-candidates (reproducible F-Droid builds, Izzy mirrors of forge
-builds) collapse into one row. Fingerprints come from `apksigner`
-(every `Signer #N certificate … digest` line is collected - key
-rotation yields space-joined sets matched by membership; MD5 is
-optional for old build-tools) or the index `<sig>` MD5 for
-index-only F-Droid/Izzy rows.
+Each `app_downloads` row is one (signing identity, ABI). `sig_key` is
+the lowercased first space-token of `sig_sha256`, else of `sig_md5`,
+else `url:<apk_url>`; `abi` is the analyzed APK's `native-code` ABI
+(null for fat/universal builds, or the F-Droid `nativecode` element on
+index-only rows). Unique `(app_id, sig_key, abi)` with NULLS NOT
+DISTINCT, so same-signature same-ABI candidates (reproducible F-Droid
+builds, Izzy mirrors of forge builds) collapse into one row while the
+per-architecture APKs of one release stay separate. Fingerprints come
+from `apksigner` (every `Signer #N certificate … digest` line is
+collected - key rotation yields space-joined sets matched by
+membership; MD5 is optional for old build-tools) or the index `<sig>`
+MD5 for index-only F-Droid/Izzy rows.
 
-Upsert rule: a candidate with the same `sig_key` updates the row in
-place only when its `version_code` is higher; on an equal
+Upsert rule: a candidate with the same `sig_key` and `abi` updates the
+row in place only when its `version_code` is higher; on an equal
 `version_code` the preferred source's URL is kept; a lower version is
 ignored. An index-only row (MD5 identity) upgrades in place when the
 analyzed build reveals the SHA-256 identity.
@@ -387,13 +552,18 @@ analyzed build reveals the SHA-256 identity.
 `is_primary` marks the default candidate for fresh installs / clients
 with no fingerprint match. Selection: non-F-Droid sources first
 (GitHub/GitLab/Izzy/Codeberg/Other all count as forge-like), then
-higher `version_code`, then a fixed source order. Exactly one primary
-per app (partial unique index on `app_id` where `is_primary`).
+higher `version_code`, then ABI (`null` universal first, then
+`arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then others), then a
+fixed source order. Exactly one primary per app (partial unique index
+on `app_id` where `is_primary`). This keeps a release that ships only
+per-architecture APKs (BiliDownOut-style) from defaulting to whichever
+asset happens to be largest.
 
 Client contract: hash the installed app's signing cert and filter
 `downloads[]` to candidates whose `sigSha256`/`sigMd5` match
 (membership match; fingerprints may be space-joined sets). Among
-matches, compare the candidate's `versionCode` against the installed
+matches, prefer an `abi` that is null or in the device's supported ABI
+list. Then compare the candidate's `versionCode` against the installed
 version (do not compare against other candidates). With no match,
 offer the primary for a fresh install. Never switch a user between
 different signatures.
@@ -454,16 +624,45 @@ one F-Droid/Izzy index fetch per repo, no APK download, no aapt2,
 no DB writes) and compares against the recorded downloads:
 GitHub/GitLab compare the picked APK/zip asset URL against the
 primary download (the stored ETag rides along, so unchanged GitHub
-feeds answer 304); F-Droid/Izzy compare the index version code
+feeds answer 304); a root with variant rows (§5.2) instead compares
+the release's whole `.apk` URL set against the union of the root's
+and its variants' download URLs, since no single primary represents
+them; F-Droid/Izzy compare the index version code
 and APK URL against the matching download row. Play, link-only,
-Codeberg and the Instafel/GitCode special cases have no cheap
-signal and stay on the due window. Skipped apps (excluded) and
+Codeberg and the GitCode special case have no cheap signal and
+stay on the due window; instafel's list entry is polled through
+its real release repo (instafel/u-rel), while SmartspacerPlugins is
+skipped (its apps span separate releases, §5.2). Skipped apps (excluded) and
 rows without a matching download count as changed, so they enrich
 on the next pass. Poll failures are soft (unchanged): a flapping
 upstream never marks rows failed, and a throwing poller degrades
 the pass to due-only enrichment. The poll needs a GitHub PAT
 (anonymous limits cover 60 calls/hr); without one it stays off
 with a startup warning and fast passes enrich due-only apps.
+
+### 7.3 Enrichment run log (`Core/Sync/RunLog.cs`)
+
+Opt-in append-only human-readable log (`Enrichment:RunLogPath`;
+null writes nothing, which keeps tests side-effect free). Every
+sync pass writes one clearly separated section: a header
+(`===== run <utc> | trigger=scheduled|nightly|webhook |
+mode=full|due | apps=N =====`), then one line per scanned app as it
+finishes, streamed through `BulkEnricher`'s `onResult` hook, then a
+totals footer (`ok`/`skip`/`fail` plus duration), then the same
+catalog health snapshot that `GET /v1/issues` serves (issue counts
+by kind, then one line per issue). An app line is
+`[ 12/315] slug (Display Name)  OK|ok|skip|excluded|FAIL  detail`;
+the detail carries the failure message or the `EnrichResult.Detail`
+skip reason (for example `APK unchanged, analysis skipped`, `within
+recheck window`, `release feed not modified`, `asset URL
+unchanged`, `index not modified`). A pass that finds nothing due
+writes a single `nothing due` line so the cadence stays visible,
+and a crashed pass writes a `pass failed: <msg>` line. File IO
+failures are warned once and never fail the pass. The log rotates
+at run boundaries once the file reaches `maxBytes` (default 1 MiB):
+the active file is moved to `<path>.1` (overwriting the previous
+`.1`) and a fresh active file starts, so exactly two files are kept
+and every section stays whole.
 
 ## 8. API behavior (`/v1/*`)
 
@@ -475,7 +674,11 @@ source `versionCode`/`versionName`/`minSdk`/`size`/`sigSha256`/`sigMd5`
 from the primary download (`size` is the primary APK's `size_bytes`, null
 when unknown).
 
-`stars` (GitHub stargazers) and `downloadTotal` are best-effort
+`name` is the app's `display_name` when enrichment has learned it (the
+analyzed APK's label, §5.2) and the awesome-list name otherwise; variant
+rows are served the same way, so clients see the qualified label.
+
+`stars` (GitHub stargazers or GitLab star count) and `downloadTotal` are best-effort
 popularity fields on both summary and detail; null when unknown.
 `downloadTotal` reflects the app's primary source: the sum of GitHub
 release asset `download_count` over all non-draft releases, or the
@@ -502,9 +705,9 @@ server's `sort=added` still orders by `added_at` (first sighting).
 
 `authorKey`/`authorName` (GitHub owner or GitLab namespace) ride on both
 summary and detail so clients can group apps by developer; `authorUrl`
-(profile link) is detail-only. `permissions` (the primary APK's
-requested permissions, APK-sourced only) and `fullDescription` (README
-markdown, or plain-text Play description, capped at 200k chars) are
+(profile link) is detail-only. `permissions` (the analyzed APK's
+requested permissions, aapt2-sourced only) and `fullDescription` (GitHub/GitLab
+README markdown, or plain-text Play description, capped at 200k chars) are
 detail-only: they are deliberately absent from summaries and
 `/v1/changes`, and clients keep the README in memory rather than
 persisting it.
@@ -512,7 +715,7 @@ persisting it.
 | Endpoint | Behavior |
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `listing`/`availability`/`type` (parse or 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts (excluded omitted). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
@@ -542,11 +745,13 @@ all environments; Scalar UI is development-only.
 | `Enrichment:GradlePath` | `gradle` | Gradle binary for icon renders, verified at startup |
 | `Enrichment:IconToolDir` | `tools/icon-render` | Paparazzi tool checkout |
 | `Enrichment:PaparazziTimeout` | `15min` | Per-icon render timeout |
+| `Enrichment:IconRenderCpuAffinity` | `null` | `taskset -c` CPU list for the render JVM (for example `0` pins renders to one core); null uses every core |
 | `Enrichment:IconStorePath` | `icons` | `{sha256}.png` icon store |
 | `Enrichment:MaxParallelism` | `4` | Concurrent enrichments |
 | `Enrichment:SuccessRecheckInterval` | `24h` | Healthy-app re-check window |
 | `Enrichment:FailedRecheckInterval` | `12h` | Backoff after `last_error` |
 | `Enrichment:DownloadTimeout` | `10min` | APK download HTTP timeout |
+| `Enrichment:RunLogPath` | `null` | Append-only per-pass human-readable log (one line per app + issues snapshot, §7.3); null disables it |
 | `Enrichment:GitHubToken` / `GitLabToken` | `null` (+ `SHIZU_GITHUB_TOKEN` / `SHIZU_GITLAB_TOKEN` env fallback) | Release-API auth/rate limits |
 | `Sync:ListPath` | `/opt/shizuappstore/list` | Local list clone |
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |
@@ -571,6 +776,14 @@ all environments; Scalar UI is development-only.
   and never switch a user between signatures.
 - `apps.url` is not an identity - always key on
   `(listing, url, category)`.
+- Variant rows (`root_app_id` set) are not list rows: list matching,
+  staling and due/recheck selection only ever touch roots, and
+  candidate-only resolution never creates variants.
+- The checksum short-circuit only skips work: it may never change a
+  primary, drop a download row, or leave a row half-healed. Skipping
+  requires a complete row (package, icon hash, icon file, no heal
+  pending) and an unchanged or older release date; a newer release
+  always re-analyzes.
 - Tombstone closure: every stale-delete path must write, every
   re-add path must clear, or `/v1/changes removed[]` drifts.
 - The sync worker scope makes no app mutations after the upsert

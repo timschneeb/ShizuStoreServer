@@ -23,8 +23,23 @@ public sealed class EnrichmentOptions
     /// <summary>Timeout for one Paparazzi icon render (warm daemon).</summary>
     public TimeSpan PaparazziTimeout { get; set; } = TimeSpan.FromMinutes(15);
 
+    /// <summary>
+    /// Optional CPU affinity for the render JVM, as a <c>taskset -c</c> list
+    /// (for example <c>"0"</c> pins render builds to one core). Null renders
+    /// on every core. Linux only; a missing <c>taskset</c> fails the render,
+    /// which falls back to the letter avatar.
+    /// </summary>
+    public string? IconRenderCpuAffinity { get; set; }
+
     /// <summary>Directory for <c>{sha256}.png</c> icons (deployed to <c>/opt/shizuappstore/icons/</c>).</summary>
     public string IconStorePath { get; set; } = "icons";
+
+    /// <summary>
+    /// Append-only human-readable log with one line per app per sync pass
+    /// (see <c>docs/SPEC.md</c>). Null disables it, so tests and library use
+    /// stay side-effect free.
+    /// </summary>
+    public string? RunLogPath { get; set; }
 
     /// <summary>GitHub PAT for the Releases API (higher rate limits). Null = anonymous.</summary>
     public string? GitHubToken { get; set; }

@@ -5,28 +5,13 @@ using System.Text.Json.Serialization;
 
 namespace ShizuAppStoreServer.Core.Sources;
 
-/// <summary>One release asset from the GitCode API.</summary>
-public sealed record GitCodeAsset(string Name, string Url);
-
-/// <summary>Latest release of a GitCode mirror (GitHub-shaped payload).</summary>
-public sealed record GitCodeRelease(
-    string TagName,
-    string? Etag,
-    IReadOnlyList<GitCodeAsset> Assets);
-
 /// <summary>Non-success response from the GitCode API.</summary>
 public sealed class GitCodeApiException(HttpStatusCode status, string message) : Exception(message)
 {
     public HttpStatusCode Status { get; } = status;
 }
 
-public interface IGitCodeReleaseClient
-{
-    /// <returns>Newest release (releases arrive newest-first), or null on 304 Not Modified.</returns>
-    /// <exception cref="GitCodeApiException">Non-success response or an empty release list.</exception>
-    Task<GitCodeRelease?> GetLatestReleaseAsync(
-        string owner, string repo, string? etag = null, CancellationToken ct = default);
-}
+public interface IGitCodeReleaseClient : IAppSource;
 
 /// <summary>
 /// Minimal GitCode releases client for mirrors that host a project's APK
@@ -54,9 +39,10 @@ public sealed class GitCodeReleaseClient : IGitCodeReleaseClient
         }
     }
 
-    public async Task<GitCodeRelease?> GetLatestReleaseAsync(
-        string owner, string repo, string? etag = null, CancellationToken ct = default)
+    public async Task<SourceRelease?> GetLatestReleaseAsync(
+        SourceTarget target, string? etag, CancellationToken ct = default)
     {
+        var (owner, repo) = target.SplitRepoKey();
         var url = $"https://api.gitcode.com/api/v5/repos/{Uri.EscapeDataString(owner)}"
             + $"/{Uri.EscapeDataString(repo)}/releases?per_page=10";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -87,10 +73,14 @@ public sealed class GitCodeReleaseClient : IGitCodeReleaseClient
 
         var assets = latest.Assets
             .Where(a => !string.IsNullOrWhiteSpace(a.BrowserDownloadUrl))
-            .Select(a => new GitCodeAsset(a.Name, a.BrowserDownloadUrl))
+            .Select(a => new SourceAsset(a.Name, a.BrowserDownloadUrl))
             .ToList();
 
-        return new GitCodeRelease(latest.TagName, response.Headers.ETag?.ToString(), assets);
+        return new SourceRelease(
+            latest.TagName,
+            null,
+            response.Headers.ETag?.ToString(),
+            ApkAssetSelector.MarkPrimary(assets));
     }
 
     private sealed class ReleaseDto

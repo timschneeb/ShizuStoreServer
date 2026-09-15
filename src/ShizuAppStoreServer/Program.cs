@@ -103,7 +103,8 @@ builder.Services.AddHttpClient("apk-download",
 builder.Services.AddSingleton<IAapt2Runner>(_ => new Aapt2Runner(enrichment.Aapt2Path));
 builder.Services.AddSingleton<IApkSignerRunner>(_ => new ApkSignerRunner(enrichment.ApksignerPath));
 builder.Services.AddSingleton<IPaparazziRenderer>(_ => new PaparazziRenderer(
-    enrichment.GradlePath, enrichment.IconToolDir, enrichment.PaparazziTimeout));
+    enrichment.GradlePath, enrichment.IconToolDir, enrichment.PaparazziTimeout,
+    enrichment.IconRenderCpuAffinity));
 builder.Services.AddSingleton<ILauncherIconService, LauncherIconService>();
 builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IGitHubReleaseClient>(),
@@ -127,6 +128,10 @@ builder.Services.AddSingleton(syncOptions);
 builder.Services.AddSingleton<GitHistoryService>();
 builder.Services.AddScoped<CatalogUpserter>();
 builder.Services.AddScoped<IReleasePoller, ReleasePoller>();
+// Opt-in human-readable run log (one section per pass, one line per app).
+builder.Services.AddSingleton<IRunLog>(sp => string.IsNullOrWhiteSpace(enrichment.RunLogPath)
+    ? NullRunLog.Instance
+    : new FileRunLog(enrichment.RunLogPath, sp.GetRequiredService<ILogger<FileRunLog>>()));
 builder.Services.AddScoped<SyncService>();
 builder.Services.AddScoped<IEnrichmentRunner, EnrichmentRunner>();
 builder.Services.AddSingleton<SyncGate>();
