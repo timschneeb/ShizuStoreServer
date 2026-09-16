@@ -395,7 +395,10 @@ render writes the exact-size bitmap directly (no screen-sized snapshot),
 a failed or timed-out build still contributes a complete PNG when one
 was written, artifacts of the same package share one render per app pass,
 and a full pass with `Enrichment:BatchIconsOnFullPass` defers the XML
-levels to one batched call after enrichment.
+levels to one batched call after enrichment (while deferred, the inline
+analysis resolves rasters but never writes an icon, so a fallback raster
+cannot downgrade an existing adaptive icon; the batch phase owns icon
+commits).
 `DrawableStager` turns binary AXML into text XML under a flat
 generated namespace (`shizu_N.xml`, referenced rasters copied
  alongside, literals inlined, framework non-color refs and theme

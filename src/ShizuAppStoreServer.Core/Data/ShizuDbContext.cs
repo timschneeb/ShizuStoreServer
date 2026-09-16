@@ -221,7 +221,9 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.SigSha256).HasColumnName("sig_sha256").HasMaxLength(512);
             e.Property(x => x.SigMd5).HasColumnName("sig_md5").HasMaxLength(512);
             e.Property(x => x.MinSdk).HasColumnName("min_sdk");
-            e.Property(x => x.Abi).HasColumnName("abi").HasMaxLength(32);
+            // F-Droid publishes <nativecode> as a comma-joined ABI list, so
+            // this must fit several architectures, not just one.
+            e.Property(x => x.Abi).HasColumnName("abi").HasMaxLength(128);
             e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
             e.Property(x => x.ResolvedAt).HasColumnName("resolved_at").IsRequired();

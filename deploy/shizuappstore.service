@@ -17,6 +17,10 @@ Environment=ASPNETCORE_URLS=http://127.0.0.1:5137
 # Android SDK location for AGP.
 Environment=GRADLE_USER_HOME=/opt/shizuappstore/gradle-home
 Environment=ANDROID_HOME=/opt/android-sdk
+# APK downloads and staged render dirs must not land in the tmpfs /tmp: on a
+# 4GB box a single 400MB APK there is charged to this cgroup, pushes it over
+# MemoryHigh and stalls the API in reclaim. Keep the temp dir on disk.
+Environment=TMPDIR=/opt/shizuappstore/tmp
 Restart=on-failure
 RestartSec=10
 # The worker enriches APKs in parallel; hard-cap CPU/memory/IO so a full
@@ -40,7 +44,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list
+ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list /opt/shizuappstore/tmp
 
 [Install]
 WantedBy=multi-user.target

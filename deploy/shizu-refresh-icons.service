@@ -15,11 +15,15 @@ TimeoutStartSec=infinity
 User=shizu
 Group=shizu
 WorkingDirectory=/opt/shizuappstore/app
-ExecStart=/opt/shizuappstore/app/ShizuAppStoreServer --refresh-icons
+ExecStart=/opt/shizuappstore/app/ShizuAppStoreServer --refresh-icons --force
 EnvironmentFile=/etc/shizuappstore/env
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=GRADLE_USER_HOME=/opt/shizuappstore/gradle-home
 Environment=ANDROID_HOME=/opt/android-sdk
+# APK downloads and staged render dirs must not land in the tmpfs /tmp: on a
+# 4GB box a single 400MB APK there is charged to this cgroup, pushes it over
+# MemoryHigh and stalls the API in reclaim. Keep the temp dir on disk.
+Environment=TMPDIR=/opt/shizuappstore/tmp
 # Same resource caps as the long-running service: the render must not
 # starve the rest of the box.
 MemoryHigh=1500M
@@ -36,4 +40,4 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list
+ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list /opt/shizuappstore/tmp

@@ -1149,11 +1149,16 @@ public sealed class AppEnricher(
         target.PackageName = analysis.Badging.PackageName;
         target.ApkLabel = analysis.Badging.ApplicationLabel;
         target.Permissions = analysis.Badging.Permissions.ToList();
-        if (analysis.Icon is not null)
+        // During a deferred pass the inline analysis only knows rasters
+        // (XML renders wait for the batch phase), so adopting one here would
+        // downgrade an existing adaptive icon. The batch phase owns icon
+        // writes then.
+        var adoptIcon = analysis.Icon is not null && !options.DeferXmlIconRenders;
+        if (adoptIcon)
         {
-            await WriteIconFileAsync(analysis.Icon, ct);
-            target.IconHash = analysis.Icon.Sha256;
-            target.IconAdaptive = analysis.Icon.Adaptive;
+            await WriteIconFileAsync(analysis.Icon!, ct);
+            target.IconHash = analysis.Icon!.Sha256;
+            target.IconAdaptive = analysis.Icon!.Adaptive;
         }
 
         target.Availability = Availability.DirectApk;
@@ -1178,7 +1183,7 @@ public sealed class AppEnricher(
             target.VersionUpdatedAt = analysis.ReleasedAt;
         }
 
-        if (analysis.Icon is not null)
+        if (adoptIcon)
         {
             await DeleteIconIfOrphanedAsync(target, oldIcon, ct);
         }

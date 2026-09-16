@@ -942,6 +942,35 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task DeferredXmlRendersKeepTheExistingIcon()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("defericon", "Deferred Icon", "https://github.com/o/rd");
+        await enricher.EnrichAsync(app, T0);
+        var original = app.IconHash;
+        Assert.NotNull(original);
+
+        Age(app);
+        var (second, _, _, _, _) = HappyPath(
+            tag: "v1.1", versionCode: "43", iconColor: Color.Red,
+            assetUrl: "https://cdn.example/app-v1.1.apk");
+        // A deferred pass resolves rasters only; the inline analysis must not
+        // overwrite the existing icon before the batch phase renders the XML one.
+        _options.DeferXmlIconRenders = true;
+        try
+        {
+            var result = await second.EnrichAsync(app, T0);
+            Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        }
+        finally
+        {
+            _options.DeferXmlIconRenders = false;
+        }
+
+        Assert.Equal(original, app.IconHash);
+    }
+
+    [Fact]
     public async Task RecordsFailureAndBacksOff()
     {
         var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)

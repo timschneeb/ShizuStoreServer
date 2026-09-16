@@ -117,8 +117,16 @@ ConfigureEnrichmentClients(builder.Services, enrichment);
 // scopes, so the index cache must outlive any one scope (thread-safe since M6).
 builder.Services.AddSingleton<FdroidIndexProvider>();
 builder.Services.AddSingleton<IzzyStatsProvider>();
-builder.Services.AddHttpClient("apk-download",
-    client => client.Timeout = enrichment.DownloadTimeout);
+builder.Services.AddHttpClient("apk-download", client =>
+{
+    client.Timeout = enrichment.DownloadTimeout;
+    // The FAU mirror censors .apk files for non-F-Droid clients (Google
+    // SafeSearch flag), so mirror downloads need this agent.
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("F-Droid");
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    ConnectCallback = ConnectIPv4Async,
+});
 builder.Services.AddSingleton<IAapt2Runner>(_ => new Aapt2Runner(enrichment.Aapt2Path));
 builder.Services.AddSingleton<IApkSignerRunner>(_ => new ApkSignerRunner(enrichment.ApksignerPath));
 builder.Services.AddSingleton<IPaparazziRenderer>(sp => new PaparazziRenderer(
@@ -322,14 +330,57 @@ public partial class Program
                 client.DefaultRequestHeaders.Add("PRIVATE-TOKEN", enrichment.GitLabToken);
             }
         });
-        services.AddHttpClient<FdroidRepoClient>(
-            client => client.Timeout = TimeSpan.FromSeconds(60));
+        services.AddHttpClient<FdroidRepoClient>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(60);
+            // The FAU mirror censors .apk files unless the client looks like
+            // F-Droid; index files are unaffected but the agent is harmless.
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("F-Droid");
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            ConnectCallback = ConnectIPv4Async,
+        });
         services.AddHttpClient<IzzyStatsClient>(
             client => client.Timeout = TimeSpan.FromSeconds(30));
         services.AddHttpClient<IGitCodeReleaseClient, GitCodeReleaseClient>(
             client => client.Timeout = TimeSpan.FromSeconds(30));
         services.AddHttpClient<IPlayStoreClient, PlayStoreClient>(
             client => client.Timeout = TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// f-droid.org serves its index over IPv6 at ~170KB/s while IPv4 is
+    /// orders of magnitude faster, so resolve A records only and walk them
+    /// until one connects. Falls back to nothing: an all-IPv4 host list that
+    /// refuses every address fails the request instead of hanging.
+    /// </summary>
+    private static async ValueTask<Stream> ConnectIPv4Async(
+        SocketsHttpConnectionContext context, CancellationToken ct)
+    {
+        var addresses = await Dns.GetHostAddressesAsync(
+            context.DnsEndPoint.Host, AddressFamily.InterNetwork, ct);
+        if (addresses.Length == 0)
+        {
+            throw new HttpRequestException($"No IPv4 address for {context.DnsEndPoint.Host}.");
+        }
+
+        Exception? last = null;
+        foreach (var address in addresses)
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            try
+            {
+                await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), ct);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch (SocketException ex)
+            {
+                last = ex;
+                socket.Dispose();
+            }
+        }
+
+        throw new HttpRequestException($"Could not connect to {context.DnsEndPoint.Host}.", last);
     }
 }
 

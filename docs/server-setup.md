@@ -10,9 +10,10 @@ this doc covers what must exist first.
 /opt/shizuappstore/list/         # awesome-shizuku git clone (worker fast-forwards, re-clones on failure)
 /opt/shizuappstore/icon-render/  # Paparazzi tool (deploy.sh syncs it, Gradle writes build/ here)
 /opt/shizuappstore/gradle-home/  # GRADLE_USER_HOME (Gradle daemon registry + caches)
+/opt/shizuappstore/tmp/          # TMPDIR: APK downloads + staged render dirs (not the tmpfs /tmp)
 ```
 
-Service account: dedicated `shizu` user, owns all five directories.
+Service account: dedicated `shizu` user, owns all six directories.
 Kestrel listens on `127.0.0.1:5137`; a Cloudflare Tunnel (token-managed,
 see the deploy flow) exposes it as `https://shizustore.timschneeberger.me`.
 No local reverse proxy or TLS terminator is involved.
@@ -229,7 +230,12 @@ fork (`tools/icon-render/app/build.gradle`), one Gradle worker
 10min, and the unit itself at `MemoryHigh=1500M` / `MemoryMax=1800M` /
 `MemorySwapMax=256M` / `CPUQuota=150%` with `Nice=5` and low IO weight.
 Raise these only after watching `systemctl status` and `free -h` during a
-full pass.
+full pass. The units set `TMPDIR=/opt/shizuappstore/tmp`: APK downloads
+and staged render dirs are disk-backed, because on a 4GB box a single
+400MB APK in the tmpfs `/tmp` is charged to the service cgroup, pushes
+it over `MemoryHigh` and stalls the API in reclaim for minutes. The temp
+dir holds at most one candidate (downloads are serial) plus the staged
+batch inputs, so keep the volume sized for one large APK.
 
 Knobs (`Enrichment:` section): `GradlePath` (point at
 `/opt/gradle-8.14/bin/gradle`), `IconToolDir` (point at
@@ -265,7 +271,10 @@ The `--refresh-icons` heal pass and full passes running with
 `BatchIconsOnFullPass: true` render batched: one
 `renderIconBatch -PstagedRes=<shared-res> -Pbatch=<manifest>` per pass,
 because each Gradle invocation pays a full task graph + test-JVM +
-LayoutLib boot. Fast passes render XML icons one Gradle call at a time
+LayoutLib boot. While a pass defers XML renders, the inline analysis
+never writes an icon, so a raster fallback cannot downgrade an existing
+adaptive icon; the batched phase commits every icon. Fast passes render
+XML icons one Gradle call at a time
 (the single-icon path writes the exact-size bitmap and no longer asks
 Paparazzi for a screen-sized snapshot). If the batch task fails for every
 icon at once, check that `app/build.gradle` forwards the `-Pbatch` value
@@ -359,16 +368,17 @@ before retrying a `--sync-once --full` re-run.
 
 If a backfill committed raster-fallback icons because a single render
 missed its timeout (fixed for future passes by the salvage and batching
-changes, but the rows are already written), heal them with the batched
-one-shot:
+changes, but the rows are already written), or icons need a full
+regeneration, run the batched one-shot:
 
 ```bash
 sudo systemctl start shizu-refresh-icons   # same caps, one Gradle call
 systemctl status shizu-refresh-icons
 ```
 
-It re-resolves the icon chain for every direct-APK app and replaces icons
-whose bytes change; it never runs alongside the other two units.
+It runs `--refresh-icons --force`: it re-resolves the icon chain for
+every direct-APK app and rewrites icons even when the fresh bytes match;
+it never runs alongside the other two units.
 
 `appsettings.Production.json` is written before the first
 `deploy.sh` run, because the rsync into `app/` excludes it and the
