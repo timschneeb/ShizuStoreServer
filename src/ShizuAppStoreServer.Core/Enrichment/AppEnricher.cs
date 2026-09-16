@@ -191,6 +191,10 @@ public sealed class AppEnricher(
     // index-v2 must never fail an otherwise good enrichment.
     private const int MaxScreenshots = 12;
 
+    // The two repos fail independently. A 2026-09-16 Izzy outage aborted the
+    // whole lookup and silently dropped F-Droid screenshots for every app after
+    // the first failure, so a repo that cannot be reached now keeps the URLs it
+    // contributed earlier instead of taking the other repo's hits down with it.
     private async Task ApplyScreenshotsAsync(App app, CancellationToken ct)
     {
         try
@@ -201,41 +205,48 @@ public sealed class AppEnricher(
                 return;
             }
 
+            string[] repos = [FdroidRepos.FDroidBase, FdroidRepos.IzzyBase];
+            var fresh = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (var repoBase in repos)
+            {
+                try
+                {
+                    var map = await fdroid.GetScreenshotsAsync(repoBase, ct);
+                    if (map is not null)
+                    {
+                        fresh[repoBase] = CollectScreenshotNames(map, packageIds);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    log?.LogDebug(ex, "Screenshot lookup failed for {Repo}.", repoBase);
+                }
+            }
+
+            if (fresh.Count == 0)
+            {
+                return;
+            }
+
             var urls = new List<string>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var repoBase in new[] { FdroidRepos.FDroidBase, FdroidRepos.IzzyBase })
+            foreach (var repoBase in repos)
             {
                 var repo = repoBase.TrimEnd('/');
-                var map = await fdroid.GetScreenshotsAsync(repoBase, ct);
-                if (map is null)
+                var candidates = fresh.TryGetValue(repoBase, out var found)
+                    ? found.Select(name => (Name: name, Url: $"{repo}/{name.TrimStart('/')}"))
+                    : app.Screenshots
+                        .Where(url => url.StartsWith($"{repo}/", StringComparison.Ordinal))
+                        .Select(url => (Name: url[(repo.Length + 1)..], Url: url));
+                foreach (var (name, url) in candidates)
                 {
-                    continue;
-                }
-
-                foreach (var id in packageIds)
-                {
-                    if (!map.TryGetValue(id, out var names))
+                    if (seen.Add(name))
                     {
-                        continue;
-                    }
-
-                    foreach (var name in names)
-                    {
-                        if (string.IsNullOrWhiteSpace(name) || !seen.Add(name))
-                        {
-                            continue;
-                        }
-
-                        urls.Add($"{repo}/{name.TrimStart('/')}");
+                        urls.Add(url);
                         if (urls.Count >= MaxScreenshots)
                         {
                             break;
                         }
-                    }
-
-                    if (urls.Count >= MaxScreenshots)
-                    {
-                        break;
                     }
                 }
 
@@ -254,6 +265,35 @@ public sealed class AppEnricher(
         {
             log?.LogDebug(ex, "Screenshot lookup failed for {Slug}.", app.Slug);
         }
+    }
+
+    private static List<string> CollectScreenshotNames(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> map, List<string> packageIds)
+    {
+        var names = new List<string>();
+        foreach (var id in packageIds)
+        {
+            if (!map.TryGetValue(id, out var found))
+            {
+                continue;
+            }
+
+            foreach (var name in found)
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    continue;
+                }
+
+                names.Add(name);
+                if (names.Count >= MaxScreenshots)
+                {
+                    return names;
+                }
+            }
+        }
+
+        return names;
     }
 
     /// <summary>

@@ -332,7 +332,9 @@ therefore treats Izzy as forge-like.
   locale set becomes absolute upstream URLs for every package name the
   app publishes (capped at 12); both repos are checked whatever the app's
   primary source, so forge apps also gain shots when published on F-Droid
-  or Izzy. Same apk URL + version code →
+  or Izzy. The repos fail independently: an unreachable repo keeps the
+  URLs it contributed earlier and never discards the other repo's fresh
+  hits. Same apk URL + version code →
   `UpToDate` with zero downloads (tightened to also require the
   recorded SHA-256 to match the index `sha256` when the index
   declares one, and a complete row: `package_name` and `icon_hash`

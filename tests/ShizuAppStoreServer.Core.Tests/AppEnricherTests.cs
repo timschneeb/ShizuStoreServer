@@ -1709,6 +1709,97 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task ScreenshotsFromReachableRepoSurviveOtherRepoOutage()
+    {
+        // 2026-09-16: while Izzy answered connection refused, the throw escaped
+        // the loop and discarded the F-Droid screenshots that had already been
+        // parsed, leaving every later app without any.
+        const string indexV2 = """
+            {
+              "packages": {
+                "com.example.app": {
+                  "metadata": {
+                    "screenshots": {
+                      "phone": {
+                        "en-US": [
+                          { "name": "/com.example.app/en-US/phoneScreenshots/00.png" }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
+        var fdroid = new StubHandler(request =>
+        {
+            if (request.RequestUri!.Host == "apt.izzysoft.de")
+            {
+                throw new HttpRequestException("Connection refused (apt.izzysoft.de:443)");
+            }
+
+            var body = request.RequestUri.AbsolutePath.EndsWith("index-v2.json")
+                ? indexV2
+                : FdroidIndexXml;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+        });
+        var downloads = new StubHandler(request => request.RequestUri!.ToString().Contains("/icons")
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(iconBytes) }
+            : new HttpResponseMessage(HttpStatusCode.NotFound));
+        var enricher = BuildEnricher(
+            new StubHandler(_ => throw new InvalidOperationException("must not call GitHub")),
+            downloads,
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
+            fdroid: fdroid);
+        var app = NewApp("catshare", "CatShare", "https://f-droid.org/packages/com.example.app/");
+        app.Screenshots =
+        [
+            "https://apt.izzysoft.de/fdroid/repo/com.example.app/en-US/phoneScreenshots/99.png",
+        ];
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(
+            [
+                "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png",
+                "https://apt.izzysoft.de/fdroid/repo/com.example.app/en-US/phoneScreenshots/99.png",
+            ],
+            app.Screenshots);
+    }
+
+    [Fact]
+    public async Task KeepsScreenshotsWhenBothReposUnreachable()
+    {
+        // A repo that answers can clear gone screenshots; one that refuses the
+        // connection must not, or every outage wipes the app's screenshots.
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var enricher = BuildEnricher(
+            github,
+            downloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            fdroid: new StubHandler(_ => throw new HttpRequestException("Connection refused")));
+        var app = NewApp("offline", "Offline", "https://github.com/o/offline");
+        string[] existing =
+        [
+            "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png",
+            "https://apt.izzysoft.de/fdroid/repo/com.example.app/en-US/phoneScreenshots/01.png",
+        ];
+        app.Screenshots = [.. existing];
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(existing, app.Screenshots);
+    }
+
+    [Fact]
     public async Task EnrichesFDroidAppFromSourceUrl()
     {
         var (enricher, _, _) = FdroidHappyPath();
