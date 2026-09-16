@@ -461,6 +461,18 @@ identical renders as refreshed, which surfaces self-consistent
 wrong files (e.g. two swapped icons whose hashes matched their
 rows). It writes no `sync_runs` row.
 
+`--sync-once [--full] [--skip-apk]` runs one sync pass in-process and
+exits (run with the server stopped, like `--refresh-icons`). `--full`
+selects every app like the nightly; without it the fast pass runs.
+`--skip-apk` forces `Enrichment:SkipApkAnalysis`, a metadata-only mode:
+release feeds, changelogs, screenshots and stars refresh, but every APK
+download/analysis reports `Unchanged` (recorded downloads and icons stay
+as they are) and F-Droid index rows fall back to index-only metadata, so
+a full pass backfills metadata without spending APK bandwidth or CPU.
+`--refresh-icons` refuses to run while the switch is set, and the switch
+is meant for one run (`--skip-apk` or an env override), not for
+appsettings.
+
 Icons are normalized to ≤192px PNGs, stored content-addressed as
 `{sha256}.png`, and served immutable. Letter-avatars are
 deterministic 192px PNGs (name-hashed background, embedded glyph).

@@ -701,6 +701,22 @@ public sealed class SyncServiceTests : IDisposable
         Assert.All(result.FailedMessages, m => Assert.Contains("boom", m));
     }
 
+    [Fact]
+    public async Task RefreshIconsRefusesWhenApkAnalysisSkipped()
+    {
+        var service = new SyncService(
+            _db,
+            new CatalogUpserter(_db),
+            new GitHistoryService(),
+            new ThrowingRunner(),
+            new FakePoller(),
+            new ThrowingRenderer(),
+            new SyncOptions { ListPath = _repo },
+            new EnrichmentOptions { SkipApkAnalysis = true });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RefreshIconsAsync());
+    }
+
     /// <summary>Stub poller: returns a canned changed set, records calls.</summary>
     private sealed class FakePoller(IReadOnlySet<long>? changed = null) : IReleasePoller
     {

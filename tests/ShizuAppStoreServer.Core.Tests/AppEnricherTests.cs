@@ -45,9 +45,11 @@ public sealed class AppEnricherTests : IDisposable
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
     {
         public int Calls;
+        public List<string> Uris { get; } = [];
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Calls++;
+            Uris.Add(request.RequestUri!.ToString());
             return Task.FromResult(handler(request));
         }
     }
@@ -2437,6 +2439,88 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(3, downloads.Calls); // APK attempt + icons-640 + legacy icons/
         Assert.Equal(LetterAvatarGenerator.Generate("No Icon").Sha256, app.IconHash);
         Assert.Equal(Availability.DirectApk, app.Availability);
+    }
+
+    [Fact]
+    public async Task SkipApkAnalysisRecordsReleaseMetadataWithoutDownload()
+    {
+        var (enricher, _, downloads, aapt2, _) = HappyPath(etag: null, changelog: "Release notes body");
+        _options.SkipApkAnalysis = true;
+        var app = NewApp("skipgh", "SkipGh", "https://github.com/example/skipgh");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal("Release notes body", app.Changelog);
+        Assert.Equal(T0, app.LastCheckedAt);
+        Assert.Null(app.LastError);
+        Assert.DoesNotContain(downloads.Uris, u => u.EndsWith(".apk", StringComparison.Ordinal));
+        Assert.Equal(0, aapt2.Calls);
+        Assert.False(HasDownloads(app));
+    }
+
+    [Fact]
+    public async Task SkipApkAnalysisKeepsRecordedDownloads()
+    {
+        var (enricher, _, downloads, aapt2, _) = HappyPath(etag: null);
+        var app = NewApp("skipkeep", "SkipKeep", "https://github.com/example/skipkeep");
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        var before = Primary(app);
+        var versionBefore = before.VersionCode;
+        var urlBefore = before.ApkUrl;
+        var shaBefore = before.Sha256;
+        var downloadCalls = downloads.Calls;
+        var aapt2Calls = aapt2.Calls;
+
+        _options.SkipApkAnalysis = true;
+        Age(app);
+        var result = await enricher.EnrichAsync(app, T0 + TimeSpan.FromDays(3));
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(downloadCalls, downloads.Calls);
+        Assert.Equal(aapt2Calls, aapt2.Calls);
+        var after = Primary(app);
+        Assert.Equal(urlBefore, after.ApkUrl);
+        Assert.Equal(versionBefore, after.VersionCode);
+        Assert.Equal(shaBefore, after.Sha256);
+    }
+
+    [Fact]
+    public async Task SkipApkAnalysisUsesFDroidIndexMetadataAndScreenshots()
+    {
+        const string indexV2 = """
+            {
+              "packages": {
+                "com.example.app": {
+                  "metadata": {
+                    "screenshots": {
+                      "phone": {
+                        "en-US": [
+                          { "name": "/com.example.app/en-US/phoneScreenshots/00.png" }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        var (enricher, _, downloads) = FdroidHappyPath(indexV2Json: indexV2);
+        _options.SkipApkAnalysis = true;
+        var app = NewApp("skipfd", "SkipFd", "https://f-droid.org/packages/com.example.app/");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        // The APK probe is gone: only the index icon mirror remains.
+        Assert.Equal(1, downloads.Calls);
+        Assert.DoesNotContain(downloads.Uris, u => u.EndsWith(".apk", StringComparison.Ordinal));
+        Assert.Equal("A <b>plain</b> summary of the app.", app.Changelog);
+        Assert.Equal(
+            ["https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png"],
+            app.Screenshots);
+        Assert.Equal(20L, Primary(app).VersionCode);
     }
 
     private AppEnricher NoNetworkEnricher()

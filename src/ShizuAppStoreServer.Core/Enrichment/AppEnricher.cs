@@ -2545,6 +2545,14 @@ public sealed class AppEnricher(
         string url, string? etag, SourceKind lockSource, DateTimeOffset? releasedAt,
         string? expectedSha256, CancellationToken ct)
     {
+        // Metadata-only operator pass: report Unchanged so the row is stamped
+        // and the release metadata still lands, but spend no bandwidth or CPU
+        // on the APK (see EnrichmentOptions.SkipApkAnalysis).
+        if (options.SkipApkAnalysis)
+        {
+            return new ArtifactResult(null, true, null);
+        }
+
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
         try
         {
@@ -2572,6 +2580,12 @@ public sealed class AppEnricher(
         string zipUrl, string? etag, SourceKind lockSource, DateTimeOffset? releasedAt,
         string? expectedSha256, CancellationToken ct)
     {
+        // See DownloadAndAnalyzeApkAsync: same metadata-only skip.
+        if (options.SkipApkAnalysis)
+        {
+            return new ArtifactResult(null, true, null);
+        }
+
         var tempZip = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.zip");
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
         try
@@ -3089,6 +3103,12 @@ public sealed class AppEnricher(
     /// </summary>
     private async Task<AnalyzedApk?> TryAnalyzeDownloadAsync(string apkUrl, CancellationToken ct)
     {
+        // Metadata-only operator pass: callers fall back to index metadata.
+        if (options.SkipApkAnalysis)
+        {
+            return null;
+        }
+
         var tempApk = Path.Combine(Path.GetTempPath(), $"shizu-{Guid.NewGuid():N}.apk");
         AnalyzedApk? result = null;
         try

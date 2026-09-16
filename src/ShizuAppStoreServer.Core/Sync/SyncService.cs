@@ -496,6 +496,12 @@ public sealed class SyncService(
     /// </summary>
     public async Task<IconRefreshResult> RefreshIconsAsync(CancellationToken ct = default, bool force = false)
     {
+        if (enrichment.SkipApkAnalysis)
+        {
+            throw new InvalidOperationException(
+                "Enrichment:SkipApkAnalysis is enabled; icon refresh needs APK analysis. Disable it first.");
+        }
+
         var ids = await db.Apps.AsNoTracking()
             .Where(a => a.Availability == Availability.DirectApk && a.Downloads.Any(d => d.IsPrimary))
             .Select(a => a.Id)

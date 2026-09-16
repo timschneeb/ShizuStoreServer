@@ -58,4 +58,12 @@ public sealed class EnrichmentOptions
 
     /// <summary>HTTP timeout for APK downloads (can be 100 MB+).</summary>
     public TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Operator switch for metadata-only passes: refresh release feeds,
+    /// changelogs, screenshots and stars without downloading or analyzing
+    /// APKs. Recorded downloads and icons stay as they are, so a skipped pass
+    /// cannot discover new builds. <c>--refresh-icons</c> refuses to run.
+    /// </summary>
+    public bool SkipApkAnalysis { get; set; }
 }

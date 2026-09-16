@@ -218,6 +218,38 @@ if (args.Contains("--refresh-icons"))
     return refresh.Failed > 0 ? 1 : 0;
 }
 
+// One-shot sync pass, for operator runs that must not wait for the nightly.
+// --full selects every app (like the nightly); --skip-apk forces
+// Enrichment:SkipApkAnalysis so release metadata and changelogs refresh
+// without any APK download. Run with the server stopped (same rule as
+// --refresh-icons: both processes write apps).
+if (args.Contains("--sync-once"))
+{
+    var syncFull = args.Contains("--full");
+    if (args.Contains("--skip-apk"))
+    {
+        enrichment.SkipApkAnalysis = true;
+    }
+
+    using var syncScope = app.Services.CreateScope();
+    var sync = syncScope.ServiceProvider.GetRequiredService<SyncService>();
+    var syncResult = await sync.RunAsync(
+        "manual", syncFull, DateTimeOffset.UtcNow, app.Lifetime.ApplicationStopping);
+    app.Logger.LogInformation(
+        "Manual sync done ({Mode}{SkipApk}): added={Added} updated={Updated} removed={Removed} enriched={Enriched} upToDate={UpToDate} failed={Failed} warnings={Warnings} skipped={Skipped} head={Head}",
+        syncFull ? "full" : "fast",
+        enrichment.SkipApkAnalysis ? ", skip-apk" : "",
+        syncResult.Added, syncResult.Updated, syncResult.Removed, syncResult.Enriched,
+        syncResult.UpToDate, syncResult.Failed, syncResult.ParseWarnings, syncResult.Skipped,
+        syncResult.HeadCommit ?? "(none)");
+    foreach (var failure in syncResult.FailedMessages.Take(20))
+    {
+        app.Logger.LogWarning("Manual sync failure: {Failure}", failure);
+    }
+
+    return syncResult.Failed > 0 ? 1 : 0;
+}
+
 // Configure the HTTP request pipeline.
 app.MapOpenApi(); // Public API: clients may fetch the spec in any environment.
 if (app.Environment.IsDevelopment())
