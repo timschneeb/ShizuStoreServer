@@ -36,8 +36,11 @@ public class IconRenderTest {
     String outPath = System.getProperty("iconOut", "");
     Context context = paparazzi.getContext();
     View root = buildView(context, name, null, sizePx);
+    // No paparazzi.snapshot() here: the exact PNG is already written, and
+    // the snapshot's screen-sized render plus software scale is pure waste
+    // (under tight CPU/memory limits it stretched renders from seconds to
+    // the render timeout, which threw away icons that were already on disk).
     writeExactPng(root, sizePx, outPath);
-    paparazzi.snapshot(root, "icon");
   }
 
   /** Batch mode: one Gradle invocation renders many icons. The manifest

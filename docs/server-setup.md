@@ -66,7 +66,11 @@ rsync excludes it by name):
     "IconToolDir": "/opt/shizuappstore/icon-render",
     "IconStorePath": "/opt/shizuappstore/icons",
     "RunLogPath": "/var/log/shizu/enrichment-runs.log",
-    "MaxParallelism": 2
+    "MaxParallelism": 2,
+    "BatchIconsOnFullPass": true,
+    "FdroidRepoBase": "https://ftp.fau.de/fdroid/repo/",
+    "IzzyRepoBase": "https://izzy.katastima.org/fdroid/repo/",
+    "IzzyRepoBaseFallback": "https://izzy.zw.is/fdroid/repo/"
   },
   "Sync": {
     "ListPath": "/opt/shizuappstore/list",
@@ -235,7 +239,9 @@ Knobs (`Enrichment:` section): `GradlePath` (point at
 `0` pins render builds to one core when the backfill competes with the
 desktop). After enabling the affinity, stop any daemon left over from
 before the change (`gradle --stop`) so the next launch starts it inside
-`taskset`.
+`taskset`. `BatchIconsOnFullPass` (default false) makes a full recheck
+resolve rasters only and batch-render the XML icons after enrichment; fast
+passes touch too few apps to pay for the second download.
 
 `RunLogPath` (default null) appends a human-readable section per sync
 pass: a header, one line per scanned app as it finishes
@@ -255,12 +261,16 @@ gradle -p tools/icon-render renderIcon -PstagedRes=<res-dir> \
 
 `-PstagedRes` is the staged `res` dir the enricher prepares per icon;
 `--rerun-tasks` defeats stale up-to-date checks while iterating.
-Production renders run batched: one `renderIconBatch -PstagedRes=<shared-res> -Pbatch=<manifest>`
-per pass, because each Gradle invocation pays a full task graph +
-test-JVM + LayoutLib boot (~2.5min per icon unbatched). If the batch task
-fails for every icon at once, check that `app/build.gradle` forwards the
-`-Pbatch` value as the `iconBatch` test sysprop; a missing forward
-silently runs single-icon mode against a nonexistent drawable.
+The `--refresh-icons` heal pass and full passes running with
+`BatchIconsOnFullPass: true` render batched: one
+`renderIconBatch -PstagedRes=<shared-res> -Pbatch=<manifest>` per pass,
+because each Gradle invocation pays a full task graph + test-JVM +
+LayoutLib boot. Fast passes render XML icons one Gradle call at a time
+(the single-icon path writes the exact-size bitmap and no longer asks
+Paparazzi for a screen-sized snapshot). If the batch task fails for every
+icon at once, check that `app/build.gradle` forwards the `-Pbatch` value
+as the `iconBatch` test sysprop; a missing forward silently runs
+single-icon mode against a nonexistent drawable.
 
 ## Startup tool check
 
@@ -290,7 +300,7 @@ deletes the clone and re-clones it from origin.
 One-time unit install (after provisioning above):
 
 ```bash
-sudo cp deploy/shizuappstore.service deploy/shizu-sync-once.service /etc/systemd/system/
+sudo cp deploy/shizuappstore.service deploy/shizu-sync-once.service deploy/shizu-refresh-icons.service /etc/systemd/system/
 sudo install -d -m 750 -o root -g shizu /etc/shizuappstore
 # /etc/shizuappstore/env holds the secrets. Group-readable by shizu so
 # manual one-shot runs can source it; systemd reads it as root either way.
@@ -346,6 +356,19 @@ Never start the one-shot while `shizuappstore.service` is active: two
 enrich passes would race on the same rows. A failed run reports
 `Result=exit-code` (or `timeout`) in `systemctl status`; `reset-failed`
 before retrying a `--sync-once --full` re-run.
+
+If a backfill committed raster-fallback icons because a single render
+missed its timeout (fixed for future passes by the salvage and batching
+changes, but the rows are already written), heal them with the batched
+one-shot:
+
+```bash
+sudo systemctl start shizu-refresh-icons   # same caps, one Gradle call
+systemctl status shizu-refresh-icons
+```
+
+It re-resolves the icon chain for every direct-APK app and replaces icons
+whose bytes change; it never runs alongside the other two units.
 
 `appsettings.Production.json` is written before the first
 `deploy.sh` run, because the rsync into `app/` excludes it and the

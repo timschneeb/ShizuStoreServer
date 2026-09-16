@@ -7,8 +7,33 @@ namespace ShizuAppStoreServer.Core.Sources;
 /// <summary>Known F-Droid-compatible repos and their <c>index.xml</c> layout.</summary>
 public static class FdroidRepos
 {
-    public const string FDroidBase = "https://f-droid.org/repo/";
-    public const string IzzyBase = "https://apt.izzysoft.de/fdroid/repo/";
+    public const string DefaultFDroidBase = "https://f-droid.org/repo/";
+
+    public const string DefaultIzzyBase = "https://apt.izzysoft.de/fdroid/repo/";
+
+    /// <summary>
+    /// Upstream repo base, overridable through <c>Enrichment:FdroidRepoBase</c>.
+    /// f-droid.org throttles datacenter IPs to a few hundred KB/s, which starves
+    /// the 60MB index, so production points at a mirror. Caches key by base, so
+    /// switching mid-run is safe.
+    /// </summary>
+    public static string FDroidBase { get; set; } = DefaultFDroidBase;
+
+    /// <summary>
+    /// IzzyOnDroid base, overridable through <c>Enrichment:IzzyRepoBase</c>.
+    /// The official host refuses datacenter IPs outright, so production uses a
+    /// mirror here as well.
+    /// </summary>
+    public static string IzzyBase { get; set; } = DefaultIzzyBase;
+
+    /// <summary>Optional second Izzy mirror, used when the primary base fails.</summary>
+    public static string? IzzyBaseFallback { get; set; }
+
+    /// <summary>Fallback base for a repo base, null when none is configured.</summary>
+    public static string? FallbackFor(string repoBase) =>
+        string.Equals(repoBase.TrimEnd('/'), IzzyBase.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)
+            ? IzzyBaseFallback
+            : null;
 
     public static string BaseFor(SourceKind kind) =>
         kind == SourceKind.Izzy ? IzzyBase : FDroidBase;

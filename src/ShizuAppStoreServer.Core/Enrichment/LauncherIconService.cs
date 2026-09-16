@@ -8,7 +8,14 @@ namespace ShizuAppStoreServer.Core.Enrichment;
 public interface ILauncherIconService
 {
     /// <returns>Normalized icon, or null when nothing usable found.</returns>
-    Task<ProcessedIcon?> ResolveAsync(string apkPath, BadgingInfo badging, CancellationToken ct = default);
+    /// <param name="allowXmlRender">
+    /// False skips every Gradle XML render path (hex colors, rasters and
+    /// badging image icons still resolve). Full passes use this and
+    /// batch-render the XML icons afterwards; see
+    /// <see cref="EnrichmentOptions.BatchIconsOnFullPass"/>.
+    /// </param>
+    Task<ProcessedIcon?> ResolveAsync(
+        string apkPath, BadgingInfo badging, CancellationToken ct = default, bool allowXmlRender = true);
 
     /// <summary>
     /// Batch half of icon resolution: stages the XML icon path (if any)
@@ -50,7 +57,8 @@ public sealed class LauncherIconService(IPaparazziRenderer? renderer = null) : I
     public const int RenderSize = 432;
 
 
-    public async Task<ProcessedIcon?> ResolveAsync(string apkPath, BadgingInfo badging, CancellationToken ct = default)
+    public async Task<ProcessedIcon?> ResolveAsync(
+        string apkPath, BadgingInfo badging, CancellationToken ct = default, bool allowXmlRender = true)
     {
         ct.ThrowIfCancellationRequested();
         try
@@ -68,7 +76,8 @@ public sealed class LauncherIconService(IPaparazziRenderer? renderer = null) : I
 
                 if (TryParseRefId(manifestRef, out var manifestId) && arsc is not null)
                 {
-                    if (ApkResourceTable.ResolveXml(arsc, manifestId) is { } xml
+                    if (allowXmlRender
+                        && ApkResourceTable.ResolveXml(arsc, manifestId) is { } xml
                         && await RenderStagedAsync(zip, arsc, xml, ct) is { } rendered)
                     {
                         return rendered;
@@ -84,7 +93,8 @@ public sealed class LauncherIconService(IPaparazziRenderer? renderer = null) : I
                 {
                     // Direct zip path: XML first, raster only when no
                     // drawable stages from it.
-                    if (await RenderStagedAsync(zip, arsc, manifestRef, ct) is { } direct)
+                    if (allowXmlRender
+                        && await RenderStagedAsync(zip, arsc, manifestRef, ct) is { } direct)
                     {
                         return direct;
                     }
@@ -103,7 +113,8 @@ public sealed class LauncherIconService(IPaparazziRenderer? renderer = null) : I
                 .OrderByDescending(i => i.Density)
                 .Select(i => i.Path)
                 .FirstOrDefault();
-            if (xmlPath is not null
+            if (allowXmlRender
+                && xmlPath is not null
                 && await RenderStagedAsync(zip, arsc, xmlPath, ct) is { } rootRendered)
             {
                 return rootRendered;

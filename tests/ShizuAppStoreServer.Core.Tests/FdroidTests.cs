@@ -150,7 +150,8 @@ public sealed class FdroidTests
     [Fact]
     public async Task FetchesAndCachesIndexV2Screenshots()
     {
-        // The v2 map is cached by ETag exactly like index.xml.
+        // The v2 map is fetched once per run and revalidated by ETag in the
+        // next run (BeginRun starts one).
         var stub = new StubHandler(request =>
             request.Headers.IfNoneMatch.ToString().Contains("v2-etag")
                 ? new HttpResponseMessage(HttpStatusCode.NotModified)
@@ -158,6 +159,8 @@ public sealed class FdroidTests
         var provider = new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(stub)));
 
         var first = await provider.GetScreenshotsAsync(FdroidRepos.FDroidBase);
+        Assert.Equal(1, stub.Calls);
+        provider.BeginRun();
         var second = await provider.GetScreenshotsAsync(FdroidRepos.FDroidBase);
 
         Assert.Equal(2, stub.Calls);
@@ -264,9 +267,10 @@ public sealed class FdroidTests
     [Fact]
     public async Task RevalidatesWithCachedEtag()
     {
-        // Singleton semantics (M6): every call revalidates via conditional
-        // GET, the first seeds from the app's stored ETag, later calls use
-        // the cached one and serve the cached parse on 304.
+        // Once-per-run semantics (request-volume fix): the first call of a run
+        // seeds from the app's stored ETag and fills the cache; the second call
+        // is answered from the run memo. The next run revalidates with the
+        // cached ETag and serves the cached parse on 304.
         var stub = new StubHandler(request =>
             request.Headers.IfNoneMatch.ToString().Contains("fd-etag")
                 ? new HttpResponseMessage(HttpStatusCode.NotModified)
@@ -274,6 +278,8 @@ public sealed class FdroidTests
         var provider = new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(stub)));
 
         var first = (await provider.GetPackageAsync(FdroidRepos.FDroidBase, "com.example.app", "\"old\"")).Value;
+        Assert.Equal(1, stub.Calls);
+        provider.BeginRun();
         var second = (await provider.GetPackageAsync(FdroidRepos.FDroidBase, "com.example.minimal", "\"old\"")).Value;
 
         Assert.Equal(2, stub.Calls);

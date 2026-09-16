@@ -66,4 +66,36 @@ public sealed class EnrichmentOptions
     /// cannot discover new builds. <c>--refresh-icons</c> refuses to run.
     /// </summary>
     public bool SkipApkAnalysis { get; set; }
+
+    /// <summary>
+    /// Full rechecks stop rendering XML icons one Gradle invocation at a
+    /// time: enrichment resolves raster icons only, then the pass ends with
+    /// the same batched render pipeline as <c>--refresh-icons</c> (seconds
+    /// per icon, one test JVM). Worth it on full passes (hundreds of apps);
+    /// fast passes touch too few apps to pay for the second APK download.
+    /// </summary>
+    public bool BatchIconsOnFullPass { get; set; }
+
+    /// <summary>
+    /// Set by the sync engine around a full-pass enrichment when
+    /// <see cref="BatchIconsOnFullPass"/> is on. Not bound from config:
+    /// it is a per-pass switch, and the sync gate guarantees one pass at
+    /// a time. Prefer <see cref="BatchIconsOnFullPass"/> in config files.
+    /// </summary>
+    public bool DeferXmlIconRenders { get; set; }
+
+    /// <summary>
+    /// F-Droid repo base override for hosts that f-droid.org throttles: set a
+    /// mirror such as https://ftp.fau.de/fdroid/repo; null keeps upstream.
+    /// </summary>
+    public string? FdroidRepoBase { get; set; }
+
+    /// <summary>
+    /// IzzyOnDroid repo base override: the official host refuses datacenter
+    /// IPs, so production points this at a mirror; null keeps upstream.
+    /// </summary>
+    public string? IzzyRepoBase { get; set; }
+
+    /// <summary>Second Izzy mirror, used when the primary base fails.</summary>
+    public string? IzzyRepoBaseFallback { get; set; }
 }

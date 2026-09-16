@@ -1,8 +1,10 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Parsing;
+using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Sync;
 
@@ -75,9 +77,13 @@ public sealed class SyncService(
     IPaparazziRenderer renderer,
     SyncOptions options,
     EnrichmentOptions enrichment,
-    IRunLog? runLog = null)
+    IRunLog? runLog = null,
+    ILogger<SyncService>? log = null,
+    FdroidIndexProvider? fdroid = null)
 {
     private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
+    private readonly ILogger<SyncService>? _log = log;
+    private readonly FdroidIndexProvider? _fdroid = fdroid;
 
     /// <summary>Exclusion reason for apps listed in <c>pages/ARCHIVED.md</c>.</summary>
     public const string ArchivedReason = "Archived in the upstream list.";
@@ -114,6 +120,10 @@ public sealed class SyncService(
     private async Task<SyncPassResult> RunCoreAsync(
         string trigger, bool fullRecheck, DateTimeOffset now, CancellationToken ct)
     {
+        // One index fetch per repo per pass: the provider memoizes the
+        // revalidation, so hundreds of apps do not turn into hundreds of
+        // conditional GETs against the same repo.
+        _fdroid?.BeginRun();
         var pending = await db.SyncRequests
             .Where(r => !r.Processed)
             .OrderBy(r => r.Id)
@@ -194,14 +204,36 @@ public sealed class SyncService(
         // re-list what the pass enriches anyway.
         var extraIds = fullRecheck ? [] : (await PollChangedAsync(ct)).Except(ids).ToList();
         _runLog.Begin(effectiveTrigger, fullRecheck, now, ids.Count + extraIds.Count);
-        var (enrichedFull, upToDateFull, failedFull, failedMessagesFull) =
-            await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
+        var batchIcons = fullRecheck && enrichment.BatchIconsOnFullPass;
+        if (batchIcons)
+        {
+            // Full passes batch their icon renders after enrichment (see
+            // RefreshIconsAsync); during enrichment only rasters resolve, so
+            // no per-icon Gradle invocation can stall the pass.
+            enrichment.DeferXmlIconRenders = true;
+        }
+
+        (int Enriched, int UpToDate, int Failed, List<string> FailedMessages) full;
+        try
+        {
+            full = await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
+        }
+        finally
+        {
+            enrichment.DeferXmlIconRenders = false;
+        }
+
         await ApplyShizukuFilterAsync(ct);
+
+        if (batchIcons)
+        {
+            await BatchRenderIconsAsync(ct);
+        }
 
         return await FinishRunAsync(effectiveTrigger, head,
             counts.Added, counts.Updated, counts.Removed,
-            enrichedFull, upToDateFull, failedFull,
-            pending.Count, parseWarnings, true, archivedChanged, now, ct, failedMessagesFull);
+            full.Enriched, full.UpToDate, full.Failed,
+            pending.Count, parseWarnings, true, archivedChanged, now, ct, full.FailedMessages);
     }
 
     /// <summary>IDs due for enrichment (never-checked, or outside the success/failure window).</summary>
@@ -496,6 +528,7 @@ public sealed class SyncService(
     /// </summary>
     public async Task<IconRefreshResult> RefreshIconsAsync(CancellationToken ct = default, bool force = false)
     {
+        _fdroid?.BeginRun();
         if (enrichment.SkipApkAnalysis)
         {
             throw new InvalidOperationException(
@@ -607,6 +640,32 @@ public sealed class SyncService(
         }
 
         return new IconRefreshResult(ids.Count, refreshed, current, failed) { Errors = errors };
+    }
+
+    /// <summary>
+    /// Batched icon pass that follows a full recheck when
+    /// <c>BatchIconsOnFullPass</c> is on: enrichment resolved raster icons
+    /// only, this renders every XML icon with one Gradle invocation.
+    /// Best-effort: a broken icon batch must never fail the pass it rides on.
+    /// </summary>
+    private async Task BatchRenderIconsAsync(CancellationToken ct)
+    {
+        if (enrichment.SkipApkAnalysis)
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await RefreshIconsAsync(ct);
+            _log?.LogInformation(
+                "Full-pass icon batch: {Checked} apps, {Refreshed} refreshed, {Current} already current, {Failed} failed.",
+                result.Checked, result.Refreshed, result.AlreadyCurrent, result.Failed);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log?.LogWarning(ex, "Full-pass icon batch failed; XML icons keep their raster fallbacks.");
+        }
     }
 
     private async Task<SyncPassResult> FinishRunAsync(

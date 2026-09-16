@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Core.Enrichment;
 
@@ -41,12 +43,25 @@ public sealed record BatchRenderRequest(string DrawableName, string? RootFile)
 /// one Gradle invocation per icon costs a task graph + test JVM each
 /// (~minutes for an icon backfill); one invocation renders the whole
 /// batch at seconds per icon. Any failure throws and the caller falls
-/// back to a letter avatar.
+/// back to a letter avatar; before throwing, a failed run is checked for
+/// a complete PNG the test JVM already wrote (it writes the exact output
+/// before anything optional), because a killed client or a slow daemon
+/// must not discard an icon that is sitting on disk.
 /// </summary>
 public sealed class PaparazziRenderer(
-    string gradlePath, string toolDir, TimeSpan timeout, string? cpuAffinity = null) : IPaparazziRenderer
+    string gradlePath, string toolDir, TimeSpan timeout, string? cpuAffinity = null,
+    ILogger<PaparazziRenderer>? log = null, IRunLog? runLog = null) : IPaparazziRenderer
 {
+    private static readonly byte[] PngMagic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    // Render timings land in the enrichment run log so a slow icon pass is
+    // visible without attaching a profiler.
+    private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
+
+    private static long Elapsed(long started) =>
+        (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
     public async Task<byte[]> RenderAsync(
         string stagedResDir, string drawableName, int sizePx, CancellationToken ct = default)
@@ -57,10 +72,30 @@ public sealed class PaparazziRenderer(
         try
         {
             var outPng = Path.Combine(Path.GetTempPath(), $"shizu-icon-{Guid.NewGuid():N}.png");
+            var started = Stopwatch.GetTimestamp();
+            _runLog.Detail($"render {drawableName} start");
             try
             {
-                await RunGradleAsync(stagedResDir, drawableName, sizePx, outPng, ct);
-                return await File.ReadAllBytesAsync(outPng, ct);
+                try
+                {
+                    await RunGradleAsync(stagedResDir, drawableName, sizePx, outPng, ct);
+                }
+                catch (PaparazziException ex)
+                {
+                    if (await ReadSalvagedPngAsync(outPng, ct) is not { } salvaged)
+                    {
+                        _runLog.Detail($"render {drawableName} failed after {Elapsed(started)}ms: {ex.Message}");
+                        throw;
+                    }
+
+                    log?.LogWarning(ex, "Paparazzi render failed; salvaged the output PNG it left behind.");
+                    _runLog.Detail($"render {drawableName} salvaged after {Elapsed(started)}ms");
+                    return salvaged;
+                }
+
+                var rendered = await File.ReadAllBytesAsync(outPng, ct);
+                _runLog.Detail($"render {drawableName} done {rendered.Length}B in {Elapsed(started)}ms");
+                return rendered;
             }
             finally
             {
@@ -102,37 +137,57 @@ public sealed class PaparazziRenderer(
                 try
                 {
                     await File.WriteAllTextAsync(manifestPath, manifest.ToString(), ct);
+                    var started = Stopwatch.GetTimestamp();
+                    _runLog.Detail($"batch render {batch.Count} icons start");
                     // Headroom scales with batch size; the cap is generous
                     // because one slow icon must not kill 200 good ones.
                     var batchTimeout = timeout + TimeSpan.FromMinutes(batch.Count);
-                    await RunGradleAsync(
-                        [
-                            "renderIconBatch",
-                            $"-PstagedRes={stagedResDir}",
-                            $"-Pbatch={manifestPath}",
-                            $"-PiconPx={sizePx}",
-                        ],
-                        batchTimeout, ct);
+                    PaparazziException? failure = null;
+                    try
+                    {
+                        await RunGradleAsync(
+                            [
+                                "renderIconBatch",
+                                $"-PstagedRes={stagedResDir}",
+                                $"-Pbatch={manifestPath}",
+                                $"-PiconPx={sizePx}",
+                            ],
+                            batchTimeout, ct);
+                    }
+                    catch (PaparazziException ex)
+                    {
+                        // Icons written before the failure are still good;
+                        // only a batch with no output at all is a failure.
+                        failure = ex;
+                        log?.LogWarning(ex, "Paparazzi batch render failed; reading any icons it left behind.");
+                    }
+
+                    var pngs = new byte[]?[batch.Count];
+                    for (var i = 0; i < batch.Count; i++)
+                    {
+                        try
+                        {
+                            pngs[i] = File.Exists(outs[i]) ? await File.ReadAllBytesAsync(outs[i], ct) : null;
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            pngs[i] = null;
+                        }
+                    }
+
+                    if (failure is not null && pngs.All(p => p is null))
+                    {
+                        _runLog.Detail($"batch render failed after {Elapsed(started)}ms: {failure.Message}");
+                        throw failure;
+                    }
+
+                    _runLog.Detail($"batch render done {pngs.Count(p => p is not null)}/{batch.Count} icons in {Elapsed(started)}ms");
+                    return pngs;
                 }
                 finally
                 {
                     try { File.Delete(manifestPath); } catch { /* best effort */ }
                 }
-
-                var pngs = new byte[]?[batch.Count];
-                for (var i = 0; i < batch.Count; i++)
-                {
-                    try
-                    {
-                        pngs[i] = File.Exists(outs[i]) ? await File.ReadAllBytesAsync(outs[i], ct) : null;
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        pngs[i] = null;
-                    }
-                }
-
-                return pngs;
             }
             finally
             {
@@ -145,6 +200,30 @@ public sealed class PaparazziRenderer(
         finally
         {
             _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads the output file when a failed run left a complete PNG (magic
+    /// bytes intact); a truncated file is not an icon.
+    /// </summary>
+    private static async Task<byte[]?> ReadSalvagedPngAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var bytes = await File.ReadAllBytesAsync(path, ct);
+            return bytes.Length > PngMagic.Length && bytes.AsSpan(0, PngMagic.Length).SequenceEqual(PngMagic)
+                ? bytes
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
         }
     }
 

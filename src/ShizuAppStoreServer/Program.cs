@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.ResponseCompression;
@@ -92,6 +94,23 @@ builder.Services.AddSingleton(adminOptions);
 var enrichment = builder.Configuration.GetSection("Enrichment").Get<EnrichmentOptions>() ?? new();
 enrichment.GitHubToken ??= Environment.GetEnvironmentVariable("SHIZU_GITHUB_TOKEN");
 enrichment.GitLabToken ??= Environment.GetEnvironmentVariable("SHIZU_GITLAB_TOKEN");
+if (!string.IsNullOrWhiteSpace(enrichment.FdroidRepoBase))
+{
+    // f-droid.org throttles datacenter IPs to a few hundred KB/s, which
+    // starves the 60MB index; production points this at a mirror instead.
+    FdroidRepos.FDroidBase = enrichment.FdroidRepoBase.TrimEnd('/') + "/";
+}
+
+if (!string.IsNullOrWhiteSpace(enrichment.IzzyRepoBase))
+{
+    FdroidRepos.IzzyBase = enrichment.IzzyRepoBase.TrimEnd('/') + "/";
+}
+
+if (!string.IsNullOrWhiteSpace(enrichment.IzzyRepoBaseFallback))
+{
+    FdroidRepos.IzzyBaseFallback = enrichment.IzzyRepoBaseFallback.TrimEnd('/') + "/";
+}
+
 builder.Services.AddSingleton(enrichment);
 ConfigureEnrichmentClients(builder.Services, enrichment);
 // Singleton (not scoped): the M6 loop enriches apps in parallel per-app
@@ -102,9 +121,10 @@ builder.Services.AddHttpClient("apk-download",
     client => client.Timeout = enrichment.DownloadTimeout);
 builder.Services.AddSingleton<IAapt2Runner>(_ => new Aapt2Runner(enrichment.Aapt2Path));
 builder.Services.AddSingleton<IApkSignerRunner>(_ => new ApkSignerRunner(enrichment.ApksignerPath));
-builder.Services.AddSingleton<IPaparazziRenderer>(_ => new PaparazziRenderer(
+builder.Services.AddSingleton<IPaparazziRenderer>(sp => new PaparazziRenderer(
     enrichment.GradlePath, enrichment.IconToolDir, enrichment.PaparazziTimeout,
-    enrichment.IconRenderCpuAffinity));
+    enrichment.IconRenderCpuAffinity, sp.GetRequiredService<ILogger<PaparazziRenderer>>(),
+    sp.GetRequiredService<IRunLog>()));
 builder.Services.AddSingleton<ILauncherIconService, LauncherIconService>();
 builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IGitHubReleaseClient>(),
@@ -119,7 +139,8 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IGitCodeReleaseClient>(),
     sp.GetRequiredService<IPlayStoreClient>(),
     sp.GetRequiredService<IzzyStatsProvider>(),
-    sp.GetRequiredService<ILogger<AppEnricher>>()));
+    sp.GetRequiredService<ILogger<AppEnricher>>(),
+    sp.GetRequiredService<IRunLog>()));
 
 // Sync engine (M6): fast loop + nightly full re-check in this same binary
 // Workers resolve SyncService per pass; enrichment fans out over per-app scopes.

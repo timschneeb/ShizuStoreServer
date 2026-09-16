@@ -17,6 +17,12 @@ public interface IRunLog
     /// <summary>One scanned app's outcome, streamed as it finishes.</summary>
     void App(string slug, string? displayName, EnrichResult result);
 
+    /// <summary>
+    /// Mid-run progress line for a slow action (download, release fetch,
+    /// analysis phase, icon render). Timestamped when written.
+    /// </summary>
+    void Detail(string message);
+
     /// <summary>A pass that found nothing due; a single line so the cadence stays visible.</summary>
     void Skip(string trigger, DateTimeOffset now, string reason);
 
@@ -43,6 +49,10 @@ public sealed class NullRunLog : IRunLog
     }
 
     public void App(string slug, string? displayName, EnrichResult result)
+    {
+    }
+
+    public void Detail(string message)
     {
     }
 
@@ -107,6 +117,14 @@ public sealed class FileRunLog(
             }
 
             Append(line);
+        }
+    }
+
+    public void Detail(string message)
+    {
+        lock (_gate)
+        {
+            Append($"{Stamp(DateTimeOffset.UtcNow)} {message}");
         }
     }
 

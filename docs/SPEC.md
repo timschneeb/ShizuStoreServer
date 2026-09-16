@@ -297,7 +297,15 @@ therefore treats Izzy as forge-like.
   multi-app repo become variant rows (§5.2). Each asset's `digest`
   is mapped to `SourceAsset.Sha256` when it is a `sha256:` value
   (bare lowercase hex), which lets an unchanged asset skip its
-  download entirely (checksum short-circuit, §5.1). The release markdown
+  download entirely (checksum short-circuit, §5.1). Asset URLs embed
+  the release tag, so an unchanged recorded URL with every sibling
+  already recorded and a complete stored row short-circuits to
+  `UpToDate` (`asset URL unchanged`) without downloading; the digest is
+  verified whenever the source declares one. GitHub allows replacing an
+  asset under the same tag: a moved URL still downloads the bytes but
+  verifies them against the recorded primary hash, so identical content
+  skips re-analysis (the rare undetected replacement is accepted when no
+  digest is declared). The release markdown
   `body` is captured as the app's `changelog`.
 - **GitLab** (`GitLabReleaseClient`, `PRIVATE-TOKEN` from config or
   `SHIZU_GITLAB_TOKEN`): skips `upcoming` releases, prefers
@@ -320,8 +328,15 @@ therefore treats Izzy as forge-like.
   else `Failed`.
 - **F-Droid/Izzy** (`FdroidRepoClient` + singleton
   `FdroidIndexProvider`): conditional GET of `{base}/index.xml`
-  (cached or seed ETag; 304 without cache → `UpToDate`; one
-  in-flight fetch per repo so parallel enrichments don't stampede).
+  (cached or seed ETag; 304 without cache → `UpToDate`). Each repo is
+  fetched at most once per pass: `BeginRun` resets the run memo, a
+  failed fetch is remembered so a refusing host is not hammered by
+  every app, and one in-flight fetch per repo keeps parallel
+  enrichments from stampeding. Both bases are overridable
+  (`Enrichment:FdroidRepoBase`, `Enrichment:IzzyRepoBase`) and the
+  Izzy base has one fallback mirror
+  (`Enrichment:IzzyRepoBaseFallback`) because the official host
+  refuses datacenter IPs.
   The streaming parser collects every `<package>` per
   `<application>` (document order, newest first); version/versioncode/sig are child
   **elements** (package attributes accepted as fallback), `<sig>`
@@ -375,7 +390,12 @@ render stays sharp while a stale PNG would fossilize): manifest
 `android:icon` XML staged for Paparazzi, then the manifest raster
 decoded in-house, then a badging XML path, then badging rasters
 (PNG and WebP decoded in-house). XML drawables render through Google
-LayoutLib via the Paparazzi Gradle tool (`tools/icon-render`):
+LayoutLib via the Paparazzi Gradle tool (`tools/icon-render`): a single
+render writes the exact-size bitmap directly (no screen-sized snapshot),
+a failed or timed-out build still contributes a complete PNG when one
+was written, artifacts of the same package share one render per app pass,
+and a full pass with `Enrichment:BatchIconsOnFullPass` defers the XML
+levels to one batched call after enrichment.
 `DrawableStager` turns binary AXML into text XML under a flat
 generated namespace (`shizu_N.xml`, referenced rasters copied
  alongside, literals inlined, framework non-color refs and theme
@@ -738,7 +758,15 @@ by kind, then one line per issue). An app line is
 the detail carries the failure message or the `EnrichResult.Detail`
 skip reason (for example `APK unchanged, analysis skipped`, `within
 recheck window`, `release feed not modified`, `asset URL
-unchanged`, `index not modified`). A pass that finds nothing due
+unchanged`, `index not modified`). Between app lines the log also
+carries timestamped detail lines for slow actions, so a pass that
+stalls can be attributed: `download start <url>` /
+`download done <bytes>B in <ms>ms`, `analyze <apk> unchanged,
+hashed <bytes>B in <ms>ms` or `analyze <apk> badging Xms,
+signers Yms, icon Zms, total Tms`, `github|gitlab|gitcode release
+list <target> ok|304|failed in <ms>ms`, `render <drawable>
+start|done|salvaged|failed in <ms>ms`, and `batch render N icons
+start|done x/N in <ms>ms`. A pass that finds nothing due
 writes a single `nothing due` line so the cadence stays visible,
 and a crashed pass writes a `pass failed: <msg>` line. File IO
 failures are warned once and never fail the pass. The log rotates
@@ -831,14 +859,18 @@ all environments; Scalar UI is development-only.
 | `Enrichment:Aapt2Path` / `ApksignerPath` | `aapt2` / `apksigner` | Binaries, verified at startup |
 | `Enrichment:GradlePath` | `gradle` | Gradle binary for icon renders, verified at startup |
 | `Enrichment:IconToolDir` | `tools/icon-render` | Paparazzi tool checkout |
+| `Enrichment:FdroidRepoBase` | `null` (upstream f-droid.org) | F-Droid repo base override; set a mirror such as `https://ftp.fau.de/fdroid/repo/` on hosts that f-droid.org throttles |
+| `Enrichment:IzzyRepoBase` | `null` (upstream apt.izzysoft.de) | IzzyOnDroid base override; the official host refuses datacenter IPs, production uses `https://izzy.katastima.org/fdroid/repo/` |
+| `Enrichment:IzzyRepoBaseFallback` | `null` | Second Izzy mirror tried once when the primary base fails; production uses `https://izzy.zw.is/fdroid/repo/` |
 | `Enrichment:PaparazziTimeout` | `15min` | Per-icon render timeout |
+| `Enrichment:BatchIconsOnFullPass` | `false` | Full rechecks resolve rasters only and batch-render XML icons in one call after enrichment; fast passes render per icon |
 | `Enrichment:IconRenderCpuAffinity` | `null` | `taskset -c` CPU list for the render JVM (for example `0` pins renders to one core); null uses every core |
 | `Enrichment:IconStorePath` | `icons` | `{sha256}.png` icon store |
 | `Enrichment:MaxParallelism` | `4` | Concurrent enrichments |
 | `Enrichment:SuccessRecheckInterval` | `24h` | Healthy-app re-check window |
 | `Enrichment:FailedRecheckInterval` | `12h` | Backoff after `last_error` |
 | `Enrichment:DownloadTimeout` | `10min` | APK download HTTP timeout |
-| `Enrichment:RunLogPath` | `null` | Append-only per-pass human-readable log (one line per app + issues snapshot, §7.3); null disables it |
+| `Enrichment:RunLogPath` | `null` | Append-only per-pass human-readable log (one line per app, timestamped slow-action details, plus the issues snapshot, §7.3); null disables it |
 | `Enrichment:GitHubToken` / `GitLabToken` | `null` (+ `SHIZU_GITHUB_TOKEN` / `SHIZU_GITLAB_TOKEN` env fallback) | Release-API auth/rate limits |
 | `Sync:ListPath` | `/opt/shizuappstore/list` | Local list clone |
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |

@@ -759,6 +759,7 @@ public sealed class SyncServiceTests : IDisposable
 
         public List<(string Trigger, bool FullRecheck, DateTimeOffset Now, int AppCount)> Begins { get; } = [];
         public List<(string Slug, string? DisplayName, EnrichResult Result)> Apps { get; } = [];
+        public List<string> Details { get; } = [];
         public List<(string Trigger, DateTimeOffset Now, string Reason)> Skips { get; } = [];
         public List<(DateTimeOffset Now, int Enriched, int UpToDate, int Failed)> Ends { get; } = [];
         public List<(long? RunId, string? Head, IReadOnlyList<SyncIssue> Issues)> IssueSnapshots { get; } = [];
@@ -776,6 +777,14 @@ public sealed class SyncServiceTests : IDisposable
             lock (_gate)
             {
                 Apps.Add((slug, displayName, result));
+            }
+        }
+
+        public void Detail(string message)
+        {
+            lock (_gate)
+            {
+                Details.Add(message);
             }
         }
 
@@ -947,6 +956,77 @@ public sealed class SyncServiceTests : IDisposable
         Assert.Equal(2, result.Failed);
         Assert.All(result.Errors, e => Assert.Contains("batch render failed", e));
         Assert.Empty(_runner.Commits); // phase C never runs
+    }
+
+    [Fact]
+    public async Task FullPassBatchIconsRunsOneBatchRenderAfterEnrichment()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        MarkDirectApk();
+        var ids = _db.Apps.Select(a => a.Id).ToList();
+        Assert.NotEmpty(ids);
+
+        _runner.PrepareHook = id =>
+            new PrepareIconResult(EnrichOutcome.UpToDate, null, new PendingBatchIcon($"b{id}_0", null));
+        var renderer = new CannedBatchRenderer([7]);
+        var enrichment = new EnrichmentOptions { MaxParallelism = 2, BatchIconsOnFullPass = true };
+        var service = new SyncService(
+            _db,
+            new CatalogUpserter(_db),
+            new GitHistoryService(),
+            _runner,
+            new FakePoller(),
+            renderer,
+            new SyncOptions { ListPath = _repo },
+            enrichment);
+
+        var result = await service.RunAsync("manual", fullRecheck: true, T0);
+
+        Assert.Null(result.Error);
+        Assert.False(result.Skipped);
+        var batch = Assert.Single(renderer.Calls); // one Gradle invocation for the whole pass
+        Assert.Equal(ids.Count, batch.Count);
+        Assert.Equal(ids.Count, _runner.Commits.Count);
+        Assert.Contains(_db.SyncRuns.ToList(), run => run.Trigger == "manual");
+        Assert.False(enrichment.DeferXmlIconRenders); // cleared even though the flag was on
+    }
+
+    [Fact]
+    public async Task FullPassBatchIconsSurvivesABrokenBatchRender()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        MarkDirectApk();
+
+        _runner.PrepareHook = id =>
+            new PrepareIconResult(EnrichOutcome.UpToDate, null, new PendingBatchIcon($"b{id}_0", null));
+        var enrichment = new EnrichmentOptions { MaxParallelism = 2, BatchIconsOnFullPass = true };
+        var service = new SyncService(
+            _db,
+            new CatalogUpserter(_db),
+            new GitHistoryService(),
+            _runner,
+            new FakePoller(),
+            new CannedBatchRenderer([7], throwAll: true),
+            new SyncOptions { ListPath = _repo },
+            enrichment);
+
+        var result = await service.RunAsync("manual", fullRecheck: true, T0);
+
+        Assert.Null(result.Error); // the icon batch is best-effort
+        Assert.Empty(_runner.Commits);
+        Assert.False(enrichment.DeferXmlIconRenders);
     }
 
     private void Commit(string date, params (string Path, string Content)[] files)

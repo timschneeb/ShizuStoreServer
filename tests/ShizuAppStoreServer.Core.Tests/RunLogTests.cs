@@ -53,6 +53,24 @@ public sealed class RunLogTests : IDisposable
     }
 
     [Fact]
+    public void DetailLinesCarryTheMessageAndATimestamp()
+    {
+        var path = Path.Combine(_dir, "runs.log");
+        var log = new FileRunLog(path);
+
+        log.Begin("manual", fullRecheck: true, DateTimeOffset.UtcNow, appCount: 1);
+        log.Detail("download done 1234B in 567ms");
+        log.End(DateTimeOffset.UtcNow, 1, 0, 0);
+
+        var lines = File.ReadAllLines(path);
+        var detail = Assert.Single(lines, l =>
+            l.Contains("download done 1234B in 567ms", StringComparison.Ordinal));
+        Assert.Matches(
+            @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z download done 1234B in 567ms$",
+            detail);
+    }
+
+    [Fact]
     public void SeparatesConsecutiveRuns()
     {
         var path = Path.Combine(_dir, "runs.log");

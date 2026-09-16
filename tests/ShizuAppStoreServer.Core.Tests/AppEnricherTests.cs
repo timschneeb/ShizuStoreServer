@@ -260,12 +260,12 @@ public sealed class AppEnricherTests : IDisposable
 
     /// <summary>Canonical happy-path wiring: stable release → APK download → badging → icon.</summary>
     private (AppEnricher Enricher, StubHandler Github, StubHandler Downloads, FakeAapt2Runner Aapt2, byte[] Zip)
-        HappyPath(string tag = "v1.0", string versionCode = "42", Color? iconColor = null, string? etag = "\"rel-etag\"", FakeSignerRunner? signer = null, string? changelog = null)
+        HappyPath(string tag = "v1.0", string versionCode = "42", Color? iconColor = null, string? etag = "\"rel-etag\"", FakeSignerRunner? signer = null, string? changelog = null, string assetUrl = "https://cdn.example/app.apk")
     {
         var zip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, iconColor ?? Color.Blue)));
         var github = new StubHandler(_ => JsonReleases(
-            ReleaseJson(tag, "app-release.apk", "https://cdn.example/app.apk", zip.Length, body: changelog), etag));
+            ReleaseJson(tag, "app-release.apk", assetUrl, zip.Length, body: changelog), etag));
         var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new ByteArrayContent(zip),
@@ -477,6 +477,49 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         await _db.SaveChangesAsync();
         Assert.Single(_db.AppVersions.Where(v => v.AppId == app.Id).ToList());
+    }
+
+    [Fact]
+    public async Task MultiAbiReleaseResolvesTheLauncherIconOncePerPackage()
+    {
+        // Same package in every ABI, so one launcher icon. Per-variant
+        // analysis used to run one Gradle render per artifact, which stalled
+        // a production backfill for 15 minutes per extra ABI.
+        var arm64 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(128, 128, Color.Blue)));
+        var armeabi = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Green)));
+        var x86 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var abiByLength = new Dictionary<long, string>
+        {
+            [arm64.Length] = "arm64-v8a",
+            [armeabi.Length] = "armeabi-v7a",
+            [x86.Length] = "x86",
+        };
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-arm64-v8a-release.apk", "https://cdn.example/app-arm64-v8a-release.apk", arm64.Length),
+            ("app-armeabi-v7a-release.apk", "https://cdn.example/app-armeabi-v7a-release.apk", armeabi.Length),
+            ("app-x86-release.apk", "https://cdn.example/app-x86-release.apk", x86.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("arm64", StringComparison.Ordinal) ? arm64
+                : path.Contains("armeabi", StringComparison.Ordinal) ? armeabi
+                : x86;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(apkPath =>
+            TestAssets.CannedBadging(versionCode: "1004", abi: abiByLength[new FileInfo(apkPath).Length]));
+        var icon = RedIcon();
+        var icons = new FakeLauncherIcons(_ => icon);
+        var enricher = BuildEnricher(
+            github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA), launcherIcons: icons);
+        var app = NewApp("bilidownout", "BiliDownOut", "https://github.com/10miaomiao/bili-down-out");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(3, downloads.Calls);
+        Assert.Equal(1, icons.Calls);
+        Assert.Equal(icon.Sha256, app.IconHash);
     }
 
     [Fact]
@@ -836,7 +879,7 @@ public sealed class AppEnricherTests : IDisposable
         var oldIcon = Path.Combine(_iconDir, $"{app.IconHash}.png");
         Assert.True(File.Exists(oldIcon));
         Age(app);
-        var (third, _, _, _, _) = HappyPath(tag: "v1.1", versionCode: "43", iconColor: Color.Red);
+        var (third, _, _, _, _) = HappyPath(tag: "v1.1", versionCode: "43", iconColor: Color.Red, assetUrl: "https://cdn.example/app-v1.1.apk");
         Assert.Equal(EnrichOutcome.Enriched, (await third.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(43, Primary(app).VersionCode);
         Assert.False(File.Exists(oldIcon));
@@ -855,7 +898,7 @@ public sealed class AppEnricherTests : IDisposable
             var zip = TestAssets.BuildApk(
                 (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, iconColor)));
             var github = new StubHandler(_ => JsonReleases(
-                ReleaseJson(tag, "app-release.apk", "https://cdn.example/app.apk", zip.Length),
+                ReleaseJson(tag, "app-release.apk", $"https://cdn.example/{tag}/app-release.apk", zip.Length),
                 "\"rel-etag\""));
             var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -891,7 +934,7 @@ public sealed class AppEnricherTests : IDisposable
         var sharedIcon = Path.Combine(_iconDir, $"{appA.IconHash}.png");
 
         Age(appA);
-        var (second, _, _, _, _) = HappyPath(tag: "v1.1", versionCode: "43", iconColor: Color.Red);
+        var (second, _, _, _, _) = HappyPath(tag: "v1.1", versionCode: "43", iconColor: Color.Red, assetUrl: "https://cdn.example/app-v1.1.apk");
         await second.EnrichAsync(appA, T0);
 
         Assert.NotEqual(appA.IconHash, appB.IconHash);
@@ -2071,10 +2114,9 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        // Two index fetches per repo: the source lookup fills the cache, then
-        // the regular package fetch revalidates it; plus the two screenshot
-        // lookups on index-v2.json (the stub never sends 304).
-        Assert.Equal(4, fdroid.Calls);
+        // One index fetch for the source lookup (the regular package read
+        // rides the run memo) plus one screenshot lookup per repo.
+        Assert.Equal(3, fdroid.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
         var primary = Primary(app);
         Assert.Equal(SourceKind.FDroid, primary.Source);
@@ -2261,25 +2303,31 @@ public sealed class AppEnricherTests : IDisposable
     [Fact]
     public async Task GitCodeUnchangedAssetSkipsDownload()
     {
+        var apk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var url = "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk";
         var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
         var gitcode = new FakeGitCodeClient(() => new SourceRelease("v2.0.5", null, "\"gc-etag\"",
         [
-            new SourceAsset("app-arm64-v8a-release.apk",
-                "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
-                Primary: true),
+            new SourceAsset("app-arm64-v8a-release.apk", url, Primary: true),
         ]));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
-        AddDownload(app, SourceKind.Other,
-            "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk",
-            versionCode: 205);
 
+        var first = BuildEnricher(github,
+            new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(apk) }),
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging()),
+            gitcode: gitcode).EnrichAsync(app, T0);
+        Assert.Equal(EnrichOutcome.Enriched, (await first).Outcome);
+        await _db.SaveChangesAsync();
+
+        Age(app);
         var result = await BuildEnricher(github,
             new StubHandler(_ => throw new InvalidOperationException("must not download")),
             new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2")),
             gitcode: gitcode).EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
-        Assert.Equal(1, gitcode.Calls);
+        Assert.Equal("asset URL unchanged", result.Detail);
+        Assert.Equal(2, gitcode.Calls);
     }
 
     [Fact]
@@ -2765,7 +2813,8 @@ public sealed class AppEnricherTests : IDisposable
     {
         public int Calls;
         public PendingBatchIcon? Pending;
-        public Task<ProcessedIcon?> ResolveAsync(string apkPath, BadgingInfo badging, CancellationToken ct = default)
+        public Task<ProcessedIcon?> ResolveAsync(
+            string apkPath, BadgingInfo badging, CancellationToken ct = default, bool allowXmlRender = true)
         {
             Calls++;
             return Task.FromResult(handler(apkPath));
@@ -3319,23 +3368,25 @@ public sealed class AppEnricherTests : IDisposable
         Age(app);
         var second = await enricher.EnrichAsync(app, T0);
         Assert.Equal(EnrichOutcome.UpToDate, second.Outcome);
-        Assert.Equal("APK unchanged, analysis skipped", second.Detail);
+        Assert.Equal("asset URL unchanged", second.Detail);
 
-        // The release digest matched the recorded hash, so neither the download
-        // nor any of aapt2/signer/icon ran again.
+        // The recorded asset URL is unchanged and the release digest matches
+        // the recorded hash, so the transfer itself is skipped along with
+        // aapt2/signer/icon.
         Assert.Equal(1, downloads.Calls);
         Assert.Equal(1, aapt2.Calls);
         Assert.Equal(T0, app.LastCheckedAt);
     }
 
     [Fact]
-    public async Task MatchingComputedHashDownloadsAgainButSkipsAnalysis()
+    public async Task MovedAssetUrlDownloadsAgainButSkipsAnalysis()
     {
-        // No source digest: the file still has to be fetched, but its hash
-        // proves the derived data is unchanged.
+        // No source digest and a moved URL (tag re-upload): the file has to be
+        // fetched, but its hash proves the derived data is unchanged.
         var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var url = "https://cdn.example/app.apk";
         var github = new StubHandler(_ => JsonReleases(
-            ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length),
+            ReleaseJson("v1.0", "app-release.apk", url, zip.Length),
             "\"rel-etag\""));
         var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -3349,6 +3400,7 @@ public sealed class AppEnricherTests : IDisposable
         await _db.SaveChangesAsync();
 
         Age(app);
+        url = "https://cdn.example/app-v1.1.apk";
         var second = await enricher.EnrichAsync(app, T0);
         Assert.Equal(EnrichOutcome.UpToDate, second.Outcome);
         Assert.Equal("APK unchanged, analysis skipped", second.Detail);

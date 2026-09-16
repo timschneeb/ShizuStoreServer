@@ -1,0 +1,39 @@
+[Unit]
+# Manual one-shot icon heal: re-resolves the icon chain for every direct-APK
+# app and batch-renders the XML levels, replacing raster fallbacks that were
+# committed when a single render missed its timeout. Do not start while
+# shizuappstore.service or shizu-sync-once.service is active.
+Description=Shizu App Store one-shot icon refresh (heal fallbacks)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# One batched Gradle invocation, but hundreds of icons; never let systemd
+# time it out.
+TimeoutStartSec=infinity
+User=shizu
+Group=shizu
+WorkingDirectory=/opt/shizuappstore/app
+ExecStart=/opt/shizuappstore/app/ShizuAppStoreServer --refresh-icons
+EnvironmentFile=/etc/shizuappstore/env
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=GRADLE_USER_HOME=/opt/shizuappstore/gradle-home
+Environment=ANDROID_HOME=/opt/android-sdk
+# Same resource caps as the long-running service: the render must not
+# starve the rest of the box.
+MemoryHigh=1500M
+MemoryMax=1800M
+MemorySwapMax=256M
+CPUQuota=150%
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+IOWeight=50
+LogsDirectory=shizu
+# Hardening (same set as shizuappstore.service).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list

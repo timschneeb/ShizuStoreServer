@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
@@ -9,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Parsing;
 using ShizuAppStoreServer.Core.Sources;
+using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Core.Enrichment;
 
@@ -83,8 +86,13 @@ public sealed class AppEnricher(
     IGitCodeReleaseClient? gitcode = null,
     IPlayStoreClient? play = null,
     IzzyStatsProvider? izzyStats = null,
-    ILogger<AppEnricher>? log = null)
+    ILogger<AppEnricher>? log = null,
+    IRunLog? runLog = null)
 {
+    // Runtime progress lines land in the enrichment run log; without one
+    // configured the no-op instance keeps tests and library use silent.
+    private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
+
     // Special-case release homes (user calls): the GitHub projects below
     // publish no usable release assets on GitHub itself. The list links the
     // instafel source monorepo, but the updater APK ships from u-rel.
@@ -116,6 +124,29 @@ public sealed class AppEnricher(
     // marks "fetched, this source publishes none".
     private static string? ChangelogEtag(App app) => app.Changelog is null ? null : app.EnrichEtag;
 
+    private static long Elapsed(long started) =>
+        (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+    /// <summary>
+    /// Times an upstream feed fetch into the run log; without these lines a
+    /// stalled API call is indistinguishable from a slow download.
+    /// </summary>
+    private async Task<T> TimedAsync<T>(string label, Func<Task<T>> action)
+    {
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            var result = await action();
+            _runLog.Detail($"{label} {(result is null ? "304" : "ok")} in {Elapsed(started)}ms");
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _runLog.Detail($"{label} failed after {Elapsed(started)}ms: {ex.Message}");
+            throw;
+        }
+    }
+
     private static string NormalizeChangelog(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -140,6 +171,9 @@ public sealed class AppEnricher(
         || value.Contains("class=\"markdown-heading\"", StringComparison.Ordinal)
         || value.Contains("class=\"highlight", StringComparison.Ordinal);
 
+    private readonly ConcurrentDictionary<string, Lazy<Task<ProcessedIcon?>>> _iconByPackage =
+        new(StringComparer.Ordinal);
+
     public async Task<EnrichResult> EnrichAsync(
         App app, DateTimeOffset now, CancellationToken ct = default, bool force = false)
     {
@@ -149,6 +183,11 @@ public sealed class AppEnricher(
         {
             return new EnrichResult(EnrichOutcome.SkippedFresh, null) { Detail = "within recheck window" };
         }
+
+        // Per-call cache: every ABI variant of a release resolves the same
+        // launcher icon, and a resolve may be a full Gradle render; one per
+        // package (and one per call, so a reused instance cannot go stale).
+        _iconByPackage.Clear();
 
         try
         {
@@ -471,7 +510,9 @@ public sealed class AppEnricher(
         SourceRelease? latest;
         try
         {
-            latest = await github.GetLatestReleaseAsync(target, ChangelogEtag(app), ct);
+            latest = await TimedAsync(
+                $"github release list {owner}/{repo}",
+                () => github.GetLatestReleaseAsync(target, ChangelogEtag(app), ct));
         }
         catch (GitHubApiException ex)
         {
@@ -503,7 +544,9 @@ public sealed class AppEnricher(
                 {
                     try
                     {
-                        latest = await github.GetLatestReleaseAsync(target, null, ct);
+                        latest = await TimedAsync(
+                            $"github release list {owner}/{repo} recheck",
+                            () => github.GetLatestReleaseAsync(target, null, ct));
                     }
                     catch (GitHubApiException)
                     {
@@ -527,7 +570,7 @@ public sealed class AppEnricher(
             return await HandleGitHubFailureAsync(app, ex, now, ct);
         }
 
-        if (await EnrichFromReleaseAsync(app, SourceKind.GitHub, release, urlIdentifiesVersion: false, now, ct) is { } enriched)
+        if (await EnrichFromReleaseAsync(app, SourceKind.GitHub, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
         {
             return enriched;
         }
@@ -638,7 +681,9 @@ public sealed class AppEnricher(
         {
             var target = new SourceTarget(
                 SourceKind.Other, $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo}");
-            var latest = await gitcode!.GetLatestReleaseAsync(target, app.EnrichEtag, ct);
+            var latest = await TimedAsync(
+                $"gitcode release list {HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo}",
+                () => gitcode!.GetLatestReleaseAsync(target, app.EnrichEtag, ct));
             if (latest is null)
             {
                 app.LastCheckedAt = now;
@@ -671,7 +716,9 @@ public sealed class AppEnricher(
         SourceRelease? latest;
         try
         {
-            latest = await gitlab.GetLatestReleaseAsync(target, ChangelogEtag(app), ct);
+            latest = await TimedAsync(
+                $"gitlab release list {projectPath}",
+                () => gitlab.GetLatestReleaseAsync(target, ChangelogEtag(app), ct));
         }
         catch (GitLabApiException ex)
         {
@@ -714,7 +761,9 @@ public sealed class AppEnricher(
                 {
                     try
                     {
-                        latest = await gitlab.GetLatestReleaseAsync(target, null, ct);
+                        latest = await TimedAsync(
+                            $"gitlab release list {projectPath} recheck",
+                            () => gitlab.GetLatestReleaseAsync(target, null, ct));
                     }
                     catch (GitLabApiException)
                     {
@@ -908,21 +957,28 @@ public sealed class AppEnricher(
                 : await ApplyAnalysesAsync(app, kind, [zipResult.Analysis], etag, null, permitRemoval: false, now, ct);
         }
 
-        // Sources that ignore If-None-Match (GitLab, GitCode) treat the
-        // recorded asset URL as the change signal, but only when every sibling
-        // is already recorded: a newly added architecture must not be skipped.
+        // Sources whose asset URLs embed the version (GitHub tags, GitLab,
+        // GitCode) treat the recorded URL as the change signal, but only when
+        // every sibling is already recorded (a newly added architecture must
+        // not be skipped) and the recorded row is complete. GitHub allows
+        // replacing an asset under the same tag, so verify the digest whenever
+        // the source declares one; older uploads without a digest accept the
+        // rare staleness in exchange for skipping the transfer.
         if (urlIdentifiesVersion)
         {
             var current = await PrimaryDownloadAsync(app, ct);
+            var releasedAt = asset.ReleasedAt ?? releaseReleasedAt;
             if (current is not null && asset.Url == current.ApkUrl
-                && current.VersionCode is not null && !NeedsPermissionHeal(app, current))
+                && current.VersionCode is not null
+                && Complete(app, current, releasedAt)
+                && (asset.Sha256 is not { Length: > 0 } || HashMatches(current.Sha256, asset.Sha256))
+                && assets.All(a => known.Contains(a.Url) || !IsApkAsset(a)))
             {
-                if (assets.All(a => known.Contains(a.Url) || !IsApkAsset(a)))
-                {
-                    app.EnrichEtag = etag;
-                    app.LastCheckedAt = now;
-                    return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "asset URL unchanged" };
-                }
+                Stamp(app);
+                // The finalizer still runs: the scanned asset set drives
+                // variant pruning and display names even on a skipped pass.
+                await ApplyAnalysesAsync(app, kind, [], etag, assets, permitRemoval: true, now, ct);
+                return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "asset URL unchanged" };
             }
         }
 
@@ -942,8 +998,18 @@ public sealed class AppEnricher(
             }
             else
             {
+                var expected = ExpectedFor(asset, releasedAt);
+                if (expected is null && await PrimaryDownloadAsync(app, ct) is { } primary
+                    && Complete(app, primary, releasedAt))
+                {
+                    // Moved URL (GitHub tag re-upload): verify the transfer
+                    // against the recorded primary hash instead of re-analyzing
+                    // bytes we have already seen.
+                    expected = primary.Sha256;
+                }
+
                 var result = await DownloadAndAnalyzeApkAsync(
-                    asset.Url, etag, kind, releasedAt, ExpectedFor(asset, releasedAt), ct);
+                    asset.Url, etag, kind, releasedAt, expected, ct);
                 if (result.Unchanged)
                 {
                     StampUrl(asset.Url, releasedAt);
@@ -2254,7 +2320,7 @@ public sealed class AppEnricher(
             {
                 try
                 {
-                    fetched = await fdroid.GetPackagesAsync(repoBase, packageId, null, ct);
+                        fetched = await fdroid.GetPackagesAsync(repoBase, packageId, null, ct, force: true);
                 }
                 catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
                 {
@@ -2671,6 +2737,8 @@ public sealed class AppEnricher(
         // Hash first: when the file is byte-identical to what is already
         // recorded, every derived field (badging, signers, icon) is unchanged
         // too, so the expensive tools can be skipped entirely.
+        var started = Stopwatch.GetTimestamp();
+        var label = Path.GetFileName(apkPath);
         string artifactSha256;
         long artifactSize;
         try
@@ -2689,9 +2757,11 @@ public sealed class AppEnricher(
 
         if (expectedSha256 is not null && HashMatches(artifactSha256, expectedSha256))
         {
+            _runLog.Detail($"analyze {label} unchanged, hashed {artifactSize}B in {Elapsed(started)}ms");
             return new ArtifactResult(null, true, null);
         }
 
+        var badgingStarted = Stopwatch.GetTimestamp();
         BadgingInfo badging;
         try
         {
@@ -2702,14 +2772,43 @@ public sealed class AppEnricher(
             return new ArtifactResult(null, false, $"aapt2: {ex.Message}");
         }
 
+        var signerStarted = Stopwatch.GetTimestamp();
         var signers = await TryExtractSignersAsync(apkPath, ct);
         var sigSha256 = CertFingerprint.Join(signers.Select(s => s.Sha256));
         var sigMd5 = CertFingerprint.Join(signers.Select(s => s.Md5));
-        var icon = await launcherIcons.ResolveAsync(apkPath, badging, ct);
+        var iconStarted = Stopwatch.GetTimestamp();
+        var icon = await ResolveIconAsync(badging, apkPath, ct);
+        _runLog.Detail($"analyze {label} badging {Elapsed(badgingStarted)}ms, "
+            + $"signers {Elapsed(signerStarted)}ms, icon {Elapsed(iconStarted)}ms, "
+            + $"total {Elapsed(started)}ms");
 
         return new ArtifactResult(new ArtifactAnalysis(
             artifactUrl, archiveEntry, lockSource, etag, badging, artifactSha256, artifactSize,
             sigSha256, sigMd5, releasedAt, icon), false, null);
+    }
+
+    /// <summary>
+    /// One launcher-icon resolve per package per app pass (see
+    /// <c>_iconByPackage</c>). A failed resolve is evicted so the next
+    /// artifact can try again instead of replaying the fault.
+    /// </summary>
+    private async Task<ProcessedIcon?> ResolveIconAsync(
+        BadgingInfo badging, string apkPath, CancellationToken ct)
+    {
+        var key = badging.PackageName is { Length: > 0 } packageName ? packageName : apkPath;
+        var entry = _iconByPackage.GetOrAdd(
+            key,
+            _ => new Lazy<Task<ProcessedIcon?>>(() => launcherIcons.ResolveAsync(
+                apkPath, badging, ct, allowXmlRender: !options.DeferXmlIconRenders)));
+        try
+        {
+            return await entry.Value;
+        }
+        catch
+        {
+            _iconByPackage.TryRemove(key, out _);
+            throw;
+        }
     }
 
     /// <summary>
@@ -3126,14 +3225,18 @@ public sealed class AppEnricher(
 
     private async Task DownloadAsync(string url, string tempApk, CancellationToken ct)
     {
+        var started = Stopwatch.GetTimestamp();
+        _runLog.Detail($"download start {url}");
         using var response = await downloads.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!response.IsSuccessStatusCode)
         {
+            _runLog.Detail($"download failed HTTP {(int)response.StatusCode} after {Elapsed(started)}ms");
             throw new HttpRequestException($"HTTP {(int)response.StatusCode} for {url}.");
         }
 
         await using var file = File.Create(tempApk);
         await response.Content.CopyToAsync(file, ct);
+        _runLog.Detail($"download done {file.Length}B in {Elapsed(started)}ms");
     }
 
     /// <summary>
