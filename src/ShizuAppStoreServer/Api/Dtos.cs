@@ -103,6 +103,8 @@ public sealed record AppDetailDto(
     string? AuthorUrl,
     IReadOnlyList<string> Permissions,
     string? FullDescription,
+    string? Changelog,
+    IReadOnlyList<string> Screenshots,
     string SourceName);
 
 public sealed record CategoryPathDto(string Slug, string Name);

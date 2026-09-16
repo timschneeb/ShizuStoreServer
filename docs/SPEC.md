@@ -107,7 +107,13 @@ bundle` is rebuilt per deploy, never committed.
     analysis only, never F-Droid index metadata; recorded for every
     analyzed build whatever its source),
     `full_description` (GitHub/GitLab README markdown, or scraped plain-text Play
-    description, sent only on the detail endpoint), `enrich_etag` (conditional-request ETag
+    description, sent only on the detail endpoint), `changelog` (latest release
+    notes: GitHub release `body` or GitLab release `description` markdown, else
+    the F-Droid/Izzy index application `<desc>` long description; empty after a
+    checked pass with none; sent only on the detail endpoint), `screenshots`
+    (screenshot URLs from the F-Droid/Izzy `index-v2.json`, matched by every
+    package name the app publishes, capped at 12, upstream URLs only, sent only
+    on the detail endpoint), `enrich_etag` (conditional-request ETag
     reuse), `stars` (GitHub stargazers or GitLab star count), `download_total` (popularity, §8), `install_count`
     (successful installs reported by clients via
     `POST /v1/apps/{slug}/installs`; monotonic, never bumps `updated_at`), `version_updated_at`
@@ -291,10 +297,12 @@ therefore treats Izzy as forge-like.
   multi-app repo become variant rows (§5.2). Each asset's `digest`
   is mapped to `SourceAsset.Sha256` when it is a `sha256:` value
   (bare lowercase hex), which lets an unchanged asset skip its
-  download entirely (checksum short-circuit, §5.1).
+  download entirely (checksum short-circuit, §5.1). The release markdown
+  `body` is captured as the app's `changelog`.
 - **GitLab** (`GitLabReleaseClient`, `PRIVATE-TOKEN` from config or
   `SHIZU_GITLAB_TOKEN`): skips `upcoming` releases, prefers
-  `direct_asset_url`. APK links embedded in the release description
+  `direct_asset_url`. The release markdown `description` is captured as
+  the app's `changelog`; APK links embedded in that description
   (AuroraStore style) are collected too; relative `/uploads/...`
   links resolve through
   `https://gitlab.com/api/v4/projects/{urlencoded-path}{url}` (the
@@ -317,7 +325,14 @@ therefore treats Izzy as forge-like.
   The streaming parser collects every `<package>` per
   `<application>` (document order, newest first); version/versioncode/sig are child
   **elements** (package attributes accepted as fallback), `<sig>`
-  is the 32-hex signing-cert MD5. Same apk URL + version code →
+  is the 32-hex signing-cert MD5. The application-level `<desc>` (long
+  description, HTML) is captured as the app's `changelog`. A second
+  conditional GET of `{base}/index-v2.json` (its own per-repo ETag cache)
+  supplies `screenshots`: the preferred `phone` form factor and `en-US`
+  locale set becomes absolute upstream URLs for every package name the
+  app publishes (capped at 12); both repos are checked whatever the app's
+  primary source, so forge apps also gain shots when published on F-Droid
+  or Izzy. Same apk URL + version code →
   `UpToDate` with zero downloads (tightened to also require the
   recorded SHA-256 to match the index `sha256` when the index
   declares one, and a complete row: `package_name` and `icon_hash`
@@ -760,16 +775,20 @@ server's `sort=added` still orders by `added_at` (first sighting).
 `authorKey`/`authorName` (GitHub owner or GitLab namespace) ride on both
 summary and detail so clients can group apps by developer; `authorUrl`
 (profile link) is detail-only. `permissions` (the analyzed APK's
-requested permissions, aapt2-sourced only) and `fullDescription` (GitHub/GitLab
-README markdown, or plain-text Play description, capped at 200k chars) are
+requested permissions, aapt2-sourced only), `fullDescription` (GitHub/GitLab
+README markdown, or plain-text Play description, capped at 200k chars) and
+`changelog` (latest release notes: GitHub release `body` or GitLab release
+`description` markdown, else the F-Droid/Izzy index `<desc>`, capped at 100k
+chars) and `screenshots` (absolute upstream image URLs from the F-Droid/Izzy
+`index-v2.json`, capped at 12) are
 detail-only: they are deliberately absent from summaries and
-`/v1/changes`, and clients keep the README in memory rather than
-persisting it.
+`/v1/changes`, and clients keep the README, changelog and screenshots in memory
+rather than persisting them.
 
 | Endpoint | Behavior |
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `listing`/`availability`/`type` (parse or 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `screenshots[]`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts (excluded omitted). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |

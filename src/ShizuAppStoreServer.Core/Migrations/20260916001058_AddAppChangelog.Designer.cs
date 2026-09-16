@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260916001058_AddAppChangelog")]
+    partial class AddAppChangelog
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -185,11 +188,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Property<long?>("RootAppId")
                         .HasColumnType("bigint")
                         .HasColumnName("root_app_id");
-
-                    b.Property<string>("Screenshots")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("screenshots");
 
                     b.Property<string>("Slug")
                         .IsRequired()

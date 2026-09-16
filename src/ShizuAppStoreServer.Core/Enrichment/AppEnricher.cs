@@ -106,6 +106,27 @@ public sealed class AppEnricher(
     // excerpt, so cap what we persist and send.
     private const int MaxFullDescriptionChars = 200_000;
 
+    // Release notes and F-Droid long descriptions are unbounded too; the
+    // changelog screen only needs a sane excerpt.
+    private const int MaxChangelogChars = 100_000;
+
+    // A row that has never captured release notes fetches unconditionally
+    // once, so rows enriched before this field existed heal; afterwards the
+    // stored ETag throttles the fetch again. An empty (not null) changelog
+    // marks "fetched, this source publishes none".
+    private static string? ChangelogEtag(App app) => app.Changelog is null ? null : app.EnrichEtag;
+
+    private static string NormalizeChangelog(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length > MaxChangelogChars ? trimmed[..MaxChangelogChars] : trimmed;
+    }
+
     // GitHub's old rendered README HTML is recognizable by its wrapper tags; a
     // refetch replaces it with markdown. The markers are rendered-only, so raw
     // markdown (which may embed <p align="...">) never matches and is not
@@ -132,6 +153,7 @@ public sealed class AppEnricher(
         try
         {
             var result = await DispatchAsync(app, now, ct);
+            await ApplyScreenshotsAsync(app, ct);
 
             // External-only Play apps never get an APK; give them the real
             // listing icon instead of a generated avatar and stop counting
@@ -162,6 +184,112 @@ public sealed class AppEnricher(
             // cause recorded instead of a silent Failed.
             return Fail(app, now, $"Upstream error: {ex.Message}");
         }
+    }
+
+    // Screenshots come from the large index-v2.json, which the legacy
+    // index.xml path never touches. Best-effort: a missing or broken
+    // index-v2 must never fail an otherwise good enrichment.
+    private const int MaxScreenshots = 12;
+
+    private async Task ApplyScreenshotsAsync(App app, CancellationToken ct)
+    {
+        try
+        {
+            var packageIds = await CollectPackageIdsAsync(app, ct);
+            if (packageIds.Count == 0)
+            {
+                return;
+            }
+
+            var urls = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var repoBase in new[] { FdroidRepos.FDroidBase, FdroidRepos.IzzyBase })
+            {
+                var repo = repoBase.TrimEnd('/');
+                var map = await fdroid.GetScreenshotsAsync(repoBase, ct);
+                if (map is null)
+                {
+                    continue;
+                }
+
+                foreach (var id in packageIds)
+                {
+                    if (!map.TryGetValue(id, out var names))
+                    {
+                        continue;
+                    }
+
+                    foreach (var name in names)
+                    {
+                        if (string.IsNullOrWhiteSpace(name) || !seen.Add(name))
+                        {
+                            continue;
+                        }
+
+                        urls.Add($"{repo}/{name.TrimStart('/')}");
+                        if (urls.Count >= MaxScreenshots)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (urls.Count >= MaxScreenshots)
+                    {
+                        break;
+                    }
+                }
+
+                if (urls.Count >= MaxScreenshots)
+                {
+                    break;
+                }
+            }
+
+            if (!urls.SequenceEqual(app.Screenshots))
+            {
+                app.Screenshots = urls;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogDebug(ex, "Screenshot lookup failed for {Slug}.", app.Slug);
+        }
+    }
+
+    /// <summary>
+    /// Every package name this app can be known by: the primary plus each
+    /// variant download row. Variant rows added earlier in this same pass are
+    /// still only in the change tracker, so both are read.
+    /// </summary>
+    private async Task<List<string>> CollectPackageIdsAsync(App app, CancellationToken ct)
+    {
+        var ids = new List<string>();
+        void Add(string? id)
+        {
+            if (!string.IsNullOrWhiteSpace(id) && !ids.Contains(id, StringComparer.Ordinal))
+            {
+                ids.Add(id);
+            }
+        }
+
+        Add(app.PackageName);
+        foreach (var id in await db.Downloads.AsNoTracking()
+            .Where(d => d.AppId == app.Id)
+            .Select(d => d.PackageName)
+            .ToListAsync(ct))
+        {
+            Add(id);
+        }
+
+        foreach (var entry in db.ChangeTracker.Entries<AppDownload>())
+        {
+            if (entry.Entity.AppId == app.Id)
+            {
+                Add(entry.Entity.PackageName);
+            }
+        }
+
+        return ids;
     }
 
     private async Task<EnrichResult> DispatchAsync(App app, DateTimeOffset now, CancellationToken ct)
@@ -303,7 +431,7 @@ public sealed class AppEnricher(
         SourceRelease? latest;
         try
         {
-            latest = await github.GetLatestReleaseAsync(target, app.EnrichEtag, ct);
+            latest = await github.GetLatestReleaseAsync(target, ChangelogEtag(app), ct);
         }
         catch (GitHubApiException ex)
         {
@@ -351,6 +479,7 @@ public sealed class AppEnricher(
             }
 
             app.DownloadTotal = latest.TotalDownloads;
+            app.Changelog = NormalizeChangelog(latest.Changelog);
             release = latest;
         }
         catch (GitHubApiException ex)
@@ -434,6 +563,7 @@ public sealed class AppEnricher(
         }
 
         app.DownloadTotal = releases.Sum(r => r.TotalDownloads);
+        app.Changelog = NormalizeChangelog(releases[0].Changelog);
         var assets = releases.SelectMany(r => r.Assets).ToList();
         if (await EnrichFromAssetsAsync(
                 app, SourceKind.GitHub, assets, null, releaseReleasedAt: null,
@@ -501,7 +631,7 @@ public sealed class AppEnricher(
         SourceRelease? latest;
         try
         {
-            latest = await gitlab.GetLatestReleaseAsync(target, app.EnrichEtag, ct);
+            latest = await gitlab.GetLatestReleaseAsync(target, ChangelogEtag(app), ct);
         }
         catch (GitLabApiException ex)
         {
@@ -560,6 +690,7 @@ public sealed class AppEnricher(
             }
 
             release = latest;
+            app.Changelog = NormalizeChangelog(release.Changelog);
         }
         catch (GitLabApiException ex)
         {
@@ -1438,6 +1569,7 @@ public sealed class AppEnricher(
             Stars = root.Stars,
             DownloadTotal = root.DownloadTotal,
             FullDescription = root.FullDescription,
+            Changelog = root.Changelog,
             AddedAt = now,
             UpdatedAt = now,
             Root = root,
@@ -2065,7 +2197,7 @@ public sealed class AppEnricher(
         (IReadOnlyList<FdroidPackageInfo> Packages, string? IndexEtag)? fetched;
         try
         {
-            fetched = await fdroid.GetPackagesAsync(repoBase, packageId, app.EnrichEtag, ct);
+            fetched = await fdroid.GetPackagesAsync(repoBase, packageId, ChangelogEtag(app), ct);
         }
         catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
         {
@@ -2103,6 +2235,9 @@ public sealed class AppEnricher(
         {
             return Fail(app, now, $"F-Droid: package {packageId} not in the {repoBase} index.");
         }
+
+        // The index <desc> is the only changelog text these repos publish.
+        app.Changelog = NormalizeChangelog(package.LongDescription);
 
         var kind = repoBase == FdroidRepos.IzzyBase ? SourceKind.Izzy : SourceKind.FDroid;
         app.SourceKind = kind;

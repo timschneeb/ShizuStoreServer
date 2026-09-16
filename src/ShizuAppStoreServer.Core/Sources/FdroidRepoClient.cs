@@ -33,6 +33,29 @@ public sealed class FdroidRepoClient(HttpClient http)
 
         return (response.Headers.ETag?.ToString(), await response.Content.ReadAsByteArrayAsync(ct));
     }
+
+    /// <returns>Index-v2 ETag + raw JSON, or null on <c>304 Not Modified</c>.</returns>
+    /// <exception cref="HttpRequestException">Non-success status (unknown repo, …).</exception>
+    public async Task<(string? Etag, byte[] Json)?> GetIndexV2Async(
+        string repoBase, string? etag, CancellationToken ct = default)
+    {
+        var url = $"{repoBase.TrimEnd('/')}/index-v2.json";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.ApplyIfNoneMatch(etag);
+
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (response.StatusCode == HttpStatusCode.NotModified)
+        {
+            return null;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException($"F-Droid index-v2 {url} answered HTTP {(int)response.StatusCode}.");
+        }
+
+        return (response.Headers.ETag?.ToString(), await response.Content.ReadAsByteArrayAsync(ct));
+    }
 }
 
 /// <summary>
@@ -52,8 +75,12 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
 {
     private sealed record CachedIndex(string? Etag, IReadOnlyDictionary<string, IReadOnlyList<FdroidPackageInfo>> Packages);
 
+    private sealed record CachedScreenshots(string? Etag, IReadOnlyDictionary<string, IReadOnlyList<string>> Packages);
+
     private readonly ConcurrentDictionary<string, CachedIndex> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, CachedScreenshots> _screenshotCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _screenshotGates = new(StringComparer.OrdinalIgnoreCase);
 
     /// <returns>
     /// Package entry (null when absent from the index) + index ETag, or
@@ -137,6 +164,36 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
             }
 
             return cached;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Package id to screenshot paths for one repo, from the cached
+    /// <c>index-v2.json</c>. Null only when the index answered 304 with
+    /// nothing cached yet, so the caller treats screenshots as unavailable.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<string>>?> GetScreenshotsAsync(
+        string repoBase, CancellationToken ct = default)
+    {
+        var gate = _screenshotGates.GetOrAdd(repoBase, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            _screenshotCache.TryGetValue(repoBase, out var cached);
+            var fetched = await client.GetIndexV2Async(repoBase, cached?.Etag, ct);
+            if (fetched is not null)
+            {
+                cached = new CachedScreenshots(
+                    fetched.Value.Etag,
+                    FdroidIndexV2Parser.ParseScreenshots(fetched.Value.Json));
+                _screenshotCache[repoBase] = cached;
+            }
+
+            return cached?.Packages;
         }
         finally
         {

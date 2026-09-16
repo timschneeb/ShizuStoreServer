@@ -165,6 +165,21 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.AuthorUrl).HasColumnName("author_url").HasMaxLength(2000);
             e.Property(x => x.AuthorKey).HasColumnName("author_key").HasMaxLength(200);
             e.Property(x => x.FullDescription).HasColumnName("full_description");
+            e.Property(x => x.Changelog).HasColumnName("changelog");
+            // Screenshot URLs share the Permissions list encoding: newline
+            // joined so the schema stays identical on Postgres and SQLite.
+            e.Property(x => x.Screenshots)
+                .HasColumnName("screenshots")
+                .HasConversion(
+                    v => string.Join('\n', v),
+                    v => v.Length == 0
+                        ? new List<string>()
+                        : v.Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList(),
+                    new ValueComparer<List<string>>(
+                        (a, b) => a!.SequenceEqual(b!),
+                        v => v.Aggregate(0, (hash, item) => HashCode.Combine(hash, item.GetHashCode())),
+                        v => v.ToList()))
+                .IsRequired();
             e.Property(x => x.StoreUrl).HasColumnName("store_url").HasMaxLength(2000);
             e.Property(x => x.VersionName).HasColumnName("version_name").HasMaxLength(200);
             e.Property(x => x.IconHash).HasColumnName("icon_hash").HasMaxLength(128);

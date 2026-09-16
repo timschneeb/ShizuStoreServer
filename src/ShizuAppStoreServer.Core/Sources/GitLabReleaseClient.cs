@@ -146,7 +146,8 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
             latest.TagName,
             latest.ReleasedAt,
             responseEtag,
-            ApkAssetSelector.MarkPrimary(assets));
+            ApkAssetSelector.MarkPrimary(assets),
+            Changelog: latest.Description);
     }
 
     public async Task<GitLabProjectStats?> GetProjectStatsAsync(string projectPath, CancellationToken ct = default)

@@ -268,7 +268,9 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
                 authorName: "papergray",
                 authorUrl: "https://github.com/papergray",
                 permissions: ["android.permission.INTERNET"],
-                fullDescription: "# Readme"));
+                fullDescription: "# Readme",
+                changelog: "## 1.0",
+                screenshots: ["https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png"]));
         });
 
         var page = await GetPageAsync("?q=authored");
@@ -281,6 +283,8 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Equal("https://github.com/papergray", detail.AuthorUrl);
         Assert.Equal(["android.permission.INTERNET"], detail.Permissions);
         Assert.Equal("# Readme", detail.FullDescription);
+        Assert.Equal("## 1.0", detail.Changelog);
+        Assert.Equal(["https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png"], detail.Screenshots);
     }
 
     [Fact]

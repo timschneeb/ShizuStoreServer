@@ -37,6 +37,8 @@ public static class Seeds
         string? authorUrl = null,
         List<string>? permissions = null,
         string? fullDescription = null,
+        string? changelog = null,
+        List<string>? screenshots = null,
         string? versionName = null,
         string? displayName = null) => new()
         {
@@ -56,6 +58,8 @@ public static class Seeds
             AuthorUrl = authorUrl,
             Permissions = permissions ?? [],
             FullDescription = fullDescription,
+            Changelog = changelog,
+            Screenshots = screenshots ?? [],
             VersionName = versionName,
             Category = category,
             Parent = parent,

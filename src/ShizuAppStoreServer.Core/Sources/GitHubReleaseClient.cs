@@ -134,7 +134,8 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
             release.PublishedAt,
             responseEtag,
             ApkAssetSelector.MarkPrimary(assets),
-            totalDownloads);
+            totalDownloads,
+            release.Body);
     }
 
     public async Task<IReadOnlyList<SourceRelease>> GetAllReleasesAsync(
@@ -173,7 +174,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
                         a.Name, a.BrowserDownloadUrl, Size: a.Size,
                         Sha256: NormalizeDigest(a.Digest), ReleasedAt: release.PublishedAt))
                     .ToList();
-                result.Add(new SourceRelease(release.TagName, release.PublishedAt, null, assets));
+                result.Add(new SourceRelease(release.TagName, release.PublishedAt, null, assets, Changelog: release.Body));
             }
 
             if (releases.Count < pageSize)
@@ -327,6 +328,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
 
         [JsonPropertyName("published_at")]
         public DateTimeOffset? PublishedAt { get; set; }
+
+        [JsonPropertyName("body")]
+        public string? Body { get; set; }
 
         [JsonPropertyName("assets")]
         public List<AssetDto> Assets { get; set; } = [];

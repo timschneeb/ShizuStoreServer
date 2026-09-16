@@ -93,6 +93,7 @@ public sealed class SourcesTests
             ["draft"] = false,
             ["prerelease"] = true,
             ["published_at"] = "2024-05-01T00:00:00Z",
+            ["body"] = "## 2.0-beta\n- Added thing",
             ["assets"] = new JsonArray(
                 new JsonObject
                 {
@@ -140,6 +141,7 @@ public sealed class SourcesTests
 
         // Prereleases count: many Shizuku apps ship only prereleases.
         Assert.Equal("v2.0-beta", release.TagName);
+        Assert.Equal("## 2.0-beta\n- Added thing", release.Changelog);
         var asset = Assert.Single(release.Assets);
         Assert.Equal("app-release.apk", asset.Name);
         Assert.Equal(12345678, asset.Size);
@@ -655,6 +657,7 @@ public sealed class SourcesTests
         });
         var release = (await GitLabClient(stub).GetLatestReleaseAsync("o/r", null))!;
 
+        Assert.Contains("[App standard](/uploads/sec1/App-1.0.apk)", release.Changelog);
         Assert.Equal(4, release.Assets.Count);
         Assert.Equal("app-release.apk", release.Assets[0].Name);
         Assert.Equal("https://cdn.example/app.apk", release.Assets[0].Url);

@@ -36,7 +36,9 @@ public sealed record FdroidPackageInfo(
     /// <summary>Upstream source repo URL from the application-level <c>&lt;source&gt;</c>.</summary>
     string? SourceUrl = null,
     /// <summary>Native ABI from <c>&lt;nativecode&gt;</c>; null for fat/universal builds.</summary>
-    string? Abi = null);
+    string? Abi = null,
+    /// <summary>Long description from the application-level <c>&lt;desc&gt;</c> (HTML).</summary>
+    string? LongDescription = null);
 
 /// <summary>
 /// Streaming parser for F-Droid repo <c>index.xml</c> (v1 format): collects
@@ -47,8 +49,9 @@ public sealed record FdroidPackageInfo(
 /// elements (package attributes are accepted as a fallback), plus
 /// <c>apkname</c>, <c>hash</c>, <c>size</c>, <c>sdkver</c> (min SDK),
 /// <c>sig</c> (signing-cert MD5), <c>nativecode</c> and the top-level
-/// <c>&lt;icon&gt;</c>/<c>&lt;source&gt;</c>. Unknown elements are ignored, so
-/// <c>&lt;localized&gt;</c> blocks and future fields don't break parsing.
+/// <c>&lt;icon&gt;</c>/<c>&lt;source&gt;</c>/<c>&lt;desc&gt;</c>. Unknown
+/// elements are ignored, so <c>&lt;localized&gt;</c> blocks and future fields
+/// don't break parsing.
 /// </summary>
 public static class FdroidIndexParser
 {
@@ -87,6 +90,7 @@ public static class FdroidIndexParser
         var depth = reader.Depth;
         string? icon = null;
         string? source = null;
+        string? desc = null;
         var packages = new List<FdroidPackageInfo>();
         while (reader.Read())
         {
@@ -105,6 +109,10 @@ public static class FdroidIndexParser
                 {
                     source = ReadLeafText(reader);
                 }
+                else if (reader.Name == "desc" && desc is null)
+                {
+                    desc = ReadLeafText(reader);
+                }
                 else if (reader.Name == "package" && ReadPackage(reader, id) is { } package)
                 {
                     packages.Add(package);
@@ -112,9 +120,9 @@ public static class FdroidIndexParser
             }
         }
 
-        // The application-level icon/source are shared by every package, and
-        // may appear before or after the packages.
-        if (string.IsNullOrWhiteSpace(icon) && string.IsNullOrWhiteSpace(source))
+        // The application-level icon/source/desc are shared by every package,
+        // and may appear before or after the packages.
+        if (string.IsNullOrWhiteSpace(icon) && string.IsNullOrWhiteSpace(source) && string.IsNullOrWhiteSpace(desc))
         {
             return packages;
         }
@@ -125,6 +133,7 @@ public static class FdroidIndexParser
             {
                 IconFile = string.IsNullOrWhiteSpace(icon) ? packages[i].IconFile : icon,
                 SourceUrl = string.IsNullOrWhiteSpace(source) ? packages[i].SourceUrl : source,
+                LongDescription = string.IsNullOrWhiteSpace(desc) ? packages[i].LongDescription : desc,
             };
         }
 

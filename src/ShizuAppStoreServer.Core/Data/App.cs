@@ -105,6 +105,21 @@ public sealed class App
     /// </summary>
     public string? FullDescription { get; set; }
 
+    /// <summary>
+    /// Latest release notes: the release markdown body for GitHub/GitLab, or
+    /// the F-Droid/Izzy index long description when the source publishes no
+    /// release notes. Server-only: sent on the detail endpoint, never in
+    /// summaries or the change feed.
+    /// </summary>
+    public string? Changelog { get; set; }
+
+    /// <summary>
+    /// Screenshot image URLs harvested from the F-Droid/Izzy <c>index-v2.json</c>
+    /// for any of the app's package names. Server-only: sent on the detail
+    /// endpoint, never in summaries or the change feed.
+    /// </summary>
+    public List<string> Screenshots { get; set; } = [];
+
     public string? StoreUrl { get; set; }
 
     /// <summary>

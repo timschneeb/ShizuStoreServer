@@ -30,13 +30,15 @@ public sealed record SourceAsset(
 /// validator stored on the app row for conditional requests; a null
 /// resolution means <c>304 Not Modified</c>. <c>Assets</c> holds the primary
 /// build plus any sibling builds (for example one APK per ABI).
+/// <c>Changelog</c> is the release markdown body when the source publishes one.
 /// </summary>
 public sealed record SourceRelease(
     string TagName,
     DateTimeOffset? ReleasedAt,
     string? Etag,
     IReadOnlyList<SourceAsset> Assets,
-    long TotalDownloads = 0);
+    long TotalDownloads = 0,
+    string? Changelog = null);
 
 /// <summary>
 /// Source-scoped app identity. <c>Key</c> is the source's own locator:

@@ -124,7 +124,7 @@ public sealed class AppEnricherTests : IDisposable
 
     private static string ReleaseJson(
         string tag, string assetName, string assetUrl, long size,
-        string? digest = null, string publishedAt = "2024-06-01T00:00:00Z")
+        string? digest = null, string publishedAt = "2024-06-01T00:00:00Z", string? body = null)
     {
         var asset = new JsonObject
         {
@@ -138,14 +138,20 @@ public sealed class AppEnricherTests : IDisposable
             asset["digest"] = digest;
         }
 
-        return new JsonArray(new JsonObject
+        var release = new JsonObject
         {
             ["tag_name"] = tag,
             ["draft"] = false,
             ["prerelease"] = false,
             ["published_at"] = publishedAt,
             ["assets"] = new JsonArray(asset),
-        }).ToJsonString();
+        };
+        if (body is not null)
+        {
+            release["body"] = body;
+        }
+
+        return new JsonArray(release).ToJsonString();
     }
 
     private static string ReleaseJsonMultiAssets(params (string Name, string Url, long Size)[] assets)
@@ -217,6 +223,10 @@ public sealed class AppEnricherTests : IDisposable
         </fdroid>
         """;
 
+    // index-v2.json carries the screenshots index.xml lacks. Most tests only
+    // need an empty screenshot map so the lookup stays a fast no-op.
+    private static readonly string EmptyIndexV2Json = """{"packages":{}}""";
+
     private AppEnricher BuildEnricher(
         StubHandler github,
         StubHandler downloads,
@@ -231,8 +241,14 @@ public sealed class AppEnricherTests : IDisposable
         new(new GitHubReleaseClient(new HttpClient(github), "tok"),
             new GitLabReleaseClient(new HttpClient(gitlab ?? new StubHandler(_ =>
                 throw new InvalidOperationException("must not call GitLab")))),
-            new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(fdroid ?? new StubHandler(_ =>
-                new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(EmptyIndexXml) })))),
+            new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(fdroid ?? new StubHandler(request =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        request.RequestUri!.AbsolutePath.EndsWith("index-v2.json")
+                            ? EmptyIndexV2Json
+                            : EmptyIndexXml),
+                })))),
             aapt2,
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
             launcherIcons ?? new LauncherIconService(),
@@ -242,12 +258,12 @@ public sealed class AppEnricherTests : IDisposable
 
     /// <summary>Canonical happy-path wiring: stable release → APK download → badging → icon.</summary>
     private (AppEnricher Enricher, StubHandler Github, StubHandler Downloads, FakeAapt2Runner Aapt2, byte[] Zip)
-        HappyPath(string tag = "v1.0", string versionCode = "42", Color? iconColor = null, string? etag = "\"rel-etag\"", FakeSignerRunner? signer = null)
+        HappyPath(string tag = "v1.0", string versionCode = "42", Color? iconColor = null, string? etag = "\"rel-etag\"", FakeSignerRunner? signer = null, string? changelog = null)
     {
         var zip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, iconColor ?? Color.Blue)));
         var github = new StubHandler(_ => JsonReleases(
-            ReleaseJson(tag, "app-release.apk", "https://cdn.example/app.apk", zip.Length), etag));
+            ReleaseJson(tag, "app-release.apk", "https://cdn.example/app.apk", zip.Length, body: changelog), etag));
         var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new ByteArrayContent(zip),
@@ -351,6 +367,18 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("1.2.3", version.VersionName);
         await _db.SaveChangesAsync();
         Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task GitHubReleaseBodyBecomesChangelog()
+    {
+        var (enricher, _, _, _, _) = HappyPath(changelog: "## 1.0\n- First release");
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal("## 1.0\n- First release", app.Changelog);
     }
 
     [Fact]
@@ -1109,8 +1137,9 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(192, icon.Width);
     }
 
-    private static string GitLabJson(string tag, string linkName, string linkUrl) =>
-        new JsonArray(new JsonObject
+    private static string GitLabJson(string tag, string linkName, string linkUrl, string? description = null)
+    {
+        var release = new JsonObject
         {
             ["tag_name"] = tag,
             ["upcoming_release"] = false,
@@ -1124,7 +1153,14 @@ public sealed class AppEnricherTests : IDisposable
                     ["direct_asset_url"] = linkUrl,
                 }),
             },
-        }).ToJsonString();
+        };
+        if (description is not null)
+        {
+            release["description"] = description;
+        }
+
+        return new JsonArray(release).ToJsonString();
+    }
 
     private static HttpResponseMessage GitLabReleases(string json, string? etag = "\"gl-etag\"")
     {
@@ -1184,6 +1220,7 @@ public sealed class AppEnricherTests : IDisposable
         <fdroid>
           <application id="com.example.app">
             <name>Example</name>
+            <desc>A &lt;b&gt;plain&lt;/b&gt; summary of the app.</desc>
             <icon>com.example.app.png</icon>
             <source>https://github.com/example/aod</source>
             <package>
@@ -1245,12 +1282,15 @@ public sealed class AppEnricherTests : IDisposable
     /// <summary>F-Droid wiring: index fetch + icon mirror; the APK download is attempted but 404s, exercising the index-only fallback.</summary>
     private (AppEnricher Enricher, StubHandler Fdroid, StubHandler Downloads)
         FdroidHappyPath(byte[]? iconBytes = null, bool icon404 = false, Func<HttpResponseMessage>? githubResponse = null,
-            IzzyStatsProvider? izzyStats = null)
+            IzzyStatsProvider? izzyStats = null, string? indexV2Json = null)
     {
         iconBytes ??= TestAssets.SolidPng(256, 256, Color.Purple);
-        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        var fdroid = new StubHandler(request =>
         {
-            Content = new StringContent(FdroidIndexXml),
+            var body = request.RequestUri!.AbsolutePath.EndsWith("index-v2.json")
+                ? indexV2Json ?? EmptyIndexV2Json
+                : FdroidIndexXml;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
         });
         var downloads = new StubHandler(request =>
         {
@@ -1369,7 +1409,9 @@ public sealed class AppEnricherTests : IDisposable
 
             if (url.Contains("/releases", StringComparison.Ordinal))
             {
-                return GitLabReleases(GitLabJson("v1.0", "app-release.apk", "https://cdn.example/app.apk"));
+                return GitLabReleases(GitLabJson(
+                    "v1.0", "app-release.apk", "https://cdn.example/app.apk",
+                    description: "## 1.0\n- First release"));
             }
 
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -1393,6 +1435,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(522, app.Stars);
         Assert.Equal("# FMD Android\n\nFind your device.\n", app.FullDescription);
+        Assert.Equal("## 1.0\n- First release", app.Changelog);
         Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
     }
 
@@ -1591,7 +1634,8 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        Assert.Equal(1, fdroid.Calls);
+        // index.xml plus the two index-v2 screenshot lookups (F-Droid, Izzy).
+        Assert.Equal(3, fdroid.Calls);
         Assert.Equal(2, downloads.Calls); // APK attempt (404 → index-only) + icon
         Assert.Equal(Availability.DirectApk, app.Availability);
         Assert.Equal(SourceKind.FDroid, app.SourceKind);
@@ -1611,6 +1655,8 @@ public sealed class AppEnricherTests : IDisposable
         // F-Droid publishes no release dates, so the app stays unknown and sorts
         // last under "recently updated".
         Assert.Null(app.VersionUpdatedAt);
+        // The application-level <desc> is the only changelog text the index has.
+        Assert.Equal("A <b>plain</b> summary of the app.", app.Changelog);
         // Icon is the mirrored repo PNG, normalized to 192px.
         Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
         using var icon = Image.Load(Path.Combine(_iconDir, $"{app.IconHash}.png"));
@@ -1618,6 +1664,46 @@ public sealed class AppEnricherTests : IDisposable
         var version = Assert.Single(app.Versions);
         Assert.Equal(20, version.VersionCode);
         Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", version.ApkUrl);
+    }
+
+    [Fact]
+    public async Task AppliesScreenshotsFromIndexV2()
+    {
+        // index-v2.json is the only F-Droid/Izzy artifact that carries
+        // screenshots; they are matched by package name and left as upstream
+        // URLs. The Izzy host serves the same body, so its duplicate relative
+        // names are dropped.
+        const string indexV2 = """
+            {
+              "packages": {
+                "com.example.app": {
+                  "metadata": {
+                    "screenshots": {
+                      "phone": {
+                        "en-US": [
+                          { "name": "/com.example.app/en-US/phoneScreenshots/00.png" },
+                          { "name": "/com.example.app/en-US/phoneScreenshots/01.png" }
+                        ],
+                        "de": [
+                          { "name": "/com.example.app/de/phoneScreenshots/00.png" }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        var (enricher, _, _) = FdroidHappyPath(indexV2Json: indexV2);
+        var app = NewApp("catshare", "CatShare", "https://f-droid.org/packages/com.example.app/");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(
+            [
+                "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png",
+                "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/01.png",
+            ],
+            app.Screenshots);
     }
 
     [Fact]
@@ -1892,9 +1978,10 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        // Two index fetches: the source lookup fills the cache, then the
-        // regular package fetch revalidates it (the stub never sends 304).
-        Assert.Equal(2, fdroid.Calls);
+        // Two index fetches per repo: the source lookup fills the cache, then
+        // the regular package fetch revalidates it; plus the two screenshot
+        // lookups on index-v2.json (the stub never sends 304).
+        Assert.Equal(4, fdroid.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
         var primary = Primary(app);
         Assert.Equal(SourceKind.FDroid, primary.Source);

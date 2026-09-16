@@ -22,6 +22,7 @@ public sealed class FdroidTests
             <lastupdated>2024-06-01</lastupdated>
             <name>Example</name>
             <summary>An example</summary>
+            <desc>An &lt;b&gt;example&lt;/b&gt; long description</desc>
             <icon>com.example.app.png</icon>
             <source>https://github.com/Example/App.git</source>
             <package version="2.0" versioncode="20">
@@ -83,6 +84,97 @@ public sealed class FdroidTests
         return response;
     }
 
+    // Only index-v2.json carries screenshots (index.xml has none).
+    private const string IndexV2Json = """
+        {
+          "packages": {
+            "com.example.app": {
+              "metadata": {
+                "screenshots": {
+                  "phone": {
+                    "en-US": [
+                      { "name": "/com.example.app/en-US/phoneScreenshots/00.png", "sha256": "a", "size": 1 },
+                      { "name": "/com.example.app/en-US/phoneScreenshots/01.png", "sha256": "b", "size": 2 }
+                    ],
+                    "de": [
+                      { "name": "/com.example.app/de/phoneScreenshots/00.png" }
+                    ]
+                  },
+                  "sevenInch": {
+                    "en-US": [ { "name": "/com.example.app/en-US/sevenInchScreenshots/00.png" } ]
+                  }
+                }
+              }
+            },
+            "com.example.tv": {
+              "metadata": {
+                "screenshots": {
+                  "tv": { "en-US": [ { "name": "/com.example.tv/en-US/tvScreenshots/00.png" } ] }
+                }
+              }
+            },
+            "com.example.bare": { "metadata": {} },
+            "com.example.nometa": {}
+          }
+        }
+        """;
+
+    private static HttpResponseMessage IndexV2Response(string? etag = "\"v2-etag\"")
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(IndexV2Json, Encoding.UTF8, "application/json"),
+        };
+        if (etag is not null)
+        {
+            response.Headers.ETag = new EntityTagHeaderValue(etag);
+        }
+
+        return response;
+    }
+
+    [Fact]
+    public void ParsesIndexV2ScreenshotsPreferredFormFactorAndLocale()
+    {
+        var map = FdroidIndexV2Parser.ParseScreenshots(Encoding.UTF8.GetBytes(IndexV2Json));
+
+        Assert.Equal(
+            ["/com.example.app/en-US/phoneScreenshots/00.png", "/com.example.app/en-US/phoneScreenshots/01.png"],
+            map["com.example.app"]);
+        // No phone shots: the only form factor is used.
+        Assert.Equal(["/com.example.tv/en-US/tvScreenshots/00.png"], map["com.example.tv"]);
+        Assert.DoesNotContain("com.example.bare", map);
+        Assert.DoesNotContain("com.example.nometa", map);
+    }
+
+    [Fact]
+    public async Task FetchesAndCachesIndexV2Screenshots()
+    {
+        // The v2 map is cached by ETag exactly like index.xml.
+        var stub = new StubHandler(request =>
+            request.Headers.IfNoneMatch.ToString().Contains("v2-etag")
+                ? new HttpResponseMessage(HttpStatusCode.NotModified)
+                : IndexV2Response());
+        var provider = new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(stub)));
+
+        var first = await provider.GetScreenshotsAsync(FdroidRepos.FDroidBase);
+        var second = await provider.GetScreenshotsAsync(FdroidRepos.FDroidBase);
+
+        Assert.Equal(2, stub.Calls);
+        Assert.Equal(2, first!["com.example.app"].Count);
+        Assert.Equal(first["com.example.app"], second!["com.example.app"]);
+        Assert.Contains("v2-etag", stub.Requests[1].Headers.IfNoneMatch.ToString());
+    }
+
+    [Fact]
+    public async Task ReturnsNullForIndexV2On304WithoutCache()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotModified));
+        var provider = new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(stub)));
+
+        Assert.Null(await provider.GetScreenshotsAsync(FdroidRepos.FDroidBase));
+    }
+
     [Fact]
     public void ParsesNewestPackagePerApp()
     {
@@ -104,6 +196,7 @@ public sealed class FdroidTests
         Assert.Equal("deadbeef", app.SigMd5);
         Assert.Equal("https://github.com/Example/App.git", app.SourceUrl);
         Assert.Equal("arm64-v8a", app.Abi);
+        Assert.Equal("An <b>example</b> long description", app.LongDescription);
     }
 
     [Fact]
