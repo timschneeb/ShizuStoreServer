@@ -24,6 +24,11 @@ android {
 }
 
 tasks.withType(Test).configureEach {
+    // The Paparazzi test JVM hosts LayoutLib and the icon render. Cap its heap
+    // and force a single fork: production renders on a small 2 vCPU host where
+    // an unbounded JVM plus the Gradle daemon can push the box into swap.
+    maxHeapSize = "512m"
+    maxParallelForks = 1
     systemProperty "iconName", findProperty("iconName") ?: "spike_vector"
     systemProperty "iconPx", findProperty("iconPx") ?: "432"
     // Exact-size PNG path written by the test itself; defaults empty (no

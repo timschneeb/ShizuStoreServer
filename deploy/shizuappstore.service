@@ -12,17 +12,35 @@ ExecStart=/opt/shizuappstore/app/ShizuAppStoreServer
 EnvironmentFile=/etc/shizuappstore/env
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=ASPNETCORE_URLS=http://127.0.0.1:5137
+# Paparazzi renders through the Gradle tool in /opt/shizuappstore/icon-render.
+# Gradle needs a writable home for its daemon registry and caches, and the
+# Android SDK location for AGP.
+Environment=GRADLE_USER_HOME=/opt/shizuappstore/gradle-home
+Environment=ANDROID_HOME=/opt/android-sdk
 Restart=on-failure
 RestartSec=10
-# The worker enriches APKs in parallel; keep some headroom, cap the blast radius.
-MemoryMax=2G
+# The worker enriches APKs in parallel; hard-cap CPU/memory/IO so a full
+# backfill cannot starve the rest of the box. The JVMs are additionally capped
+# in gradle-home/gradle.properties and tools/icon-render/app/build.gradle.
+MemoryHigh=1500M
+MemoryMax=1800M
+MemorySwapMax=256M
+CPUQuota=150%
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+IOWeight=50
+# systemd creates /var/log/shizu (Enrichment:RunLogPath) with the right owner
+# and implies write access under ProtectSystem=strict.
+LogsDirectory=shizu
 # Hardening (the service only needs loopback HTTP + Postgres + outbound HTTPS
-# for the GitHub/GitLab/F-Droid APIs, plus write access to the icon store).
+# for the GitHub/GitLab/F-Droid APIs, plus write access to the icon store, the
+# Gradle tool/daemon state, and the list clone it git-fetches).
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/shizuappstore/icons
+ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list
 
 [Install]
 WantedBy=multi-user.target

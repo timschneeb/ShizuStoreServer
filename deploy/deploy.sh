@@ -9,7 +9,11 @@ set -euo pipefail
 
 SERVER="${1:?usage: ./deploy/deploy.sh <ssh-host>}"
 APP_DIR=/opt/shizuappstore/app
+ICON_TOOL_DIR=/opt/shizuappstore/icon-render
 SERVICE=shizuappstore.service
+# The service tree is owned by the shizu user; run the remote rsync as that
+# user (passwordless sudo) instead of widening permissions.
+REMOTE_RSYNC="sudo -u shizu rsync"
 
 # 1. Single-file publish (profile: Properties/PublishProfiles/linux-x64.pubxml).
 dotnet publish src/ShizuAppStoreServer/ShizuAppStoreServer.csproj \
@@ -26,14 +30,22 @@ dotnet ef migrations bundle \
 # 3. Ship the binary, production config note, and the bundle.
 # (appsettings.Production.json + /etc/shizuappstore/env live on the server
 # and are never overwritten by this script.)
-rsync -av --delete \
+rsync -av --delete --rsync-path="$REMOTE_RSYNC" \
   --exclude 'appsettings.Production.json' \
   src/ShizuAppStoreServer/bin/Release/net10.0/publish/ "$SERVER:$APP_DIR/"
-scp deploy/out/efbundle "$SERVER:$APP_DIR/efbundle"
+rsync -av --rsync-path="$REMOTE_RSYNC" deploy/out/efbundle "$SERVER:$APP_DIR/efbundle"
+
+# 3b. The Paparazzi icon tool is not part of the publish output, so it is
+# synced separately. build/, .gradle/, and local.properties are host-local
+# state (Gradle caches and the SDK path) and stay untouched.
+rsync -av --delete --rsync-path="$REMOTE_RSYNC" \
+  --exclude 'build/' --exclude '.gradle/' --exclude 'local.properties' \
+  tools/icon-render/ "$SERVER:$ICON_TOOL_DIR/"
 
 # 4. Migrate + restart on the server.
 # The connection string comes from the server's own
 # appsettings.Production.json / /etc/shizuappstore/env, so no secrets cross
-# the wire here.
-ssh "$SERVER" "sudo -u shizu $APP_DIR/efbundle && sudo systemctl restart $SERVICE"
+# the wire here. The bundle resolves its config from $APP_DIR, hence the cd.
+ssh "$SERVER" "cd $APP_DIR && sudo -u shizu env ASPNETCORE_ENVIRONMENT=Production $APP_DIR/efbundle"
+ssh "$SERVER" "sudo systemctl restart $SERVICE"
 ssh "$SERVER" "systemctl is-active $SERVICE"

@@ -210,3 +210,5 @@ FakesAssemblies/
 *.sln.iml
 
 .idea
+
+/deploy/out
