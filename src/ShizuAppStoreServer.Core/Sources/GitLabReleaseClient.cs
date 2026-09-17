@@ -36,6 +36,14 @@ public interface IGitLabReleaseClient : IAppSource
     /// </summary>
     Task<string?> GetReadmeMarkdownAsync(string projectPath, CancellationToken ct = default) =>
         Task.FromResult<string?>(null);
+
+    /// <summary>
+    /// Markdown of a README the list entry links directly (localized
+    /// <c>README_EN.md</c> on projects whose landing README is non-English).
+    /// Null on any failure. Default impl keeps test doubles simple.
+    /// </summary>
+    Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+        Task.FromResult<string?>(null);
 }
 
 /// <summary>
@@ -147,7 +155,8 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
             latest.ReleasedAt,
             responseEtag,
             ApkAssetSelector.MarkPrimary(assets),
-            Changelog: latest.Description);
+            Changelog: latest.Description,
+            WebUrl: latest.Links.Self);
     }
 
     public async Task<GitLabProjectStats?> GetProjectStatsAsync(string projectPath, CancellationToken ct = default)
@@ -254,6 +263,9 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
         }
     }
 
+    public Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+        ReadmeLink.FetchAsync(_http, url, ct);
+
     private static bool TryReadString(JsonElement element, string name, out string? value)
     {
         value = element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
@@ -320,6 +332,16 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
 
         [JsonPropertyName("assets")]
         public AssetsDto Assets { get; set; } = new();
+
+        /// <summary>GitLab reports the web release page as <c>_links.self</c>.</summary>
+        [JsonPropertyName("_links")]
+        public LinksDto Links { get; set; } = new();
+    }
+
+    private sealed class LinksDto
+    {
+        [JsonPropertyName("self")]
+        public string? Self { get; set; }
     }
 
     private sealed class AssetsDto

@@ -226,9 +226,8 @@ public sealed class CatalogUpserterTests : IDisposable
             """;
 
         var parser = new AwesomeListParser();
-        // The closed doc is passed directly to prove a Closed-source apps
-        // section still maps to Apps when one reaches the upserter; sync
-        // itself never reads CLOSED_SOURCE.md anymore.
+        // Upserter-level proof that a Closed-source apps section maps to Apps
+        // and keeps the closed listing; SyncService feeds the parsed real file.
         var counts = await Upserter().UpsertAsync([
             parser.Parse(closed, "closed-source"),
             parser.Parse(libs, "main"),
@@ -259,8 +258,8 @@ public sealed class CatalogUpserterTests : IDisposable
 
         var parser = new AwesomeListParser();
         var main = parser.Parse(await File.ReadAllTextAsync(readme), "main");
-        // Sync ignores CLOSED_SOURCE.md; the empty doc still marks the
-        // listing as synced so pre-decision rows sweep out as stale.
+        // The empty closed doc still marks the listing as synced so closed
+        // rows sweep out; SyncService parses the real file instead.
         var closedDoc = new ParsedDocument { ListingName = "closed-source" };
 
         // Real git history for the README (empty when git is unavailable).

@@ -49,6 +49,40 @@ public sealed class SourcesTests
     public void RejectsNonRepoUrls(string? url) =>
         Assert.False(SourceClassifier.TryParseGitHubRepo(url, out _, out _));
 
+    [Theory]
+    [InlineData("https://github.com/ChaoMixian/vFlow/blob/master/README_EN.md", true)]
+    [InlineData("https://github.com/o/r/blob/main/docs/README.en.md", true)]
+    [InlineData("https://gitlab.com/o/r/-/blob/master/README.markdown", true)]
+    [InlineData("https://example.com/downloads/README.md", true)]
+    [InlineData("https://github.com/o/r/blob/main/README", false)]
+    [InlineData("https://github.com/o/r/blob/main/README.txt", false)]
+    [InlineData("https://github.com/o/r", false)]
+    [InlineData("not a url", false)]
+    [InlineData(null, false)]
+    public void DetectsLinkedReadmes(string? url, bool expected) =>
+        Assert.Equal(expected, ReadmeLink.IsReadme(url));
+
+    [Theory]
+    [InlineData(
+        "https://github.com/ChaoMixian/vFlow/blob/master/README_EN.md",
+        "https://raw.githubusercontent.com/ChaoMixian/vFlow/master/README_EN.md")]
+    [InlineData(
+        "https://github.com/o/r/raw/main/docs/README_EN.md",
+        "https://raw.githubusercontent.com/o/r/main/docs/README_EN.md")]
+    [InlineData(
+        "https://gitlab.com/o/r/-/blob/master/README.md",
+        "https://gitlab.com/o/r/-/raw/master/README.md")]
+    [InlineData(
+        "https://gitlab.com/group/sub/r/-/blob/main/docs/README_EN.md",
+        "https://gitlab.com/group/sub/r/-/raw/main/docs/README_EN.md")]
+    [InlineData(
+        "https://example.com/downloads/README.md",
+        "https://example.com/downloads/README.md")]
+    [InlineData("https://github.com/o/r", null)]
+    [InlineData("not a url", null)]
+    public void ResolvesRawReadmeUrls(string? url, string? expected) =>
+        Assert.Equal(expected, ReadmeLink.ToRawUrl(url));
+
     [Fact]
     public void PrefersReleaseApkOverLargerSplit()
     {
@@ -94,6 +128,7 @@ public sealed class SourcesTests
             ["prerelease"] = true,
             ["published_at"] = "2024-05-01T00:00:00Z",
             ["body"] = "## 2.0-beta\n- Added thing",
+            ["html_url"] = "https://github.com/o/r/releases/tag/v2.0-beta",
             ["assets"] = new JsonArray(
                 new JsonObject
                 {
@@ -142,6 +177,7 @@ public sealed class SourcesTests
         // Prereleases count: many Shizuku apps ship only prereleases.
         Assert.Equal("v2.0-beta", release.TagName);
         Assert.Equal("## 2.0-beta\n- Added thing", release.Changelog);
+        Assert.Equal("https://github.com/o/r/releases/tag/v2.0-beta", release.WebUrl);
         var asset = Assert.Single(release.Assets);
         Assert.Equal("app-release.apk", asset.Name);
         Assert.Equal(12345678, asset.Size);
@@ -275,6 +311,34 @@ public sealed class SourcesTests
     {
         var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
         Assert.Null(await Client(stub).GetReadmeMarkdownAsync("o", "r"));
+    }
+
+    [Fact]
+    public async Task ReadsLinkedReadmeMarkdown()
+    {
+        var stub = new StubHandler(request =>
+        {
+            Assert.Equal(
+                "https://raw.githubusercontent.com/o/r/main/README_EN.md",
+                request.RequestUri!.ToString());
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("# Linked\n"),
+            };
+        });
+
+        Assert.Equal(
+            "# Linked\n",
+            await Client(stub).GetLinkedMarkdownAsync(
+                "https://github.com/o/r/blob/main/README_EN.md"));
+    }
+
+    [Fact]
+    public async Task LinkedReadmeFailsSoftToNull()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        Assert.Null(await Client(stub).GetLinkedMarkdownAsync(
+            "https://github.com/o/r/blob/main/README_EN.md"));
     }
 
     [Fact]
@@ -611,6 +675,10 @@ public sealed class SourcesTests
                         ["direct_asset_url"] = "https://cdn.example/app.apk",
                     }),
             },
+            ["_links"] = new JsonObject
+            {
+                ["self"] = "https://gitlab.com/o/r/-/releases/v1.0",
+            },
         }).ToJsonString();
 
     private static GitLabReleaseClient GitLabClient(StubHandler stub, string? token = "gl-token") =>
@@ -679,6 +747,7 @@ public sealed class SourcesTests
         var release = (await GitLabClient(stub).GetLatestReleaseAsync("o/r", null))!;
 
         Assert.Equal("v1.0", release.TagName);
+        Assert.Equal("https://gitlab.com/o/r/-/releases/v1.0", release.WebUrl);
         var link = Assert.Single(release.Assets);
         Assert.Equal("app-release.apk", link.Name);
         Assert.Equal("https://cdn.example/app.apk", link.Url);
@@ -776,6 +845,26 @@ public sealed class SourcesTests
         Assert.Equal(
             "# FMD Android\n\nFind your device.\n",
             await GitLabClient(stub).GetReadmeMarkdownAsync("o/r"));
+    }
+
+    [Fact]
+    public async Task ReadsLinkedGitLabReadmeMarkdown()
+    {
+        var stub = new StubHandler(request =>
+        {
+            Assert.Equal(
+                "https://gitlab.com/o/r/-/raw/master/README_EN.md",
+                request.RequestUri!.ToString());
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("# EN\n"),
+            };
+        });
+
+        Assert.Equal(
+            "# EN\n",
+            await GitLabClient(stub).GetLinkedMarkdownAsync(
+                "https://gitlab.com/o/r/-/blob/master/README_EN.md"));
     }
 
     [Fact]

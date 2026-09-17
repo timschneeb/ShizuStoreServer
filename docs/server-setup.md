@@ -95,17 +95,31 @@ SHIZU_GITHUB_TOKEN=github_pat_…
 Anonymous works but is limited to 60 requests/hour; the initial backfill
 needs the PAT, later ETag-conditioned re-checks are cheap either way.
 
-Admin webhook secret (`POST /v1/admin/sync` authenticates with
-`X-Shizu-Signature: hex(HMAC-SHA256(raw_body, secret))`; without a secret
-the endpoint fail-closes with 503):
+Admin webhook token (`POST /v1/admin/sync` authenticates with
+`Authorization: Bearer <token>`; without a token the endpoint fail-closes
+with 503):
 
 ```bash
 # systemd unit or /etc/shizuappstore/env:
 SHIZU_ADMIN_SECRET=$(openssl rand -hex 32)
 ```
 
-The `Admin:HmacSecret` config key works too, but env is preferred; never
-commit the secret to appsettings.json.
+`Admin:Token` config and the `SHIZU_ADMIN_TOKEN` env name work too; the
+legacy `SHIZU_ADMIN_SECRET` name is kept for existing deployments. Never
+commit the token to appsettings.json. A request queues a run and wakes the
+fast loop right away; a commit that lands during a pass triggers an
+immediate follow-up pass. GitHub Actions example (secret
+`SHIZU_ADMIN_SECRET`):
+
+```yaml
+- name: Notify Shizu store
+  run: |
+    curl -fsS -X POST \
+      -H "Authorization: Bearer ${{ secrets.SHIZU_ADMIN_SECRET }}" \
+      -H 'Content-Type: application/json' \
+      --data '{"reason":"awesome-shizuku ${{ github.sha }}"}' \
+      https://shizustore.timschneeberger.me/v1/admin/sync
+```
 
 ## aapt2 (icon extraction)
 

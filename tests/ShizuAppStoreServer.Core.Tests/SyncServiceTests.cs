@@ -111,26 +111,27 @@ public sealed class SyncServiceTests : IDisposable
         Assert.False(result.Skipped);
         Assert.Equal("scheduled", result.Trigger);
         Assert.Equal(head, result.HeadCommit);
-        Assert.Equal(2, result.Added);
+        Assert.Equal(3, result.Added);
         Assert.Equal(0, result.Updated);
         Assert.Equal(0, result.Removed);
-        Assert.Equal(2, result.Enriched);
+        Assert.Equal(3, result.Enriched);
         Assert.Equal(0, result.DrainedRequests);
-        Assert.Equal(2, _runner.Calls.Count);
+        Assert.Equal(3, _runner.Calls.Count);
         Assert.All(_runner.Calls, c => Assert.False(c.Force));
 
         var run = Assert.Single(_db.SyncRuns.ToList());
         Assert.Equal("scheduled", run.Trigger);
         Assert.Equal(head, run.HeadCommit);
-        Assert.Equal(2, run.Added);
+        Assert.Equal(3, run.Added);
         Assert.NotNull(run.FinishedAt);
 
         // Git history backfill: entry timestamps come from the commit, not "now".
         var tuner = _db.Apps.Single(a => a.Slug == "tuner");
         Assert.Equal(new DateTimeOffset(2026, 1, 5, 10, 0, 0, TimeSpan.Zero), tuner.AddedAt);
-        Assert.Equal(2, _db.Apps.Count());
-        // CLOSED_SOURCE.md is committed but ignored: no Widget row.
-        Assert.DoesNotContain(_db.Apps, a => a.Slug == "widget");
+        Assert.Equal(3, _db.Apps.Count());
+        // The closed list is ingested as its own listing.
+        var widget = _db.Apps.Single(a => a.Slug == "widget");
+        Assert.Equal(Listing.ClosedSource, widget.Listing);
     }
 
     [Fact]
@@ -151,7 +152,7 @@ public sealed class SyncServiceTests : IDisposable
         Assert.True(second.Skipped);
         Assert.Null(second.Error);
         Assert.Single(_db.SyncRuns.ToList()); // skipped passes write nothing
-        Assert.Equal(2, _runner.Calls.Count); // nothing due (fake marks rows checked)
+        Assert.Equal(3, _runner.Calls.Count); // nothing due (fake marks rows checked)
     }
 
     [Fact]
@@ -180,6 +181,45 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RequestArrivingDuringAPassStaysQueuedForTheFollowUp()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        var injected = false;
+        _runner.EnrichHook = _ =>
+        {
+            if (injected)
+            {
+                return;
+            }
+
+            injected = true;
+            _db.SyncRequests.Add(new SyncRequest { RequestedAt = T0, Reason = "mid-pass hook" });
+            _db.SaveChanges();
+        };
+
+        var first = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddDays(2));
+        _runner.EnrichHook = null;
+
+        // The pass never saw it, so it must not consume the request.
+        Assert.Equal("scheduled", first.Trigger);
+        Assert.Equal(0, first.DrainedRequests);
+        var queued = Assert.Single(_db.SyncRequests.ToList());
+        Assert.False(queued.Processed);
+
+        var followUp = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddDays(2).AddMinutes(1));
+        Assert.Equal("webhook", followUp.Trigger);
+        Assert.Equal(1, followUp.DrainedRequests);
+        Assert.True(Assert.Single(_db.SyncRequests.ToList()).Processed);
+    }
+
+    [Fact]
     public async Task ListChangeEnrichesOnlyNewApps()
     {
         if (!InitRepo())
@@ -198,7 +238,7 @@ public sealed class SyncServiceTests : IDisposable
 
         Assert.Equal(1, result.Added);
         Assert.Equal(0, result.Removed);
-        Assert.Equal(3, _runner.Calls.Count); // only the new app was due
+        Assert.Equal(4, _runner.Calls.Count); // only the new app was due
         var drum = _db.Apps.Single(a => a.Slug == "drum");
         Assert.Equal(new DateTimeOffset(2026, 1, 10, 10, 0, 0, TimeSpan.Zero), drum.AddedAt);
     }
@@ -274,7 +314,7 @@ public sealed class SyncServiceTests : IDisposable
 
         Assert.False(result.Skipped);
         Assert.Equal("nightly", result.Trigger);
-        Assert.Equal(2, _runner.Calls.Count - callsBefore);
+        Assert.Equal(3, _runner.Calls.Count - callsBefore);
         Assert.All(_runner.Calls.Skip(callsBefore), c => Assert.True(c.Force));
     }
 
@@ -340,7 +380,7 @@ public sealed class SyncServiceTests : IDisposable
 
         var callsBefore = _runner.Calls.Count;
         await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
-        Assert.Equal(2, _runner.Calls.Count - callsBefore);
+        Assert.Equal(3, _runner.Calls.Count - callsBefore);
         Assert.DoesNotContain(_runner.Calls.Skip(callsBefore), c => c.AppId == variant.Id);
     }
 
@@ -634,12 +674,12 @@ public sealed class SyncServiceTests : IDisposable
         var begin = Assert.Single(log.Begins);
         Assert.Equal("scheduled", begin.Trigger);
         Assert.False(begin.FullRecheck);
-        Assert.Equal(2, begin.AppCount);
-        Assert.Equal(2, log.Apps.Count);
+        Assert.Equal(3, begin.AppCount);
+        Assert.Equal(3, log.Apps.Count);
         Assert.Contains(log.Apps, a => a.Slug == "tuner");
         Assert.Contains(log.Apps, a => a.Result.Outcome == EnrichOutcome.Enriched);
         var end = Assert.Single(log.Ends);
-        Assert.Equal(2, end.Enriched);
+        Assert.Equal(3, end.Enriched);
         Assert.Equal(0, end.Failed);
         var issues = Assert.Single(log.IssueSnapshots);
         Assert.Equal(1, issues.RunId);
@@ -696,8 +736,8 @@ public sealed class SyncServiceTests : IDisposable
         var result = await service.RunAsync("scheduled", fullRecheck: false, T0);
 
         Assert.Null(result.Error);
-        Assert.Equal(2, result.Failed);
-        Assert.Equal(2, result.FailedMessages.Count);
+        Assert.Equal(3, result.Failed);
+        Assert.Equal(3, result.FailedMessages.Count);
         Assert.All(result.FailedMessages, m => Assert.Contains("boom", m));
     }
 
@@ -819,6 +859,9 @@ public sealed class SyncServiceTests : IDisposable
         public List<(long AppId, bool Force)> Calls { get; } = [];
 
         public Func<long, PrepareIconResult>? PrepareHook;
+
+        /// <summary>Runs during enrichment; used to simulate a webhook arriving mid-pass.</summary>
+        public Action<long>? EnrichHook;
         public List<(long AppId, byte[]? Png)> Commits { get; } = [];
 
         public Task<EnrichResult> EnrichAsync(long appId, bool force, DateTimeOffset now, CancellationToken ct)
@@ -831,6 +874,7 @@ public sealed class SyncServiceTests : IDisposable
                 db.SaveChanges();
             }
 
+            EnrichHook?.Invoke(appId);
             return Task.FromResult(new EnrichResult(EnrichOutcome.Enriched, null));
         }
 
@@ -918,9 +962,9 @@ public sealed class SyncServiceTests : IDisposable
         var runsBefore = _db.SyncRuns.Count();
         var result = await RefreshService(_runner, renderer).RefreshIconsAsync();
 
-        Assert.Equal(2, result.Checked);
+        Assert.Equal(3, result.Checked);
         Assert.Equal(2, result.Refreshed);
-        Assert.Equal(0, result.AlreadyCurrent);
+        Assert.Equal(1, result.AlreadyCurrent);
         Assert.Equal(0, result.Failed);
         var batch = Assert.Single(renderer.Calls); // one Gradle invocation
         Assert.Equal(2, batch.Count);
@@ -951,9 +995,9 @@ public sealed class SyncServiceTests : IDisposable
         var result = await RefreshService(_runner, new CannedBatchRenderer([7], throwAll: true))
             .RefreshIconsAsync();
 
-        Assert.Equal(2, result.Checked);
+        Assert.Equal(3, result.Checked);
         Assert.Equal(0, result.Refreshed);
-        Assert.Equal(2, result.Failed);
+        Assert.Equal(3, result.Failed);
         Assert.All(result.Errors, e => Assert.Contains("batch render failed", e));
         Assert.Empty(_runner.Commits); // phase C never runs
     }

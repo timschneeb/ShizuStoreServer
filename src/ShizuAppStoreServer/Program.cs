@@ -79,11 +79,13 @@ if (apiOptions.EnableOutputCache)
 var connectionString = builder.Configuration.GetConnectionString("Shizu");
 builder.Services.AddDbContext<ShizuDbContext>(o => o.UseNpgsql(connectionString));
 
-// Operator-auth secret (AdminOptions singleton so integration tests can
-// swap it per suite; the admin controller takes it via DI).
+// Operator auth token (AdminOptions singleton so integration tests can swap
+// it per suite; the admin controller takes it via DI). The legacy env name
+// keeps existing deployments working until the secret is rotated.
 var adminOptions = new AdminOptions
 {
-    HmacSecret = builder.Configuration["Admin:HmacSecret"]
+    Token = builder.Configuration["Admin:Token"]
+        ?? Environment.GetEnvironmentVariable("SHIZU_ADMIN_TOKEN")
         ?? Environment.GetEnvironmentVariable("SHIZU_ADMIN_SECRET"),
 };
 builder.Services.AddSingleton(adminOptions);
@@ -164,7 +166,9 @@ builder.Services.AddSingleton<IRunLog>(sp => string.IsNullOrWhiteSpace(enrichmen
 builder.Services.AddScoped<SyncService>();
 builder.Services.AddScoped<IEnrichmentRunner, EnrichmentRunner>();
 builder.Services.AddSingleton<SyncGate>();
+builder.Services.AddSingleton<SyncSignal>();
 builder.Services.AddSingleton<SyncPassRunner>();
+builder.Services.AddSingleton<ISyncPassRunner>(sp => sp.GetRequiredService<SyncPassRunner>());
 builder.Services.AddHostedService<SyncWorker>();
 builder.Services.AddHostedService<NightlyWorker>();
 

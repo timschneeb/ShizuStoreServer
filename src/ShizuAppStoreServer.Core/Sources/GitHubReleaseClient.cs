@@ -41,6 +41,14 @@ public interface IGitHubReleaseClient : IAppSource
         Task.FromResult<string?>(null);
 
     /// <summary>
+    /// Markdown of a README the list entry links directly (localized
+    /// <c>README_EN.md</c> on projects whose landing README is non-English).
+    /// Null on any failure. Default impl keeps test doubles simple.
+    /// </summary>
+    Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+        Task.FromResult<string?>(null);
+
+    /// <summary>
     /// Every non-draft release, newest first, each with its own assets. Used
     /// only for repos that ship several distinct apps, one release per app.
     /// Empty by default so test doubles that only serve the latest release
@@ -135,7 +143,8 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
             responseEtag,
             ApkAssetSelector.MarkPrimary(assets),
             totalDownloads,
-            release.Body);
+            release.Body,
+            release.HtmlUrl);
     }
 
     public async Task<IReadOnlyList<SourceRelease>> GetAllReleasesAsync(
@@ -174,7 +183,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
                         a.Name, a.BrowserDownloadUrl, Size: a.Size,
                         Sha256: NormalizeDigest(a.Digest), ReleasedAt: release.PublishedAt))
                     .ToList();
-                result.Add(new SourceRelease(release.TagName, release.PublishedAt, null, assets, Changelog: release.Body));
+                result.Add(new SourceRelease(release.TagName, release.PublishedAt, null, assets, Changelog: release.Body, WebUrl: release.HtmlUrl));
             }
 
             if (releases.Count < pageSize)
@@ -274,6 +283,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         }
     }
 
+    public Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+        ReadmeLink.FetchAsync(_http, url, ct);
+
     /// <summary>
     /// GitHub reports an asset checksum as <c>sha256:&lt;hex&gt;</c> (null for
     /// assets uploaded before the field existed). Normalize to bare lowercase
@@ -331,6 +343,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
 
         [JsonPropertyName("body")]
         public string? Body { get; set; }
+
+        [JsonPropertyName("html_url")]
+        public string? HtmlUrl { get; set; }
 
         [JsonPropertyName("assets")]
         public List<AssetDto> Assets { get; set; } = [];

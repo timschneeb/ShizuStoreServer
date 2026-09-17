@@ -146,6 +146,7 @@ public sealed class AppEnricherTests : IDisposable
             ["draft"] = false,
             ["prerelease"] = false,
             ["published_at"] = publishedAt,
+            ["html_url"] = $"https://github.com/o/r/releases/tag/{tag}",
             ["assets"] = new JsonArray(asset),
         };
         if (body is not null)
@@ -381,6 +382,7 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal("## 1.0\n- First release", app.Changelog);
+        Assert.Equal("https://github.com/o/r/releases/tag/v1.0", app.ChangelogUrl);
     }
 
     [Fact]
@@ -769,6 +771,96 @@ public sealed class AppEnricherTests : IDisposable
         markdown.FullDescription = "# Already";
         await enricher.EnrichAsync(markdown, T0);
         Assert.Equal("# Already", markdown.FullDescription);
+        Assert.Equal(1, readmeCalls);
+    }
+
+    [Fact]
+    public async Task PrefersLinkedReadmeOverRepoDefault()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var readmeCalls = 0;
+        var linkedCalls = 0;
+        var github = new StubHandler(request =>
+        {
+            // A list entry linking README_EN.md directly must use that file and
+            // leave the repo default README untouched.
+            if (request.RequestUri!.Host == "raw.githubusercontent.com")
+            {
+                linkedCalls++;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("# Linked\n"),
+                };
+            }
+
+            if (request.RequestUri.AbsolutePath.EndsWith("/readme", StringComparison.Ordinal))
+            {
+                readmeCalls++;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("# Default\n"),
+                };
+            }
+
+            return JsonReleases(
+                ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length),
+                "\"rel-etag\"");
+        });
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var app = NewApp("vflow", "vFlow",
+            "https://github.com/ChaoMixian/vFlow/blob/master/README_EN.md");
+
+        await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal("# Linked\n", app.FullDescription);
+        Assert.Equal(1, linkedCalls);
+        Assert.Equal(0, readmeCalls);
+    }
+
+    [Fact]
+    public async Task LinkedReadmeFailureFallsBackToRepoDefault()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var readmeCalls = 0;
+        var github = new StubHandler(request =>
+        {
+            if (request.RequestUri!.Host == "raw.githubusercontent.com")
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            if (request.RequestUri.AbsolutePath.EndsWith("/readme", StringComparison.Ordinal))
+            {
+                readmeCalls++;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("# Default\n"),
+                };
+            }
+
+            return JsonReleases(
+                ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length),
+                "\"rel-etag\"");
+        });
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var app = NewApp("vflowfallback", "vFlowFallback",
+            "https://github.com/ChaoMixian/vFlow/blob/master/README_EN.md");
+        app.FullDescription =
+            "<div id=\"readme\" class=\"md\" data-path=\"README.md\"><p>rendered</p></div>";
+
+        await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal("# Default\n", app.FullDescription);
         Assert.Equal(1, readmeCalls);
     }
 
@@ -1227,6 +1319,10 @@ public sealed class AppEnricherTests : IDisposable
                     ["direct_asset_url"] = linkUrl,
                 }),
             },
+            ["_links"] = new JsonObject
+            {
+                ["self"] = $"https://gitlab.com/o/r/-/releases/{tag}",
+            },
         };
         if (description is not null)
         {
@@ -1510,6 +1606,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(522, app.Stars);
         Assert.Equal("# FMD Android\n\nFind your device.\n", app.FullDescription);
         Assert.Equal("## 1.0\n- First release", app.Changelog);
+        Assert.Equal("https://gitlab.com/o/r/-/releases/v1.0", app.ChangelogUrl);
         Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
     }
 

@@ -50,6 +50,31 @@ public sealed class CategoriesTests(ShizuApiFactory factory) : IClassFixture<Shi
     }
 
     [Fact]
+    public async Task TreeCountsScopeToRequestedListings()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.AddRange(
+                Seeds.NewApp("micup", audio),
+                Seeds.NewApp("aura", audio, listing: Listing.ClosedSource));
+        });
+
+        var main = await factory.NewClient().GetAsync("/v1/categories");
+        var mainTree = (await main.Content.ReadFromJsonAsync<List<CategoryNodeDto>>(Json))!;
+        Assert.Equal(1, mainTree.Single(n => n.Slug == "audio").AppCount);
+
+        var both = await factory.NewClient()
+            .GetAsync("/v1/categories?listing=main,closed_source");
+        var bothTree = (await both.Content.ReadFromJsonAsync<List<CategoryNodeDto>>(Json))!;
+        Assert.Equal(2, bothTree.Single(n => n.Slug == "audio").AppCount);
+
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await factory.NewClient().GetAsync("/v1/categories?listing=bogus")).StatusCode);
+    }
+
+    [Fact]
     public async Task TreeEtagReturns304()
     {
         await factory.ResetAsync(db =>
@@ -121,6 +146,46 @@ public sealed class ChangesTests(ShizuApiFactory factory) : IClassFixture<ShizuA
             a => a.Slug == "stale" || a.Slug == "hidden-fresh");
         Assert.Equal(["gone"], changes.Removed.Select(r => r.Slug));
         Assert.Equal("Gone", changes.Removed[0].Name);
+    }
+
+    [Fact]
+    public async Task ListingFilterScopesChangesAndTombstones()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.AddRange(
+                Seeds.NewApp("main-fresh", audio, addedAt: Jul2, updatedAt: Jul2),
+                Seeds.NewApp("closed-fresh", audio, listing: Listing.ClosedSource,
+                    addedAt: Jul2, updatedAt: Jul2));
+            db.RemovedApps.AddRange(
+                new RemovedApp
+                {
+                    Slug = "main-gone", Name = "Main Gone",
+                    Listing = Listing.Main, RemovedAt = Jul2,
+                },
+                new RemovedApp
+                {
+                    Slug = "closed-gone", Name = "Closed Gone",
+                    Listing = Listing.ClosedSource, RemovedAt = Jul2,
+                });
+        });
+
+        var mainResponse = await factory.NewClient().GetAsync("/v1/changes?since=" + Since);
+        var main = (await mainResponse.Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+        Assert.Equal(["main-fresh"], main.Added.Select(a => a.Slug));
+        Assert.Equal(["main-gone"], main.Removed.Select(r => r.Slug));
+
+        var bothResponse = await factory.NewClient()
+            .GetAsync("/v1/changes?since=" + Since + "&listing=main,closed_source");
+        var both = (await bothResponse.Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+        Assert.Equal(["closed-fresh", "main-fresh"], both.Added.Select(a => a.Slug).Order());
+        Assert.Equal(["closed-gone", "main-gone"], both.Removed.Select(r => r.Slug).Order());
+
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await factory.NewClient()
+                .GetAsync("/v1/changes?since=" + Since + "&listing=bogus")).StatusCode);
     }
 
     [Fact]

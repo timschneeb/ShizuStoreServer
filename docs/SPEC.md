@@ -110,7 +110,9 @@ bundle` is rebuilt per deploy, never committed.
     description, sent only on the detail endpoint), `changelog` (latest release
     notes: GitHub release `body` or GitLab release `description` markdown, else
     the F-Droid/Izzy index application `<desc>` long description; empty after a
-    checked pass with none; sent only on the detail endpoint), `screenshots`
+    checked pass with none; sent only on the detail endpoint), `changelog_url`
+    (browser page of the release the notes came from; null for index-sourced
+    notes; sent only on the detail endpoint), `screenshots`
     (screenshot URLs from the F-Droid/Izzy `index-v2.json`, matched by every
     package name the app publishes, capped at 12, upstream URLs only, sent only
     on the detail endpoint), `enrich_etag` (conditional-request ETag
@@ -200,18 +202,20 @@ bundle` is rebuilt per deploy, never committed.
 ## 4. List ingestion
 
 - **Parser** (`Parsing/`, Markdig): reads `README.md` (listing
-  `main`) only, and only its `## Apps` section: Development
-  libraries and Miscellaneous content stay out of the catalog.
-  `pages/CLOSED_SOURCE.md` is intentionally ignored (Play-only
-  proprietary entries, user call); sync still passes an empty
-  `closed-source` document so pre-decision rows sweep out as stale.
-  Hierarchy (categories, subcategories, nested child entries) and
-  per-entry flags/license/source links are preserved.
+  `main`) and `pages/CLOSED_SOURCE.md` (listing `closed_source`),
+  and only their `## Apps` sections: Development libraries and
+  Miscellaneous content stay out of the catalog. A missing closed
+  list parses as empty, so a mirror without it serves main only and
+  old closed rows sweep out as stale. Hierarchy (categories,
+  subcategories, nested child entries) and per-entry
+  flags/license/source links are preserved.
 - **History** (`History/GitHistoryService`): one
-  `git log --reverse -p` pass over `README.md`; the first
+  `git log --reverse -p` pass per list file (`README.md` and
+  `pages/CLOSED_SOURCE.md`); the first
   `+* [Name](url)` sighting of a URL is `added_at`, the last is
   `updated_at`. Commits flagged `[silent]` are housekeeping and are
-  skipped, matching the published changelog. The upserter seeds
+  skipped, matching the published changelog. A URL listed in both
+  files keeps its main-list dates. The upserter seeds
   `list_updated_at` from that last non-silent sighting (the changelog's
   "recently changed" clock) and re-seeds `added_at`/`list_updated_at` on
   every pass; afterwards
@@ -219,7 +223,8 @@ bundle` is rebuilt per deploy, never committed.
   while `version_updated_at` tracks the served APK version.
 - **Upserter** (`Sync/CatalogUpserter`): matches rows by
   `(listing, url)`. Rows from sections no longer ingested
-  (libraries, misc, closed-source) sweep out as stale. Same-URL
+  (libraries, misc) sweep out as stale, and closed rows sweep when the
+  closed list drops them. Same-URL
   rename keeps id + slug and moves the row to the new category; a URL
   repeated in another category is a duplicate and is skipped. Stale
   `(url, category)` pairs, including duplicates created by earlier
@@ -253,8 +258,9 @@ Conditional source requests replay the stored `enrich_etag` via
 parses with `EntityTagHeaderValue.TryParse`: GitHub weak validators
 (`W/"..."`) are replayed and malformed tags are skipped instead of
 throwing (one bad tag previously failed that app's pass forever). A 304
-reuses the prior result; forge 304s still refresh `stars` (and the
-GitLab README while missing). Rows with a fully analyzed build on
+reuses the prior result; forge 304s still refresh `stars`, the GitLab
+README while missing, and a list-linked README on every pass). Rows with
+a fully analyzed build on
 record (SHA-256 identity) but blank permissions re-analyze once: the
 F-Droid path never persisted them before, and the same-asset and 304
 short-circuits would otherwise keep them blank forever (live:
@@ -306,11 +312,13 @@ therefore treats Izzy as forge-like.
   verifies them against the recorded primary hash, so identical content
   skips re-analysis (the rare undetected replacement is accepted when no
   digest is declared). The release markdown
-  `body` is captured as the app's `changelog`.
+  `body` is captured as the app's `changelog`, and the release's
+  `html_url` as `changelog_url`.
 - **GitLab** (`GitLabReleaseClient`, `PRIVATE-TOKEN` from config or
   `SHIZU_GITLAB_TOKEN`): skips `upcoming` releases, prefers
   `direct_asset_url`. The release markdown `description` is captured as
-  the app's `changelog`; APK links embedded in that description
+  the app's `changelog` (the web release page `_links.self` as
+  `changelog_url`); APK links embedded in that description
   (AuroraStore style) are collected too; relative `/uploads/...`
   links resolve through
   `https://gitlab.com/api/v4/projects/{urlencoded-path}{url}` (the
@@ -341,7 +349,8 @@ therefore treats Izzy as forge-like.
   `<application>` (document order, newest first); version/versioncode/sig are child
   **elements** (package attributes accepted as fallback), `<sig>`
   is the 32-hex signing-cert MD5. The application-level `<desc>` (long
-  description, HTML) is captured as the app's `changelog`. A second
+  description, HTML) is captured as the app's `changelog` (index-sourced
+  notes have no release page, so `changelog_url` stays null). A second
   conditional GET of `{base}/index-v2.json` (its own per-repo ETag cache)
   supplies `screenshots`: the preferred `phone` form factor and `en-US`
   locale set becomes absolute upstream URLs for every package name the
@@ -783,7 +792,10 @@ and every section stays whole.
 Snake_case wire format (`main|closed_source`, `app|library|flow`,
 `apps|libraries|misc`, `github|gitlab|codeberg|fdroid|izzy|play|
 other`, `direct_apk|play_redirect|link_only|excluded`). `excluded`
-rows are never returned (detail reads them as 404). Summary/list DTOs
+rows are never returned (detail reads them as 404). Closed-source rows
+are served only when `listing` explicitly includes `closed_source`:
+the default is main-only, so closed entries stay out of every list,
+count and delta unless a client opts in. Summary/list DTOs
 source `versionCode`/`versionName`/`minSdk`/`size`/`sigSha256`/`sigMd5`
 from the primary download (`size` is the primary APK's `size_bytes`, null
 when unknown).
@@ -821,26 +833,30 @@ server's `sort=added` still orders by `added_at` (first sighting).
 summary and detail so clients can group apps by developer; `authorUrl`
 (profile link) is detail-only. `permissions` (the analyzed APK's
 requested permissions, aapt2-sourced only), `fullDescription` (GitHub/GitLab
-README markdown, or plain-text Play description, capped at 200k chars) and
+README markdown, or plain-text Play description, capped at 200k chars; when
+the list entry's `app.Url` is itself a markdown README, e.g. a localized
+`README_EN.md` on a non-English landing page, that linked file wins over the
+repo default) and
 `changelog` (latest release notes: GitHub release `body` or GitLab release
 `description` markdown, else the F-Droid/Izzy index `<desc>`, capped at 100k
-chars) and `screenshots` (absolute upstream image URLs from the F-Droid/Izzy
-`index-v2.json`, capped at 12) are
+chars), `changelogUrl` (browser release page the notes came from, null for
+index-sourced notes) and `screenshots` (absolute upstream image URLs from the
+F-Droid/Izzy `index-v2.json`, capped at 12) are
 detail-only: they are deliberately absent from summaries and
 `/v1/changes`, and clients keep the README, changelog and screenshots in memory
 rather than persisting them.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `listing`/`availability`/`type` (parse or 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `screenshots[]`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
-| `GET /v1/categories` | Tree with per-node subtree app counts (excluded omitted). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
-| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. Output-cached 30s, `VaryByQuery(*)`. |
+| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
+| `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
+| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
 | `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
-| `POST /v1/admin/sync` | Webhook: secret from `Admin:HmacSecret` or `SHIZU_ADMIN_SECRET`, else fail-closed 503. `X-Shizu-Signature` must be hex `HMAC-SHA256(raw body)` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row → 202 `{queued:true}`. |
+| `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).

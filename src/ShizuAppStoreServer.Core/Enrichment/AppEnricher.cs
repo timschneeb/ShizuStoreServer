@@ -171,6 +171,35 @@ public sealed class AppEnricher(
         || value.Contains("class=\"markdown-heading\"", StringComparison.Ordinal)
         || value.Contains("class=\"highlight", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Raw markdown, not rendered HTML: the client renders markdown. When the
+    /// list entry links a markdown README directly (localized README_EN.md on
+    /// projects whose landing README is non-English), that file wins over the
+    /// repo default and is refetched every pass, so rows enriched before this
+    /// pick existed heal. The default fetch keeps its legacy-HTML gate.
+    /// </summary>
+    private async Task RefreshFullDescriptionAsync(
+        App app, Func<Task<string?>> fetchLinked, Func<Task<string?>> fetchDefault)
+    {
+        if (ReadmeLink.IsReadme(app.Url)
+            && await fetchLinked() is { Length: > 0 } linked)
+        {
+            SetFullDescription(app, linked);
+            return;
+        }
+
+        if (NeedsReadmeRefresh(app.FullDescription)
+            && await fetchDefault() is { Length: > 0 } readme)
+        {
+            SetFullDescription(app, readme);
+        }
+    }
+
+    private static void SetFullDescription(App app, string value) =>
+        app.FullDescription = value.Length > MaxFullDescriptionChars
+            ? value[..MaxFullDescriptionChars]
+            : value;
+
     private readonly ConcurrentDictionary<string, Lazy<Task<ProcessedIcon?>>> _iconByPackage =
         new(StringComparer.Ordinal);
 
@@ -525,14 +554,10 @@ public sealed class AppEnricher(
         {
             await RefreshGitHubStatsAsync(app, owner, repo, ct);
 
-            // Raw markdown, not rendered HTML: the client renders markdown.
-            if (NeedsReadmeRefresh(app.FullDescription)
-                && await github.GetReadmeMarkdownAsync(owner, repo, ct) is { Length: > 0 } readme)
-            {
-                app.FullDescription = readme.Length > MaxFullDescriptionChars
-                    ? readme[..MaxFullDescriptionChars]
-                    : readme;
-            }
+            await RefreshFullDescriptionAsync(
+                app,
+                () => github.GetLinkedMarkdownAsync(app.Url, ct),
+                () => github.GetReadmeMarkdownAsync(owner, repo, ct));
 
             if (latest is null)
             {
@@ -563,6 +588,7 @@ public sealed class AppEnricher(
 
             app.DownloadTotal = latest.TotalDownloads;
             app.Changelog = NormalizeChangelog(latest.Changelog);
+            app.ChangelogUrl = latest.WebUrl;
             release = latest;
         }
         catch (GitHubApiException ex)
@@ -620,14 +646,10 @@ public sealed class AppEnricher(
     {
         await RefreshGitHubStatsAsync(app, owner, repo, ct);
 
-        // Raw markdown, not rendered HTML: the client renders markdown.
-        if (NeedsReadmeRefresh(app.FullDescription)
-            && await github.GetReadmeMarkdownAsync(owner, repo, ct) is { Length: > 0 } readme)
-        {
-            app.FullDescription = readme.Length > MaxFullDescriptionChars
-                ? readme[..MaxFullDescriptionChars]
-                : readme;
-        }
+        await RefreshFullDescriptionAsync(
+            app,
+            () => github.GetLinkedMarkdownAsync(app.Url, ct),
+            () => github.GetReadmeMarkdownAsync(owner, repo, ct));
 
         IReadOnlyList<SourceRelease> releases;
         try
@@ -647,6 +669,7 @@ public sealed class AppEnricher(
 
         app.DownloadTotal = releases.Sum(r => r.TotalDownloads);
         app.Changelog = NormalizeChangelog(releases[0].Changelog);
+        app.ChangelogUrl = releases[0].WebUrl;
         var assets = releases.SelectMany(r => r.Assets).ToList();
         if (await EnrichFromAssetsAsync(
                 app, SourceKind.GitHub, assets, null, releaseReleasedAt: null,
@@ -742,14 +765,10 @@ public sealed class AppEnricher(
         {
             await RefreshGitLabStatsAsync(app, projectPath, ct);
 
-            // Raw markdown, not rendered HTML: the client renders markdown.
-            if (NeedsReadmeRefresh(app.FullDescription)
-                && await gitlab.GetReadmeMarkdownAsync(projectPath, ct) is { Length: > 0 } readme)
-            {
-                app.FullDescription = readme.Length > MaxFullDescriptionChars
-                    ? readme[..MaxFullDescriptionChars]
-                    : readme;
-            }
+            await RefreshFullDescriptionAsync(
+                app,
+                () => gitlab.GetLinkedMarkdownAsync(app.Url, ct),
+                () => gitlab.GetReadmeMarkdownAsync(projectPath, ct));
 
             if (latest is null)
             {
@@ -780,6 +799,7 @@ public sealed class AppEnricher(
 
             release = latest;
             app.Changelog = NormalizeChangelog(release.Changelog);
+            app.ChangelogUrl = release.WebUrl;
         }
         catch (GitLabApiException ex)
         {
@@ -1681,6 +1701,7 @@ public sealed class AppEnricher(
             DownloadTotal = root.DownloadTotal,
             FullDescription = root.FullDescription,
             Changelog = root.Changelog,
+            ChangelogUrl = root.ChangelogUrl,
             AddedAt = now,
             UpdatedAt = now,
             Root = root,

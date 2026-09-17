@@ -104,6 +104,7 @@ public sealed record AppDetailDto(
     IReadOnlyList<string> Permissions,
     string? FullDescription,
     string? Changelog,
+    string? ChangelogUrl,
     IReadOnlyList<string> Screenshots,
     string SourceName);
 

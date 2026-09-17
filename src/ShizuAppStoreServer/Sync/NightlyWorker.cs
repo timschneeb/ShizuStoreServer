@@ -8,7 +8,7 @@ namespace ShizuAppStoreServer.Sync;
 /// changed, version bumps append to <c>app_versions</c>.
 /// </summary>
 public sealed class NightlyWorker(
-    SyncPassRunner runner, SyncOptions options, ILogger<NightlyWorker> logger) : BackgroundService
+    ISyncPassRunner runner, SyncOptions options, ILogger<NightlyWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

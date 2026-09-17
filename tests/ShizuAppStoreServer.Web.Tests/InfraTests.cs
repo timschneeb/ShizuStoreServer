@@ -1,11 +1,12 @@
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using ShizuAppStoreServer.Api;
+using ShizuAppStoreServer.Sync;
 
 namespace ShizuAppStoreServer.Web.Tests;
 
@@ -47,27 +48,26 @@ public sealed class IconsTests(ShizuApiFactory factory) : IClassFixture<ShizuApi
 public sealed class AdminTests(ShizuApiFactory factory) : IClassFixture<ShizuApiFactory>
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
-    private const string Secret = "test-admin-secret";
-
-    private static string Sign(string body, string secret)
-    {
-        var hash = HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(body));
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
+    private const string Token = "test-admin-secret";
 
     private static StringContent Body(string json = """{"reason":"webhook-test"}""") =>
         new(json, Encoding.UTF8, "application/json");
 
+    private static HttpRequestMessage Authorized(string json) =>
+        new(HttpMethod.Post, "/v1/admin/sync")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            Headers = { { "Authorization", $"Bearer {Token}" } },
+        };
+
     [Fact]
-    public async Task ValidSignatureQueuesRequest()
+    public async Task ValidTokenQueuesRequestAndWakesTheWorker()
     {
         await factory.ResetAsync(_ => { });
         var client = factory.NewClient();
         const string json = """{"reason":"webhook-test"}""";
 
-        var request = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
-        request.Headers.Add("X-Shizu-Signature", Sign(json, Secret));
-        var response = await client.SendAsync(request);
+        var response = await client.SendAsync(Authorized(json));
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var accepted = (await response.Content.ReadFromJsonAsync<SyncAcceptedDto>(Json))!;
@@ -82,7 +82,7 @@ public sealed class AdminTests(ShizuApiFactory factory) : IClassFixture<ShizuApi
     }
 
     [Fact]
-    public async Task MissingOrWrongSignatureIs401()
+    public async Task MissingOrWrongTokenIs401()
     {
         var client = factory.NewClient();
 
@@ -90,25 +90,28 @@ public sealed class AdminTests(ShizuApiFactory factory) : IClassFixture<ShizuApi
         Assert.Equal(HttpStatusCode.Unauthorized, missing.StatusCode);
 
         const string json = """{"reason":"x"}""";
-        var wrong = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
-        wrong.Headers.Add("X-Shizu-Signature", Sign(json, "other-secret"));
+        var wrong = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync")
+        {
+            Content = Body(json),
+            Headers = { { "Authorization", "Bearer other-secret" } },
+        };
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(wrong)).StatusCode);
 
-        var garbage = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
-        garbage.Headers.Add("X-Shizu-Signature", "not-hex!!");
-        Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(garbage)).StatusCode);
+        var malformed = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync")
+        {
+            Content = Body(json),
+            Headers = { { "Authorization", Token } },
+        };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(malformed)).StatusCode);
     }
 
     [Fact]
-    public async Task NoSecretConfiguredIs503()
+    public async Task NoTokenConfiguredIs503()
     {
         using var unconfigured = new ShizuApiFactory(100_000, adminSecret: null);
         var client = unconfigured.NewClient();
-        const string json = """{"reason":"x"}""";
 
-        var request = new HttpRequestMessage(HttpMethod.Post, "/v1/admin/sync") { Content = Body(json) };
-        request.Headers.Add("X-Shizu-Signature", Sign(json, Secret));
-        var response = await client.SendAsync(request);
+        var response = await client.SendAsync(Authorized("""{"reason":"x"}"""));
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
     }

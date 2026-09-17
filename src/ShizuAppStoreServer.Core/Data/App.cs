@@ -114,6 +114,14 @@ public sealed class App
     public string? Changelog { get; set; }
 
     /// <summary>
+    /// Browser page the changelog text was read from (the GitHub/GitLab
+    /// release page). Null for index-sourced changelogs, which have no
+    /// per-release page. Server-only: sent on the detail endpoint, never in
+    /// summaries or the change feed.
+    /// </summary>
+    public string? ChangelogUrl { get; set; }
+
+    /// <summary>
     /// Screenshot image URLs harvested from the F-Droid/Izzy <c>index-v2.json</c>
     /// for any of the app's package names. Server-only: sent on the detail
     /// endpoint, never in summaries or the change feed.

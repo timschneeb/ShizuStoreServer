@@ -19,7 +19,9 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
     /// <summary>
     /// Filtered app list. <c>category</c> is a category slug and includes
     /// its subcategories; <c>sort</c> is <c>updated|added|name</c>.
-    /// <c>excluded</c> rows are never returned.
+    /// <c>listing</c> is a comma-separated subset of
+    /// <c>main|closed_source</c> (absent = <c>main</c>; the closed-source
+    /// listing is opt-in). <c>excluded</c> rows are never returned.
     /// </summary>
     /// <remarks>
     /// The advanced filtering options are not actually used by the client app.
@@ -80,15 +82,15 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
             query = query.Where(a => a.License != null && a.License.ToLower() == want);
         }
 
-        if (listing is not null)
+        var listings = ApiEnums.ParseListingSet(listing);
+        if (listings is null)
         {
-            if (!ApiEnums.TryParseListing(listing, out var listingValue))
-            {
-                return Problem($"Invalid listing '{listing}'. Use main|closed_source.", statusCode: StatusCodes.Status400BadRequest);
-            }
-
-            query = query.Where(a => a.Listing == listingValue);
+            return Problem(
+                $"Invalid listing '{listing}'. Use main|closed_source (comma-separated).",
+                statusCode: StatusCodes.Status400BadRequest);
         }
+
+        query = query.Where(a => listings.Contains(a.Listing));
 
         if (availability is not null)
         {

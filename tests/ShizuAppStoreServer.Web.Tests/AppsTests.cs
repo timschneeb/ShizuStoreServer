@@ -54,11 +54,13 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
 
         var page = await GetPageAsync("");
 
-        Assert.Equal(3, page.Total);
+        Assert.Equal(2, page.Total);
         Assert.Equal(1, page.Page);
         Assert.Equal(50, page.PageSize);
-        Assert.Equal(3, page.Items.Count);
+        Assert.Equal(2, page.Items.Count);
         Assert.DoesNotContain(page.Items, a => a.Slug == "hidden");
+        // Closed-source rows stay out unless the caller opts in.
+        Assert.DoesNotContain(page.Items, a => a.Slug == "aura");
     }
 
     [Fact]
@@ -66,11 +68,11 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     {
         await SeedAsync(SeedDirectory);
 
-        var parent = await GetPageAsync("?category=vendor-specific");
+        var parent = await GetPageAsync("?category=vendor-specific&listing=main,closed_source");
         Assert.Single(parent.Items);
         Assert.Equal("aura", parent.Items[0].Slug);
 
-        var child = await GetPageAsync("?category=miui");
+        var child = await GetPageAsync("?category=miui&listing=main,closed_source");
         Assert.Single(child.Items);
 
         var audio = await GetPageAsync("?category=audio");
@@ -100,15 +102,19 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Single(recommended.Items);
 
         var mit = await GetPageAsync("?license=mit");
-        Assert.Equal(2, mit.Total);
+        Assert.Single(mit.Items);
+        Assert.Equal("micup", mit.Items[0].Slug);
+
+        var mitBoth = await GetPageAsync("?license=mit&listing=main,closed_source");
+        Assert.Equal(2, mitBoth.Total);
 
         var closed = await GetPageAsync("?listing=closed_source");
         Assert.Single(closed.Items);
 
-        var library = await GetPageAsync("?type=library");
+        var library = await GetPageAsync("?type=library&listing=main,closed_source");
         Assert.Single(library.Items);
 
-        var direct = await GetPageAsync("?availability=direct_apk");
+        var direct = await GetPageAsync("?availability=direct_apk&listing=main,closed_source");
         Assert.Single(direct.Items);
 
         Assert.Equal(HttpStatusCode.BadRequest,
@@ -270,6 +276,7 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
                 permissions: ["android.permission.INTERNET"],
                 fullDescription: "# Readme",
                 changelog: "## 1.0",
+                changelogUrl: "https://github.com/example/authored/releases/tag/v1.0",
                 screenshots: ["https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png"]));
         });
 
@@ -284,6 +291,7 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Equal(["android.permission.INTERNET"], detail.Permissions);
         Assert.Equal("# Readme", detail.FullDescription);
         Assert.Equal("## 1.0", detail.Changelog);
+        Assert.Equal("https://github.com/example/authored/releases/tag/v1.0", detail.ChangelogUrl);
         Assert.Equal(["https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png"], detail.Screenshots);
     }
 

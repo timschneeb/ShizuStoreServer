@@ -2,15 +2,25 @@ using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Sync;
 
+/// <summary>Runs one sync pass inside the shared gate.</summary>
+public interface ISyncPassRunner
+{
+    /// <summary>
+    /// Runs one pass; returns true when a pass actually ran, false when
+    /// another pass held the gate or the host is shutting down.
+    /// </summary>
+    Task<bool> RunOnceAsync(string trigger, bool fullRecheck, CancellationToken ct);
+}
+
 /// <summary>
 /// Runs one sync pass inside the gate (shared by both workers so the logic lives in exactly one place).
 /// Never throws except on shutdown cancellation: <see cref="SyncService"/>
 /// already converts pass failures into error results + error run rows, and anything else is logged here.
 /// </summary>
 public sealed class SyncPassRunner(
-    IServiceScopeFactory scopes, SyncGate gate, ILogger<SyncPassRunner> logger)
+    IServiceScopeFactory scopes, SyncGate gate, ILogger<SyncPassRunner> logger) : ISyncPassRunner
 {
-    public async Task RunOnceAsync(string trigger, bool fullRecheck, CancellationToken ct)
+    public async Task<bool> RunOnceAsync(string trigger, bool fullRecheck, CancellationToken ct)
     {
         bool entered;
         try
@@ -19,13 +29,13 @@ public sealed class SyncPassRunner(
         }
         catch (OperationCanceledException)
         {
-            return; // shutting down
+            return false; // shutting down
         }
 
         if (!entered)
         {
             logger.LogInformation("Sync pass ({Trigger}) skipped: another pass is running.", trigger);
-            return;
+            return false;
         }
 
         try
@@ -60,5 +70,7 @@ public sealed class SyncPassRunner(
         {
             gate.Release();
         }
+
+        return true;
     }
 }

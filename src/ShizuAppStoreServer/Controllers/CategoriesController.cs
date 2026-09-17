@@ -15,18 +15,30 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
 {
     /// <summary>
     /// Full tree. <c>appCount</c> is the subtree total (node + descendants).
-    /// Supports <c>If-None-Match</c>.
+    /// <c>listing</c> is a comma-separated subset of
+    /// <c>main|closed_source</c> (absent = <c>main</c>; the closed-source
+    /// listing is opt-in). Supports <c>If-None-Match</c>.
     /// </summary>
     [HttpGet]
     [OutputCache(PolicyName = "categories")]
     [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     [ProducesResponseType<IReadOnlyList<CategoryNodeDto>>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status304NotModified)]
-    public async Task<ActionResult<IReadOnlyList<CategoryNodeDto>>> Tree(CancellationToken ct = default)
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<IReadOnlyList<CategoryNodeDto>>> Tree(
+        [FromQuery] string? listing, CancellationToken ct = default)
     {
+        var listings = ApiEnums.ParseListingSet(listing);
+        if (listings is null)
+        {
+            return Problem(
+                $"Invalid listing '{listing}'. Use main|closed_source (comma-separated).",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
         var categories = await db.Categories.AsNoTracking().OrderBy(c => c.Id).ToListAsync(ct);
         var counts = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded)
+            .Where(a => a.Availability != Availability.Excluded && listings.Contains(a.Listing))
             .GroupBy(a => a.CategoryId)
             .Select(g => new { CategoryId = g.Key, Count = g.Count() })
             .ToListAsync(ct);

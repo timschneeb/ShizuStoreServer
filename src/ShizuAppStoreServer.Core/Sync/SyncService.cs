@@ -57,9 +57,8 @@ public sealed record IconRefreshResult(
 /// <item>HEAD unchanged + no requests + not a full re-check → enrich due
 /// apps plus poll-changed apps (force), or skip entirely (no
 /// <c>sync_runs</c> row) when neither has anything.</item>
-/// <item>Otherwise parse README (CLOSED_SOURCE is ignored; its rows sweep
-/// out as stale), merge git history, upsert, apply ARCHIVED.md
-/// exclusions, then enrich.</item>
+/// <item>Otherwise parse README plus CLOSED_SOURCE, merge git history,
+/// upsert, apply ARCHIVED.md exclusions, then enrich.</item>
 /// </list>
 /// Invariant: this scope makes no app mutations after the upserter saves, so
 /// the final bookkeeping <c>SaveChanges</c> only writes request flags + the
@@ -89,6 +88,7 @@ public sealed class SyncService(
     public const string ArchivedReason = "Archived in the upstream list.";
 
     private const string ReadmePath = "README.md";
+    private const string ClosedSourcePath = "pages/CLOSED_SOURCE.md";
     private const string ArchivedPath = "pages/ARCHIVED.md";
 
     public async Task<SyncPassResult> RunAsync(
@@ -128,6 +128,7 @@ public sealed class SyncService(
             .Where(r => !r.Processed)
             .OrderBy(r => r.Id)
             .ToListAsync(ct);
+        var pendingIds = pending.Select(r => r.Id).ToList();
         var effectiveTrigger = pending.Count > 0 ? "webhook" : trigger;
 
         // Best-effort fetch with its own timeout: a stuck network must not
@@ -172,23 +173,37 @@ public sealed class SyncService(
             await ApplyShizukuFilterAsync(ct);
             return await FinishRunAsync(effectiveTrigger, head,
                 0, 0, 0, enriched, upToDate, failed,
-                0, [], false, 0, now, ct, failedMessages);
+                [], [], false, 0, now, ct, failedMessages);
         }
 
         var readme = await File.ReadAllTextAsync(Path.Combine(options.ListPath, ReadmePath), ct);
         var parser = new AwesomeListParser();
         var mainDoc = parser.Parse(readme, "main");
 
-        var history = await git.GetHistoryAsync(options.ListPath, ReadmePath, ct);
+        // The closed list is optional: a mirror without it serves main only.
+        var closedSourcePath = Path.Combine(options.ListPath, ClosedSourcePath);
+        var closedSource = File.Exists(closedSourcePath)
+            ? await File.ReadAllTextAsync(closedSourcePath, ct)
+            : string.Empty;
+        var closedDoc = parser.Parse(closedSource, "closed-source");
 
-        // CLOSED_SOURCE.md is intentionally not read (all Play-only
-        // proprietary entries, user call). The empty doc still marks the
-        // listing as synced so pre-decision rows sweep out as stale.
-        var closedDoc = new ParsedDocument { ListingName = "closed-source" };
+        var history = await git.GetHistoryAsync(options.ListPath, ReadmePath, ct);
+        if (File.Exists(closedSourcePath))
+        {
+            foreach (var (url, entry) in await git.GetHistoryAsync(options.ListPath, ClosedSourcePath, ct))
+            {
+                // The main list is the primary source of list-change dates; a URL
+                // that appears in both lists keeps its main-list history.
+                history.TryAdd(url, entry);
+            }
+        }
 
         var counts = await upserter.UpsertAsync([mainDoc, closedDoc], history, now, ct);
         var (archivedChanged, archivedWarnings) = await ApplyArchivedAsync(ct);
-        var parseWarnings = mainDoc.Warnings.Concat(archivedWarnings).ToList();
+        var parseWarnings = mainDoc.Warnings
+            .Concat(closedDoc.Warnings)
+            .Concat(archivedWarnings)
+            .ToList();
 
         var ids = fullRecheck
             ? await db.Apps.AsNoTracking()
@@ -233,7 +248,7 @@ public sealed class SyncService(
         return await FinishRunAsync(effectiveTrigger, head,
             counts.Added, counts.Updated, counts.Removed,
             full.Enriched, full.UpToDate, full.Failed,
-            pending.Count, parseWarnings, true, archivedChanged, now, ct, full.FailedMessages);
+            pendingIds, parseWarnings, true, archivedChanged, now, ct, full.FailedMessages);
     }
 
     /// <summary>IDs due for enrichment (never-checked, or outside the success/failure window).</summary>
@@ -672,12 +687,18 @@ public sealed class SyncService(
         string trigger, string? head,
         int added, int updated, int removed,
         int enriched, int upToDate, int failed,
-        int drained, IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse, int archivedChanged,
-        DateTimeOffset started, CancellationToken ct,
+        IReadOnlyList<long> drainedIds, IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse,
+        int archivedChanged, DateTimeOffset started, CancellationToken ct,
         IReadOnlyList<string>? failedMessages = null)
     {
         var now = DateTimeOffset.UtcNow;
-        foreach (var request in await db.SyncRequests.Where(r => !r.Processed).ToListAsync(ct))
+        // Only the requests seen at pass start are consumed: a webhook that
+        // lands while this pass runs must stay pending for the immediate
+        // follow-up pass, otherwise it would be marked processed without its
+        // list state ever being parsed.
+        foreach (var request in await db.SyncRequests
+            .Where(r => drainedIds.Contains(r.Id) && !r.Processed)
+            .ToListAsync(ct))
         {
             request.Processed = true;
             request.ProcessedAt = now;
@@ -728,7 +749,7 @@ public sealed class SyncService(
         _runLog.Issues(run.Id, head, issues);
 
         return new SyncPassResult(trigger, head, added, updated, removed,
-            enriched, upToDate, failed, drained, issues.Count(i => i.Kind == IssueKind.Parse),
+            enriched, upToDate, failed, drainedIds.Count, issues.Count(i => i.Kind == IssueKind.Parse),
             archivedChanged, false, null)
         {
             FailedMessages = failedMessages ?? [],

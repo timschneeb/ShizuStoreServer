@@ -22,6 +22,10 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
     /// count moved since <c>since</c>; it never triggers refetches, clients
     /// apply it onto their stored rows directly.
     /// Entries are oldest-first so clients can apply them in order.
+    /// <c>listing</c> is a comma-separated subset of
+    /// <c>main|closed_source</c> (absent = <c>main</c>; the closed-source
+    /// listing is opt-in) and filters added, updated, removed and
+    /// <c>installsUpdated</c> alike.
     /// <c>excluded</c> rows never appear.
     /// </summary>
     [HttpGet]
@@ -30,7 +34,9 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
     [ProducesResponseType<ChangesDto>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<ChangesDto>> Get(
-        [FromQuery] string? since, CancellationToken ct = default)
+        [FromQuery] string? since,
+        [FromQuery] string? listing,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(since)
             || !DateTimeOffset.TryParse(since, out var sinceValue))
@@ -38,12 +44,20 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
             return Problem("Query parameter 'since' is required (ISO-8601).", statusCode: StatusCodes.Status400BadRequest);
         }
 
+        var listings = ApiEnums.ParseListingSet(listing);
+        if (listings is null)
+        {
+            return Problem(
+                $"Invalid listing '{listing}'. Use main|closed_source (comma-separated).",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
         // NOTE: the since-comparisons AND the oldest-first ordering run in
         // memory (see AppsController: SQLite cannot compare or ORDER BY
         // DateTimeOffset in SQL; Npgsql can). Delta sets are small and this
         // endpoint is output-cached for 30 s.
         var all = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded)
+            .Where(a => a.Availability != Availability.Excluded && listings.Contains(a.Listing))
             .Include(a => a.Category)
             .Include(a => a.Downloads)
             .ToListAsync(ct);
@@ -58,7 +72,9 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
             .OrderBy(a => a.UpdatedAt).ThenBy(a => a.Id)
             .ToList();
 
-        var removed = (await db.RemovedApps.AsNoTracking().ToListAsync(ct))
+        var removed = (await db.RemovedApps.AsNoTracking()
+                .Where(t => listings.Contains(t.Listing))
+                .ToListAsync(ct))
             .Where(t => t.RemovedAt >= sinceValue)
             .OrderBy(t => t.RemovedAt).ThenBy(t => t.Id)
             .ToList();

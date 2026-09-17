@@ -102,6 +102,7 @@ public static class AppMapper
             a.Permissions,
             a.FullDescription,
             a.Changelog,
+            a.ChangelogUrl,
             a.Screenshots,
             SourceName(a));
     }

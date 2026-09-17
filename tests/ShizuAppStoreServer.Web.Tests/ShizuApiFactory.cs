@@ -9,6 +9,7 @@ using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.Sync;
+using ShizuAppStoreServer.Sync;
 
 namespace ShizuAppStoreServer.Web.Tests;
 
@@ -70,11 +71,13 @@ public sealed class ShizuApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<EnrichmentOptions>();
             services.AddSingleton(new EnrichmentOptions { IconStorePath = IconDir });
             services.RemoveAll<AdminOptions>();
-            services.AddSingleton(new AdminOptions { HmacSecret = _adminSecret });
+            services.AddSingleton(new AdminOptions { Token = _adminSecret });
 
             // Never sync in tests: no startup pass, and the fast loop ticks
             // once a day (suites finish in seconds). The workers still start
-            // with the host, which is exactly the boot path under test.
+            // with the host, which is exactly the boot path under test. The
+            // webhook latch is inert here so an admin request cannot start a
+            // real pass against the shared SQLite connection mid-test.
             services.RemoveAll<SyncOptions>();
             services.AddSingleton(new SyncOptions
             {
@@ -82,6 +85,8 @@ public sealed class ShizuApiFactory : WebApplicationFactory<Program>
                 FastLoopMinutes = 1440,
                 RunOnStartup = false,
             });
+            services.RemoveAll<SyncSignal>();
+            services.AddSingleton<SyncSignal>(new IdleSyncSignal());
 
             // Disable output caching: replace every production policy with a
             // no-op (re-adding a policy name overwrites the earlier one).
@@ -144,5 +149,16 @@ public sealed class ShizuApiFactory : WebApplicationFactory<Program>
         }
 
         base.Dispose(disposing);
+    }
+}
+
+/// <summary>
+/// Inert webhook latch for test hosts: requests queue rows but never wake the
+/// worker, so admin tests keep full control of the connection and the clock.
+/// </summary>
+internal sealed class IdleSyncSignal : SyncSignal
+{
+    public override void Request()
+    {
     }
 }

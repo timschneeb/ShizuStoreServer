@@ -63,6 +63,33 @@ public static class ApiEnums
     };
 
     public static bool TryParseListing(string? s, out Listing v) => TryParse(s, out v);
+
+    /// <summary>
+    /// Listing filter from a comma-separated <c>listing</c> query value.
+    /// Absent or blank means main only: the closed-source listing is opt-in
+    /// and never served unless the request asks for it. Null means invalid.
+    /// </summary>
+    public static HashSet<Listing>? ParseListingSet(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s))
+        {
+            return [Listing.Main];
+        }
+
+        var set = new HashSet<Listing>();
+        foreach (var part in s.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!TryParseListing(part, out var v))
+            {
+                return null;
+            }
+
+            set.Add(v);
+        }
+
+        return set.Count == 0 ? null : set;
+    }
+
     public static bool TryParseAppType(string? s, out AppType v) => TryParse(s, out v);
     public static bool TryParseAvailability(string? s, out Availability v) => TryParse(s, out v);
 
