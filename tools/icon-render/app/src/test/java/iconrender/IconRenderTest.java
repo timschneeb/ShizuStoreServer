@@ -11,15 +11,18 @@ import app.cash.paparazzi.Paparazzi;
 import org.junit.Rule;
 import org.junit.Test;
 
-/** Renders one drawable resource to an exact-size PNG. Plain drawables and
- *  adaptive-icon layers all draw full-bleed into a fixed square: LayoutLib
- *  drawables do not reliably honor setBounds (vectors render at intrinsic
- *  size), so each layer is scaled by its intrinsic dimensions instead, and
- *  the view is drawn onto its own bitmap rather than trusting Paparazzi's
- *  (screen-sized, downscaled) snapshot. AdaptiveIconDrawable itself cannot
- *  inflate under LayoutLib because the device mask string only exists on a
- *  real launcher, and we want the unmasked square art anyway. Every layer
- *  still renders through real Android drawables. */
+/** Renders one drawable resource to an exact-size PNG. Plain drawables draw
+ *  full-bleed into a fixed square: LayoutLib drawables do not reliably
+ *  honor setBounds (vectors render at intrinsic size), so each layer is
+ *  scaled by its intrinsic dimensions instead, and the view is drawn onto
+ *  its own bitmap rather than trusting Paparazzi's (screen-sized,
+ *  downscaled) snapshot. AdaptiveIconDrawable itself cannot inflate under
+ *  LayoutLib because the device mask string only exists on a real launcher,
+ *  so adaptive roots are over-composited by hand. A launcher only reveals
+ *  the central 72dp of the 108dp adaptive viewport, so that viewport is
+ *  scaled up to the output square and the surrounding bleed is clipped;
+ *  the store then shows the art a masked launcher would. Every layer still
+ *  renders through real Android drawables. */
 public class IconRenderTest {
   @Rule
   public Paparazzi paparazzi = new Paparazzi();
@@ -323,9 +326,15 @@ public class IconRenderTest {
     canvas.restore();
   }
 
-  /** Full-bleed over-composite of two drawables at a fixed square size,
-   *  with the foreground drawn into its inset rect when the staged layer
-   *  carried an {@code <inset>} wrapper. */
+  /** Fraction of the 108dp adaptive viewport a launcher actually shows;
+   *  the remaining 18dp on each side is bleed that must stay hidden. */
+  static final float ADAPTIVE_VISIBLE = 72f / 108f;
+
+  /** Over-composite of two drawables at a fixed square size, with the
+   *  foreground drawn into its inset rect when the staged layer carried
+   *  an {@code <inset>} wrapper. The composite is authored over the full
+   *  108dp viewport, then scaled about the center so only the central
+   *  72dp visible viewport fills the output square. */
   static final class LayersView extends View {
     private final Drawable background;
     private final LayerResult foreground;
@@ -345,12 +354,16 @@ public class IconRenderTest {
 
     @Override
     protected void onDraw(Canvas canvas) {
+      canvas.save();
+      float scale = 1f / ADAPTIVE_VISIBLE;
+      canvas.scale(scale, scale, sizePx / 2f, sizePx / 2f);
       drawFullBleed(canvas, background, sizePx);
       float l = foreground.insetLeft * sizePx;
       float t = foreground.insetTop * sizePx;
       drawIntoRect(canvas, foreground.drawable, l, t,
           sizePx - l - foreground.insetRight * sizePx,
           sizePx - t - foreground.insetBottom * sizePx);
+      canvas.restore();
     }
   }
 
