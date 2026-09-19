@@ -296,6 +296,9 @@ public sealed class SyncIssueSnapshotTests : IDisposable
 
         public Task<EnrichResult> CommitIconRefreshAsync(long appId, byte[]? png, CancellationToken ct, bool force = false, bool isAdaptive = false) =>
             Task.FromResult(new EnrichResult(EnrichOutcome.Enriched, null));
+
+        public Task<EnrichResult> RefreshScreenshotsAsync(long appId, CancellationToken ct = default) =>
+            Task.FromResult(new EnrichResult(EnrichOutcome.Enriched, null));
     }
 
     private sealed class ThrowingRenderer : IPaparazziRenderer

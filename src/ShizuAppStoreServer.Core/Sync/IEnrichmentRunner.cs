@@ -24,4 +24,10 @@ public interface IEnrichmentRunner
     /// <paramref name="isAdaptive"/> carries the staged root kind (only
     /// <c>&lt;adaptive-icon&gt;</c> roots count) into the row flag.</summary>
     Task<EnrichResult> CommitIconRefreshAsync(long appId, byte[]? png, CancellationToken ct = default, bool force = false, bool isAdaptive = false);
+
+    /// <summary>
+    /// Screenshots-only maintenance refresh for one app: re-resolves
+    /// F-Droid/Izzy and forces the repo fallback past its recheck window.
+    /// </summary>
+    Task<EnrichResult> RefreshScreenshotsAsync(long appId, CancellationToken ct = default);
 }

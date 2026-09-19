@@ -779,6 +779,9 @@ public sealed class SyncServiceTests : IDisposable
 
         public Task<EnrichResult> CommitIconRefreshAsync(long appId, byte[]? png, CancellationToken ct, bool force = false, bool isAdaptive = false) =>
             throw new InvalidOperationException("boom");
+
+        public Task<EnrichResult> RefreshScreenshotsAsync(long appId, CancellationToken ct = default) =>
+            throw new InvalidOperationException("boom");
     }
 
     private sealed class ThrowingRenderer : IPaparazziRenderer
@@ -888,6 +891,14 @@ public sealed class SyncServiceTests : IDisposable
             Commits.Add((appId, png));
             return Task.FromResult(new EnrichResult(EnrichOutcome.Enriched, null));
         }
+
+        public List<long> ScreenshotCalls { get; } = [];
+
+        public Task<EnrichResult> RefreshScreenshotsAsync(long appId, CancellationToken ct = default)
+        {
+            ScreenshotCalls.Add(appId);
+            return Task.FromResult(new EnrichResult(EnrichOutcome.Enriched, null));
+        }
     }
 
     private sealed class CannedBatchRenderer(byte[] png, bool throwAll = false) : IPaparazziRenderer
@@ -909,6 +920,49 @@ public sealed class SyncServiceTests : IDisposable
 
             return Task.FromResult(batch.Select(_ => (byte[]?)png).ToArray());
         }
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsCoversServedAppsOnly()
+    {
+        var category = new Category { Name = "Tools", Slug = "tools", Section = CategorySection.Apps };
+        _db.Categories.Add(category);
+        await _db.SaveChangesAsync();
+        _db.Apps.Add(new App
+        {
+            Slug = "included",
+            Name = "Included",
+            Description = "d",
+            Url = "https://github.com/acme/included",
+            Listing = Listing.Main,
+            Type = AppType.App,
+            CategoryId = category.Id,
+            AddedAt = T0,
+            UpdatedAt = T0,
+            Availability = Availability.DirectApk,
+        });
+        _db.Apps.Add(new App
+        {
+            Slug = "gone",
+            Name = "Gone",
+            Description = "d",
+            Url = "https://github.com/acme/gone",
+            Listing = Listing.Main,
+            Type = AppType.App,
+            CategoryId = category.Id,
+            AddedAt = T0,
+            UpdatedAt = T0,
+            Availability = Availability.Excluded,
+        });
+        await _db.SaveChangesAsync();
+
+        var result = await RefreshService(_runner, new CannedBatchRenderer([7])).RefreshScreenshotsAsync();
+
+        Assert.Equal(1, result.Checked);
+        Assert.Equal(1, result.Updated);
+        Assert.Equal(0, result.Failed);
+        var call = Assert.Single(_runner.ScreenshotCalls);
+        Assert.Equal(_db.Apps.Single(a => a.Slug == "included").Id, call);
     }
 
     private void MarkDirectApk()

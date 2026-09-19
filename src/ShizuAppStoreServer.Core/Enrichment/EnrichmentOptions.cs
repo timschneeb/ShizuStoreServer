@@ -17,6 +17,9 @@ public sealed class EnrichmentOptions
     /// <summary>Path to the <c>gradle</c> binary (XML icon rendering).</summary>
     public string GradlePath { get; set; } = "gradle";
 
+    /// <summary>Path to the <c>git</c> binary (list clone and repo screenshot trees).</summary>
+    public string GitPath { get; set; } = "git";
+
     /// <summary>Directory of the Paparazzi icon-render Gradle tool.</summary>
     public string IconToolDir { get; set; } = "tools/icon-render";
 
@@ -98,4 +101,23 @@ public sealed class EnrichmentOptions
 
     /// <summary>Second Izzy mirror, used when the primary base fails.</summary>
     public string? IzzyRepoBaseFallback { get; set; }
+
+    /// <summary>
+    /// Fall back to the app's GitHub/GitLab repo when F-Droid and Izzy carry
+    /// no screenshots: clone the tree without blobs and lift image paths whose
+    /// name or directory says "screenshot". Off disables the clone entirely.
+    /// </summary>
+    public bool RepoScreenshotsEnabled { get; set; } = true;
+
+    /// <summary>Timeout for one repo clone plus its tree listing.</summary>
+    public TimeSpan RepoScreenshotsTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Per-app retry window for the repo fallback: a repo that yields no
+    /// screenshots is not re-cloned until this elapses (tracked on the row).
+    /// </summary>
+    public TimeSpan RepoScreenshotsRecheckInterval { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>Max parallel repo clones (each is a network git process).</summary>
+    public int RepoScreenshotsMaxParallelism { get; set; } = 2;
 }

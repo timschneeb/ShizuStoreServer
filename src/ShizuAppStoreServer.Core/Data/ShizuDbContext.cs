@@ -182,6 +182,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
                         v => v.Aggregate(0, (hash, item) => HashCode.Combine(hash, item.GetHashCode())),
                         v => v.ToList()))
                 .IsRequired();
+            e.Property(x => x.ScreenshotsCheckedAt).HasColumnName("screenshots_checked_at");
             e.Property(x => x.StoreUrl).HasColumnName("store_url").HasMaxLength(2000);
             e.Property(x => x.VersionName).HasColumnName("version_name").HasMaxLength(200);
             e.Property(x => x.IconHash).HasColumnName("icon_hash").HasMaxLength(128);

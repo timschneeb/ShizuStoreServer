@@ -41,6 +41,16 @@ public sealed record IconRefreshResult(
 {
     public IReadOnlyList<string> Errors { get; init; } = [];
 }
+
+/// <summary>Outcome of the screenshots-only admin refresh (no <c>sync_runs</c> row).</summary>
+public sealed record ScreenshotRefreshResult(
+    int Checked,
+    int Updated,
+    int Current,
+    int Failed)
+{
+    public IReadOnlyList<string> Errors { get; init; } = [];
+}
 /// <summary>
 /// One list-sync pass. Scoped: resolved fresh
 /// per pass by the workers, sharing one <see cref="ShizuDbContext"/> with
@@ -655,6 +665,52 @@ public sealed class SyncService(
         }
 
         return new IconRefreshResult(ids.Count, refreshed, current, failed) { Errors = errors };
+    }
+
+    /// <summary>
+    /// Screenshots-only maintenance pass over every served app (the admin
+    /// trigger): re-resolves F-Droid/Izzy and forces the repo fallback past
+    /// its recheck window. No APK work and no <c>sync_runs</c> row. Errors
+    /// per app are tallied and returned, never thrown.
+    /// </summary>
+    public async Task<ScreenshotRefreshResult> RefreshScreenshotsAsync(CancellationToken ct = default)
+    {
+        _fdroid?.BeginRun();
+
+        var ids = await db.Apps.AsNoTracking()
+            .Where(a => a.Availability != Availability.Excluded)
+            .Select(a => a.Id)
+            .ToListAsync(ct);
+
+        var updated = 0;
+        var current = 0;
+        var failed = 0;
+        var errors = new List<string>();
+        var results = await BulkEnricher.EnrichManyAsync(
+            ids, (id, c) => enrich.RefreshScreenshotsAsync(id, c),
+            enrichment.MaxParallelism, ct);
+        foreach (var (id, r) in results)
+        {
+            switch (r.Outcome)
+            {
+                case EnrichOutcome.Enriched:
+                    updated++;
+                    break;
+                case EnrichOutcome.Failed:
+                    failed++;
+                    if (r.Error is not null)
+                    {
+                        errors.Add($"[{id}] {r.Error}");
+                    }
+
+                    break;
+                default: // UpToDate and any skip outcome
+                    current++;
+                    break;
+            }
+        }
+
+        return new ScreenshotRefreshResult(ids.Count, updated, current, failed) { Errors = errors };
     }
 
     /// <summary>

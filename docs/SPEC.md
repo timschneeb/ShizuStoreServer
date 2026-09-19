@@ -59,8 +59,8 @@ excess gets 429. `ApiOptions` is resolved per request (not captured),
 so tests can swap the registration per suite.
 
 Startup gate: after `builder.Build()`, the host probes
-`aapt2 version`, `apksigner --version` (30s/60s timeouts), and
-`gradle --version` (2min) and **refuses to boot**
+`aapt2 version`, `apksigner --version` (30s/60s timeouts),
+`gradle --version` (2min), and `git --version` (30s) and **refuses to boot**
 (`InvalidOperationException`) when any is missing or exits
 non-zero - a server without its toolchain would serve a catalog
 that never enriches. Skipped only when the host
@@ -114,8 +114,10 @@ bundle` is rebuilt per deploy, never committed.
     (browser page of the release the notes came from; null for index-sourced
     notes; sent only on the detail endpoint), `screenshots`
     (screenshot URLs from the F-Droid/Izzy `index-v2.json`, matched by every
-    package name the app publishes, capped at 12, upstream URLs only, sent only
-    on the detail endpoint), `enrich_etag` (conditional-request ETag
+    package name the app publishes, else raw URLs lifted from the app's own
+    GitHub/GitLab tree when the indexes carry none, capped at 12, sent only
+    on the detail endpoint), `screenshots_checked_at` (last repo-fallback
+    attempt, throttles re-cloning a repo that yielded nothing), `enrich_etag` (conditional-request ETag
     reuse), `stars` (GitHub stargazers or GitLab star count), `download_total` (popularity, §8), `install_count`
     (successful installs reported by clients via
     `POST /v1/apps/{slug}/installs`; monotonic, never bumps `updated_at`), `version_updated_at`
@@ -363,7 +365,24 @@ therefore treats Izzy as forge-like.
   primary source, so forge apps also gain shots when published on F-Droid
   or Izzy. The repos fail independently: an unreachable repo keeps the
   URLs it contributed earlier and never discards the other repo's fresh
-  hits. Same apk URL + version code →
+  hits.
+  When both indexes end up with nothing, the app's own repo is the last
+  resort: a blobless, no-checkout shallow clone
+  (`git clone --depth 1 --filter=blob:none --no-checkout`) lists the tree
+  and keeps image paths (png/jpg/jpeg/webp/gif/bmp) whose file name starts
+  with `screenshot` or that live under a directory containing `screenshot`
+  (fastlane `phoneScreenshots`, `docs/screenshots`, ...); a source package
+  merely named `screenshot` with no image does not count. Raw URLs are
+  pinned to the fetched commit (GitHub
+  `raw.githubusercontent.com/{owner}/{repo}/{sha}/{path}`, GitLab
+  `gitlab.com/{project}/-/raw/{sha}/{path}`), capped at 12, and only fill
+  an empty field: F-Droid/Izzy results always win and existing shots are
+  never replaced; repo-sourced URLs also survive an index that answers
+  with none (the index may only clear its own URLs). A lookup stamps
+  `screenshots_checked_at`, and a repo that yielded none is not re-cloned
+  for `Enrichment:RepoScreenshotsRecheckInterval` (7 days);
+  `POST /v1/admin/refresh-screenshots` forces a lookup for every served
+  app past that window. Same apk URL + version code →
   `UpToDate` with zero downloads (tightened to also require the
   recorded SHA-256 to match the index `sha256` when the index
   declares one, and a complete row: `package_name` and `icon_hash`
@@ -879,7 +898,8 @@ repo default) and
 `description` markdown, else the F-Droid/Izzy index `<desc>`, capped at 100k
 chars), `changelogUrl` (browser release page the notes came from, null for
 index-sourced notes) and `screenshots` (absolute upstream image URLs from the
-F-Droid/Izzy `index-v2.json`, capped at 12) are
+F-Droid/Izzy `index-v2.json`, or pinned raw repo URLs when those indexes
+carry none, capped at 12) are
 detail-only: they are deliberately absent from summaries and
 `/v1/changes`, and clients keep the README, changelog and screenshots in memory
 rather than persisting them.
@@ -898,6 +918,9 @@ rather than persisting them.
 | `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Does not write a `sync_runs` row. |
 | `GET /v1/admin/refresh-icons` | Same token rules. Current refresh status: `state` (`idle\|running\|completed\|failed`), `force`, `startedAt`/`finishedAt`, `checked`/`refreshed`/`alreadyCurrent`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-icons` | Same token rules. Cancels the running refresh → 202, or 409 when nothing is running. |
+| `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy and forces the repo fallback past its per-app recheck window for every served app. Takes the shared sync gate exactly like `refresh-icons`. Does not write a `sync_runs` row. |
+| `GET /v1/admin/refresh-screenshots` | Same token rules. Current status: `state` (`idle\|running\|completed\|failed`), `startedAt`/`finishedAt`, `checked`/`updated`/`current`/`failed`, `errors[]`, `error`. |
+| `DELETE /v1/admin/refresh-screenshots` | Same token rules. Cancels the running pass → 202, or 409 when nothing is running. |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).

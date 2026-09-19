@@ -123,10 +123,17 @@ public sealed class App
 
     /// <summary>
     /// Screenshot image URLs harvested from the F-Droid/Izzy <c>index-v2.json</c>
-    /// for any of the app's package names. Server-only: sent on the detail
+    /// for any of the app's package names, or lifted from the app's own repo
+    /// tree when those indexes carry none. Server-only: sent on the detail
     /// endpoint, never in summaries or the change feed.
     /// </summary>
     public List<string> Screenshots { get; set; } = [];
+
+    /// <summary>
+    /// Last time the repo fallback looked for screenshots. Throttles re-cloning
+    /// a repo that yielded none; null means never tried.
+    /// </summary>
+    public DateTimeOffset? ScreenshotsCheckedAt { get; set; }
 
     public string? StoreUrl { get; set; }
 

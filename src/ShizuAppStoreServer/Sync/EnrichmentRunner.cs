@@ -56,6 +56,30 @@ public sealed class EnrichmentRunner(IServiceScopeFactory scopes) : IEnrichmentR
         }
     }
 
+    public async Task<EnrichResult> RefreshScreenshotsAsync(long appId, CancellationToken ct = default)
+    {
+        using var scope = scopes.CreateScope();
+        var provider = scope.ServiceProvider;
+        var db = provider.GetRequiredService<ShizuDbContext>();
+        try
+        {
+            var app = await db.Apps.FindAsync([appId], ct);
+            if (app is null)
+            {
+                return new EnrichResult(EnrichOutcome.Failed, "App row vanished mid-refresh.");
+            }
+
+            var result = await provider.GetRequiredService<AppEnricher>()
+                .RefreshScreenshotsAsync(app, DateTimeOffset.UtcNow, ct);
+            await db.SaveChangesAsync(ct);
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new EnrichResult(EnrichOutcome.Failed, $"Screenshot refresh host error: {Describe(ex)}");
+        }
+    }
+
     private static string Describe(Exception ex)
     {
         var messages = new List<string>();

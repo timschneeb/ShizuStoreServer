@@ -87,7 +87,8 @@ public sealed class AppEnricher(
     IPlayStoreClient? play = null,
     IzzyStatsProvider? izzyStats = null,
     ILogger<AppEnricher>? log = null,
-    IRunLog? runLog = null)
+    IRunLog? runLog = null,
+    IRepoScreenshotResolver? repoScreenshots = null)
 {
     // Runtime progress lines land in the enrichment run log; without one
     // configured the no-op instance keeps tests and library use silent.
@@ -221,7 +222,7 @@ public sealed class AppEnricher(
         try
         {
             var result = await DispatchAsync(app, now, ct);
-            await ApplyScreenshotsAsync(app, ct);
+            await ApplyScreenshotsAsync(app, now, ct);
 
             // External-only Play apps never get an APK; give them the real
             // listing icon instead of a generated avatar and stop counting
@@ -284,70 +285,58 @@ public sealed class AppEnricher(
     // whole lookup and silently dropped F-Droid screenshots for every app after
     // the first failure, so a repo that cannot be reached now keeps the URLs it
     // contributed earlier instead of taking the other repo's hits down with it.
-    private async Task ApplyScreenshotsAsync(App app, CancellationToken ct)
+    // When F-Droid/Izzy end up with nothing, the app's own repo tree is the
+    // last resort (see RepoScreenshotResolver).
+    /// <summary>
+    /// Screenshots-only maintenance refresh (the admin trigger): re-resolves
+    /// F-Droid/Izzy and forces the repo fallback past its recheck window. No
+    /// APK work. Returns <c>Enriched</c> only when the URL list changed.
+    /// </summary>
+    public async Task<EnrichResult> RefreshScreenshotsAsync(
+        App app, DateTimeOffset now, CancellationToken ct = default)
+    {
+        var before = app.Screenshots.ToArray();
+        await ApplyScreenshotsAsync(app, now, ct, force: true);
+        return app.Screenshots.SequenceEqual(before)
+            ? new EnrichResult(EnrichOutcome.UpToDate, null)
+            : new EnrichResult(EnrichOutcome.Enriched, null);
+    }
+
+    private async Task ApplyScreenshotsAsync(App app, DateTimeOffset now, CancellationToken ct, bool force = false)
     {
         try
         {
-            var packageIds = await CollectPackageIdsAsync(app, ct);
-            if (packageIds.Count == 0)
+            var (reached, urls) = await ResolveFdroidScreenshotsAsync(app, ct);
+            if (reached)
+            {
+                if (urls.Count > 0)
+                {
+                    if (!urls.SequenceEqual(app.Screenshots))
+                    {
+                        app.Screenshots = urls;
+                    }
+                }
+                else if (app.Screenshots.Count > 0 && app.Screenshots.All(IsFdroidSourced))
+                {
+                    // The index answered and no longer lists them. Repo-sourced
+                    // URLs are not the index's to clear.
+                    app.Screenshots = [];
+                }
+            }
+
+            // An unreachable repo keeps whatever the app already stored; a
+            // reachable one that answers "no screenshots" clears them. Either
+            // way, only an empty field is eligible for the repo fallback.
+            if (app.Screenshots.Count > 0 || !ShouldTryRepoScreenshots(app, now, force))
             {
                 return;
             }
 
-            string[] repos = [FdroidRepos.FDroidBase, FdroidRepos.IzzyBase];
-            var fresh = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-            foreach (var repoBase in repos)
+            app.ScreenshotsCheckedAt = now;
+            var fromRepo = await repoScreenshots!.ResolveAsync(app.Url, app.SourceUrl, ct);
+            if (fromRepo.Count > 0)
             {
-                try
-                {
-                    var map = await fdroid.GetScreenshotsAsync(repoBase, ct);
-                    if (map is not null)
-                    {
-                        fresh[repoBase] = CollectScreenshotNames(map, packageIds);
-                    }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    log?.LogDebug(ex, "Screenshot lookup failed for {Repo}.", repoBase);
-                }
-            }
-
-            if (fresh.Count == 0)
-            {
-                return;
-            }
-
-            var urls = new List<string>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var repoBase in repos)
-            {
-                var repo = repoBase.TrimEnd('/');
-                var candidates = fresh.TryGetValue(repoBase, out var found)
-                    ? found.Select(name => (Name: name, Url: $"{repo}/{name.TrimStart('/')}"))
-                    : app.Screenshots
-                        .Where(url => url.StartsWith($"{repo}/", StringComparison.Ordinal))
-                        .Select(url => (Name: url[(repo.Length + 1)..], Url: url));
-                foreach (var (name, url) in candidates)
-                {
-                    if (seen.Add(name))
-                    {
-                        urls.Add(url);
-                        if (urls.Count >= MaxScreenshots)
-                        {
-                            break;
-                        }
-                    }
-                }
-
-                if (urls.Count >= MaxScreenshots)
-                {
-                    break;
-                }
-            }
-
-            if (!urls.SequenceEqual(app.Screenshots))
-            {
-                app.Screenshots = urls;
+                app.Screenshots = [.. fromRepo];
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -355,6 +344,84 @@ public sealed class AppEnricher(
             log?.LogDebug(ex, "Screenshot lookup failed for {Slug}.", app.Slug);
         }
     }
+
+    /// <summary>
+    /// F-Droid/Izzy half of the screenshot lookup. <c>Reached</c> is true when
+    /// at least one index answered, which lets the caller distinguish "no
+    /// screenshots" (clear) from "index unreachable" (keep existing).
+    /// </summary>
+    private async Task<(bool Reached, List<string> Urls)> ResolveFdroidScreenshotsAsync(App app, CancellationToken ct)
+    {
+        var packageIds = await CollectPackageIdsAsync(app, ct);
+        if (packageIds.Count == 0)
+        {
+            return (false, []);
+        }
+
+        string[] repos = [FdroidRepos.FDroidBase, FdroidRepos.IzzyBase];
+        var fresh = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var repoBase in repos)
+        {
+            try
+            {
+                var map = await fdroid.GetScreenshotsAsync(repoBase, ct);
+                if (map is not null)
+                {
+                    fresh[repoBase] = CollectScreenshotNames(map, packageIds);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log?.LogDebug(ex, "Screenshot lookup failed for {Repo}.", repoBase);
+            }
+        }
+
+        if (fresh.Count == 0)
+        {
+            return (false, []);
+        }
+
+        var urls = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var repoBase in repos)
+        {
+            var repo = repoBase.TrimEnd('/');
+            var candidates = fresh.TryGetValue(repoBase, out var found)
+                ? found.Select(name => (Name: name, Url: $"{repo}/{name.TrimStart('/')}"))
+                : app.Screenshots
+                    .Where(url => url.StartsWith($"{repo}/", StringComparison.Ordinal))
+                    .Select(url => (Name: url[(repo.Length + 1)..], Url: url));
+            foreach (var (name, url) in candidates)
+            {
+                if (seen.Add(name))
+                {
+                    urls.Add(url);
+                    if (urls.Count >= MaxScreenshots)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (urls.Count >= MaxScreenshots)
+            {
+                break;
+            }
+        }
+
+        return (true, urls);
+    }
+
+    private static bool IsFdroidSourced(string url) =>
+        url.StartsWith(FdroidRepos.FDroidBase.TrimEnd('/') + "/", StringComparison.Ordinal)
+        || url.StartsWith(FdroidRepos.IzzyBase.TrimEnd('/') + "/", StringComparison.Ordinal);
+
+    private bool ShouldTryRepoScreenshots(App app, DateTimeOffset now, bool force) =>
+        repoScreenshots is not null
+        && options.RepoScreenshotsEnabled
+        && (force
+            || app.ScreenshotsCheckedAt is null
+            || app.ScreenshotsCheckedAt + options.RepoScreenshotsRecheckInterval <= now);
 
     private static List<string> CollectScreenshotNames(
         IReadOnlyDictionary<string, IReadOnlyList<string>> map, List<string> packageIds)

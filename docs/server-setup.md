@@ -64,6 +64,7 @@ rsync excludes it by name):
     "Aapt2Path": "/opt/android-sdk/build-tools/34.0.0/aapt2",
     "ApksignerPath": "/opt/android-sdk/build-tools/34.0.0/apksigner",
     "GradlePath": "/opt/gradle-8.14/bin/gradle",
+    "GitPath": "/usr/bin/git",
     "IconToolDir": "/opt/shizuappstore/icon-render",
     "IconStorePath": "/opt/shizuappstore/icons",
     "RunLogPath": "/var/log/shizu/enrichment-runs.log",
@@ -263,6 +264,16 @@ before the change (`gradle --stop`) so the next launch starts it inside
 resolve rasters only and batch-render the XML icons after enrichment; fast
 passes touch too few apps to pay for the second download.
 
+Screenshots normally come from the F-Droid/Izzy `index-v2.json`. When
+both carry none, the app's GitHub/GitLab repo is cloned commits-and-trees
+only (`--filter=blob:none --no-checkout`, deleted right after) and
+screenshot paths become raw URLs pinned to the fetched commit. Knobs:
+`RepoScreenshotsEnabled` (default true), `GitPath` (default `git`),
+`RepoScreenshotsTimeout` (2min), `RepoScreenshotsRecheckInterval` (7 days;
+a repo that yielded none is not re-cloned within it),
+`RepoScreenshotsMaxParallelism` (2). Clones land in `TMPDIR`
+(`/opt/shizuappstore/tmp`), which the unit keeps writable.
+
 `RunLogPath` (default null) appends a human-readable section per sync
 pass: a header, one line per scanned app as it finishes
 (`[ 12/315] slug (Display Name)  OK|ok|skip|excluded|FAIL  detail`), a
@@ -297,10 +308,10 @@ single-icon mode against a nonexistent drawable.
 
 ## Startup tool check
 
-The server verifies `aapt2 version`, `apksigner --version` and
-`gradle --version` (all must exit 0) at startup, logs the detected
-versions, and refuses to boot without them instead of serving a catalog
-that never enriches. `Enrichment:IconToolDir` is resolved against the
+The server verifies `aapt2 version`, `apksigner --version`,
+`gradle --version` and `git --version` (all must exit 0) at startup, logs
+the detected versions, and refuses to boot without them instead of
+serving a catalog that never enriches. `Enrichment:IconToolDir` is resolved against the
 process working directory, so the production config must use the absolute
 `/opt/shizuappstore/icon-render` (the unit's `WorkingDirectory` is
 `/opt/shizuappstore/app`, which contains no `tools/`). Only the `Testing`
@@ -413,6 +424,21 @@ The POST body is optional: `{"force":true}` recounts byte-identical
 renders as refreshed (the heal unit's `--force`); omit it for a normal
 refresh that only adopts changed renders. `DELETE` on the same route
 cancels a running refresh.
+
+Screenshots have the same no-downtime trigger. Use it after a deploy that
+changes screenshot resolution, or whenever rows need shots without
+waiting for the 24h cadence (it forces the per-app repo recheck window
+and re-resolves F-Droid/Izzy for every served app):
+
+```bash
+TOKEN=$(sudo sed -n 's/^SHIZU_ADMIN_SECRET=//p' /etc/shizuappstore/env)
+curl -fsS -X POST https://shizustore.timschneeberger.me/v1/admin/refresh-screenshots \
+  -H "Authorization: Bearer $TOKEN"                    # 202, body is the running status
+curl -fsS https://shizustore.timschneeberger.me/v1/admin/refresh-screenshots \
+  -H "Authorization: Bearer $TOKEN"                    # poll until state is completed/failed
+```
+
+No request body; `DELETE` on the same route cancels a running pass.
 
 `appsettings.Production.json` is written before the first
 `deploy.sh` run, because the rsync into `app/` excludes it and the

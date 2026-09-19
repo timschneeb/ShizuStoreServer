@@ -136,6 +136,10 @@ builder.Services.AddSingleton<IPaparazziRenderer>(sp => new PaparazziRenderer(
     enrichment.IconRenderCpuAffinity, sp.GetRequiredService<ILogger<PaparazziRenderer>>(),
     sp.GetRequiredService<IRunLog>()));
 builder.Services.AddSingleton<ILauncherIconService, LauncherIconService>();
+builder.Services.AddSingleton<IGitRunner>(_ => new GitProcessRunner(enrichment.GitPath));
+builder.Services.AddSingleton<IRepoScreenshotResolver>(sp => new RepoScreenshotResolver(
+    sp.GetRequiredService<IGitRunner>(), enrichment,
+    sp.GetRequiredService<ILogger<RepoScreenshotResolver>>()));
 builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IGitHubReleaseClient>(),
     sp.GetRequiredService<IGitLabReleaseClient>(),
@@ -150,7 +154,8 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IPlayStoreClient>(),
     sp.GetRequiredService<IzzyStatsProvider>(),
     sp.GetRequiredService<ILogger<AppEnricher>>(),
-    sp.GetRequiredService<IRunLog>()));
+    sp.GetRequiredService<IRunLog>(),
+    sp.GetRequiredService<IRepoScreenshotResolver>()));
 
 // Sync engine (M6): fast loop + nightly full re-check in this same binary
 // Workers resolve SyncService per pass; enrichment fans out over per-app scopes.
@@ -170,6 +175,7 @@ builder.Services.AddSingleton<SyncSignal>();
 builder.Services.AddSingleton<SyncPassRunner>();
 builder.Services.AddSingleton<ISyncPassRunner>(sp => sp.GetRequiredService<SyncPassRunner>());
 builder.Services.AddSingleton<IconRefreshCoordinator>();
+builder.Services.AddSingleton<ScreenshotRefreshCoordinator>();
 builder.Services.AddHostedService<SyncWorker>();
 builder.Services.AddHostedService<NightlyWorker>();
 
@@ -193,7 +199,8 @@ if (!app.Environment.IsEnvironment("Testing"))
     var probes = await Task.WhenAll(
         ExternalToolProbe.CheckAsync("aapt2", enrichment.Aapt2Path, ["version"], TimeSpan.FromSeconds(30)),
         ExternalToolProbe.CheckAsync("apksigner", enrichment.ApksignerPath, ["--version"], TimeSpan.FromSeconds(60)),
-        ExternalToolProbe.CheckAsync("gradle", enrichment.GradlePath, ["--version"], TimeSpan.FromMinutes(2)));
+        ExternalToolProbe.CheckAsync("gradle", enrichment.GradlePath, ["--version"], TimeSpan.FromMinutes(2)),
+        ExternalToolProbe.CheckAsync("git", enrichment.GitPath, ["--version"], TimeSpan.FromSeconds(30)));
     foreach (var probe in probes)
     {
         if (probe.Available)

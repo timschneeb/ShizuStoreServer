@@ -105,6 +105,17 @@ public sealed class AppEnricherTests : IDisposable
         }
     }
 
+    private sealed class FakeRepoScreenshots(Func<IReadOnlyList<string>> handler) : IRepoScreenshotResolver
+    {
+        public int Calls;
+        public Task<IReadOnlyList<string>> ResolveAsync(
+            string? url, string? sourceUrl, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(handler());
+        }
+    }
+
     /// <summary>
     /// Verbatim <c>apksigner verify --print-certs</c> output for a test key
     /// (captured from build-tools 35.0.0; the MD5 line is what matches the
@@ -240,7 +251,8 @@ public sealed class AppEnricherTests : IDisposable
         ILauncherIconService? launcherIcons = null,
         IGitCodeReleaseClient? gitcode = null,
         IPlayStoreClient? play = null,
-        IzzyStatsProvider? izzyStats = null) =>
+        IzzyStatsProvider? izzyStats = null,
+        IRepoScreenshotResolver? repoScreenshots = null) =>
         new(new GitHubReleaseClient(new HttpClient(github), "tok"),
             new GitLabReleaseClient(new HttpClient(gitlab ?? new StubHandler(_ =>
                 throw new InvalidOperationException("must not call GitLab")))),
@@ -255,13 +267,14 @@ public sealed class AppEnricherTests : IDisposable
             aapt2,
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
             launcherIcons ?? new LauncherIconService(),
-            new HttpClient(downloads), _options, _db, gitcode, play, izzyStats);
+            new HttpClient(downloads), _options, _db, gitcode, play, izzyStats,
+            repoScreenshots: repoScreenshots);
 
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
     /// <summary>Canonical happy-path wiring: stable release → APK download → badging → icon.</summary>
     private (AppEnricher Enricher, StubHandler Github, StubHandler Downloads, FakeAapt2Runner Aapt2, byte[] Zip)
-        HappyPath(string tag = "v1.0", string versionCode = "42", Color? iconColor = null, string? etag = "\"rel-etag\"", FakeSignerRunner? signer = null, string? changelog = null, string assetUrl = "https://cdn.example/app.apk")
+        HappyPath(string tag = "v1.0", string versionCode = "42", Color? iconColor = null, string? etag = "\"rel-etag\"", FakeSignerRunner? signer = null, string? changelog = null, string assetUrl = "https://cdn.example/app.apk", IRepoScreenshotResolver? repoScreenshots = null)
     {
         var zip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, iconColor ?? Color.Blue)));
@@ -272,7 +285,7 @@ public sealed class AppEnricherTests : IDisposable
             Content = new ByteArrayContent(zip),
         });
         var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: versionCode));
-        return (BuildEnricher(github, downloads, aapt2, signer: signer), github, downloads, aapt2, zip);
+        return (BuildEnricher(github, downloads, aapt2, signer: signer, repoScreenshots: repoScreenshots), github, downloads, aapt2, zip);
     }
 
     private void Age(App app) => app.LastCheckedAt = T0 - TimeSpan.FromDays(2);
@@ -1454,7 +1467,7 @@ public sealed class AppEnricherTests : IDisposable
     /// <summary>F-Droid wiring: index fetch + icon mirror; the APK download is attempted but 404s, exercising the index-only fallback.</summary>
     private (AppEnricher Enricher, StubHandler Fdroid, StubHandler Downloads)
         FdroidHappyPath(byte[]? iconBytes = null, bool icon404 = false, Func<HttpResponseMessage>? githubResponse = null,
-            IzzyStatsProvider? izzyStats = null, string? indexV2Json = null)
+            IzzyStatsProvider? izzyStats = null, string? indexV2Json = null, IRepoScreenshotResolver? repoScreenshots = null)
     {
         iconBytes ??= TestAssets.SolidPng(256, 256, Color.Purple);
         var fdroid = new StubHandler(request =>
@@ -1478,7 +1491,7 @@ public sealed class AppEnricherTests : IDisposable
             : new StubHandler(_ => githubResponse());
         var gitlab = new StubHandler(_ => throw new InvalidOperationException("must not call GitLab"));
         var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
-        return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid, izzyStats: izzyStats), fdroid, downloads);
+        return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid, izzyStats: izzyStats, repoScreenshots: repoScreenshots), fdroid, downloads);
     }
 
     [Fact]
@@ -1968,6 +1981,166 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(existing, app.Screenshots);
+    }
+
+    [Fact]
+    public async Task RepoFallbackFillsScreenshotsWhenIndexesEmpty()
+    {
+        // F-Droid/Izzy answer (so the old code would stop) but carry nothing;
+        // the app's own repo tree is the fallback source.
+        string[] fromRepo =
+        [
+            "https://raw.githubusercontent.com/o/app/abc/fastlane/metadata/android/en-US/images/phoneScreenshots/1.jpg",
+        ];
+        var repo = new FakeRepoScreenshots(() => fromRepo);
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("repo-shots", "Repo Shots", "https://github.com/o/app");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(fromRepo, app.Screenshots);
+        Assert.Equal(T0, app.ScreenshotsCheckedAt);
+        Assert.Equal(1, repo.Calls);
+    }
+
+    [Fact]
+    public async Task FdroidScreenshotsWinOverRepoFallback()
+    {
+        const string indexV2 = """
+            {
+              "packages": {
+                "com.example.app": {
+                  "metadata": {
+                    "screenshots": {
+                      "phone": {
+                        "en-US": [
+                          { "name": "/com.example.app/en-US/phoneScreenshots/00.png" },
+                          { "name": "/com.example.app/en-US/phoneScreenshots/01.png" }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        var (enricher, _, _) = FdroidHappyPath(indexV2Json: indexV2, repoScreenshots: repo);
+        var app = NewApp("catshare", "CatShare", "https://f-droid.org/packages/com.example.app/");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(
+            [
+                "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png",
+                "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/01.png",
+            ],
+            app.Screenshots);
+        Assert.Equal(0, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RepoFallbackSkippedWhenScreenshotsExist()
+    {
+        // Indexes unreachable (so the stored set survives) and the row already
+        // has screenshots: the repo must not be cloned.
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        var enricher = BuildEnricher(
+            github, downloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            fdroid: new StubHandler(_ => throw new HttpRequestException("Connection refused")),
+            repoScreenshots: repo);
+        var app = NewApp("has-shots", "Has Shots", "https://github.com/o/app");
+        app.Screenshots = ["https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png"];
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Single(app.Screenshots);
+        Assert.Equal(0, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RepoFallbackSkippedWithinRecheckWindow()
+    {
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("checked", "Checked", "https://github.com/o/app");
+        app.ScreenshotsCheckedAt = T0;
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Empty(app.Screenshots);
+        Assert.Equal(T0, app.ScreenshotsCheckedAt);
+        Assert.Equal(0, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RepoFallbackFailureDoesNotFailEnrichment()
+    {
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("clone crashed"));
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("throwing", "Throwing", "https://github.com/o/app");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Empty(app.Screenshots);
+        Assert.Equal(T0, app.ScreenshotsCheckedAt);
+        Assert.Equal(1, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RepoUrlsSurviveEmptyIndexOnNormalPass()
+    {
+        // A reachable index that lists nothing must not wipe URLs that came
+        // from the repo fallback (they are not the index's to clear).
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("repo-only", "Repo Only", "https://github.com/o/app");
+        app.Screenshots = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
+        app.ScreenshotsCheckedAt = T0 - TimeSpan.FromDays(1);
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(
+            ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"],
+            app.Screenshots);
+        Assert.Equal(0, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsBypassesRecheckWindow()
+    {
+        string[] fromRepo =
+        [
+            "https://raw.githubusercontent.com/o/app/abc/fastlane/metadata/android/en-US/images/phoneScreenshots/1.jpg",
+        ];
+        var repo = new FakeRepoScreenshots(() => fromRepo);
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("forced", "Forced", "https://github.com/o/app");
+        app.ScreenshotsCheckedAt = T0; // inside the 7-day window
+
+        var result = await enricher.RefreshScreenshotsAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(fromRepo, app.Screenshots);
+        Assert.Equal(1, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsIsUpToDateWhenUnchanged()
+    {
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("stable", "Stable", "https://github.com/o/app");
+        app.Screenshots = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
+
+        var result = await enricher.RefreshScreenshotsAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Single(app.Screenshots);
+        Assert.Equal(0, repo.Calls);
     }
 
     [Fact]

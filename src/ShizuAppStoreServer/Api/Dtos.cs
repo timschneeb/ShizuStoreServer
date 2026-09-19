@@ -183,5 +183,17 @@ public sealed record IconRefreshStatusDto(
     IReadOnlyList<string> Errors,
     string? Error);
 
+/// <summary>Operator view of the in-process screenshots refresh.</summary>
+public sealed record ScreenshotRefreshStatusDto(
+    string State,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? FinishedAt,
+    int Checked,
+    int Updated,
+    int Current,
+    int Failed,
+    IReadOnlyList<string> Errors,
+    string? Error);
+
 /// <summary>Result of <c>POST /v1/apps/{slug}/installs</c>: the new total.</summary>
 public sealed record InstallRecordedDto(string Slug, long InstallCount);
