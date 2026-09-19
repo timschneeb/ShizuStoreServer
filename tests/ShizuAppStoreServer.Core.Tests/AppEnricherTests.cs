@@ -293,11 +293,13 @@ public sealed class AppEnricherTests : IDisposable
         string? sha256 = null,
         long? size = null,
         string? sourceRef = null,
-        bool primary = true)
+        bool primary = true,
+        string? packageName = null)
     {
         var row = new AppDownload
         {
             AppId = app.Id,
+            PackageName = packageName,
             Source = source,
             SourceRef = sourceRef,
             ApkUrl = url,
@@ -3856,6 +3858,163 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(2, candidates.Count);
         Assert.Contains(candidates, d => d.PackageName == "com.example.app.play");
         Assert.Equal("com.example.app", candidates.Single(d => d.IsPrimary).PackageName);
+    }
+
+    [Fact]
+    public async Task ExcludedPackageIsDroppedAndRootRebindsToSurvivor()
+    {
+        var dropInApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var normalApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(640, 640, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("shizuku-plus-drop-in.apk", "https://cdn.example/shizuku-plus-drop-in.apk", dropInApk.Length),
+            ("shizuku-plus.apk", "https://cdn.example/shizuku-plus.apk", normalApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("drop-in", StringComparison.Ordinal)
+                ? dropInApk
+                : normalApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == dropInApk.Length
+            ? TestAssets.CannedBadging(package: "moe.shizuku.privileged.api", label: "Shizuku")
+            : TestAssets.CannedBadging(package: "af.shizuku.plus.api", label: "Shizuku+"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("shizukuplus", "ShizukuPlus", "https://github.com/thejaustin/ShizukuPlus");
+        app.PackageName = "moe.shizuku.privileged.api";
+        app.ApkLabel = "Shizuku";
+        _db.SaveChanges();
+
+        // A legacy variant row for the normal APK, as created before the fold.
+        var variant = new App
+        {
+            Slug = "af-shizuku-plus-api",
+            Name = "ShizukuPlus",
+            Url = "https://github.com/thejaustin/ShizukuPlus",
+            Listing = Listing.Main,
+            Type = AppType.App,
+            RootAppId = app.Id,
+            CategoryId = app.CategoryId,
+            ApkLabel = "Shizuku+",
+            PackageName = "af.shizuku.plus.api",
+            AddedAt = T0,
+            UpdatedAt = T0,
+        };
+        _db.Apps.Add(variant);
+        _db.SaveChanges();
+        AddDownload(app, SourceKind.GitHub, "https://cdn.example/legacy-drop-in.apk",
+            versionCode: 2606, sigSha256: "980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9",
+            packageName: "moe.shizuku.privileged.api");
+        AddDownload(variant, SourceKind.GitHub, "https://cdn.example/legacy-plus.apk",
+            versionCode: 2606, sigSha256: "980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9",
+            packageName: "af.shizuku.plus.api");
+
+        _db.AppDownloadExclusions.Add(new AppDownloadExclusion
+        {
+            AppSlug = "shizukuplus",
+            PackageName = "moe.shizuku.privileged.api",
+            Note = "Drop-in shares the real Shizuku package",
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        await enricher.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        // The drop-in is gone; the root now serves the normal package and the
+        // redundant variant was folded and tombstoned.
+        Assert.Equal("af.shizuku.plus.api", app.PackageName);
+        Assert.Equal("Shizuku+", app.ApkLabel);
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == app.Id).ToListAsync());
+        Assert.Contains(await _db.RemovedApps.ToListAsync(), r => r.Slug == "af-shizuku-plus-api");
+
+        var candidates = await _db.Downloads.Where(d => d.AppId == app.Id).ToListAsync();
+        Assert.Single(candidates);
+        Assert.Equal("af.shizuku.plus.api", candidates[0].PackageName);
+        Assert.True(candidates[0].IsPrimary);
+        Assert.DoesNotContain(await _db.Downloads.ToListAsync(),
+            d => d.PackageName == "moe.shizuku.privileged.api");
+    }
+
+    [Fact]
+    public async Task ExcludedArtifactIsNotReappliedWhenOnlyItIsReanalyzed()
+    {
+        // After a rebind the surviving sibling sits in storage, so the extras
+        // loop skips it and a later pass re-analyzes only the excluded
+        // artifact. Re-applying that lone analysis would silently undo the
+        // operator exclusion, so the stored state must win.
+        var dropInApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var normalApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(640, 640, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("shizuku-plus-drop-in.apk", "https://cdn.example/shizuku-plus-drop-in.apk", dropInApk.Length),
+            ("shizuku-plus.apk", "https://cdn.example/shizuku-plus.apk", normalApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(dropInApk),
+        });
+        var aapt2 = new FakeAapt2Runner(_ =>
+            TestAssets.CannedBadging(package: "moe.shizuku.privileged.api", label: "Shizuku"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("shizukuplus", "ShizukuPlus", "https://github.com/thejaustin/ShizukuPlus");
+        app.PackageName = "af.shizuku.plus.api";
+        app.ApkLabel = "Shizuku+";
+        _db.SaveChanges();
+
+        var survivor = AddDownload(app, SourceKind.GitHub, "https://cdn.example/shizuku-plus.apk",
+            versionCode: 2606, sigSha256: "980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9",
+            packageName: "af.shizuku.plus.api");
+
+        _db.AppDownloadExclusions.Add(new AppDownloadExclusion
+        {
+            AppSlug = "shizukuplus",
+            PackageName = "moe.shizuku.privileged.api",
+            Note = "Drop-in shares the real Shizuku package",
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        await enricher.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        Assert.Equal("af.shizuku.plus.api", app.PackageName);
+        Assert.DoesNotContain(await _db.Downloads.ToListAsync(),
+            d => d.PackageName == "moe.shizuku.privileged.api");
+        var candidates = await _db.Downloads.Where(d => d.AppId == app.Id).ToListAsync();
+        Assert.Single(candidates);
+        Assert.Equal(survivor.Id, candidates[0].Id);
+        Assert.True(candidates[0].IsPrimary);
+    }
+
+    [Fact]
+    public async Task ExcludingEveryPackageLeavesAppUnchanged()
+    {
+        var apk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", "https://cdn.example/app.apk", apk.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(apk),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("guarded", "Guarded", "https://github.com/example/guarded");
+        _db.AppDownloadExclusions.Add(new AppDownloadExclusion
+        {
+            AppSlug = "guarded",
+            PackageName = "com.example.app",
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        // An operator typo must never empty a row: with every package excluded
+        // the release is applied unchanged.
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal("com.example.app", app.PackageName);
+        Assert.Contains(_db.Downloads.Local, d => d.AppId == app.Id && d.PackageName == "com.example.app");
     }
 }
 

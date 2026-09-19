@@ -14,6 +14,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
     public DbSet<RemovedApp> RemovedApps => Set<RemovedApp>();
     public DbSet<PackageException> PackageExceptions => Set<PackageException>();
+    public DbSet<AppDownloadExclusion> AppDownloadExclusions => Set<AppDownloadExclusion>();
     public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
 
     public override int SaveChanges()
@@ -311,6 +312,19 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Listing).HasColumnName("listing").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.RemovedAt).HasColumnName("removed_at").IsRequired();
             e.HasIndex(x => x.RemovedAt);
+        });
+
+        b.Entity<AppDownloadExclusion>(e =>
+        {
+            e.ToTable("app_download_exclusions");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.AppSlug).HasColumnName("app_slug").HasMaxLength(200).IsRequired();
+            e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(256).IsRequired();
+            e.HasIndex(x => new { x.AppSlug, x.PackageName }).IsUnique();
+            e.Property(x => x.Note).HasColumnName("note").HasMaxLength(500);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
         });
 
         b.Entity<ConfigFlag>(e =>

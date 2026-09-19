@@ -198,6 +198,11 @@ bundle` is rebuilt per deploy, never committed.
   gate (§5.3): `package_name` unique, `action` (`allow` or `dontaudit`),
   optional `note`, timestamps. Seeded by migration (`rish-mcp` is
   `allow`), edited with SQL; no admin endpoint.
+- **app_download_exclusions** - operator overrides that hide one APK
+  package from one list entry: unique `(app_slug, package_name)`,
+  optional `note`, timestamps. Applied during enrichment (§5.1), seeded
+  with SQL; no admin endpoint. Scoping by `app_slug` keeps the same
+  package available on other entries that legitimately ship it.
 
 ## 4. List ingestion
 
@@ -557,6 +562,23 @@ their downloads move onto the root candidate set (keeping their
 package), the row is deleted and tombstoned, and the root's `updated_at`
 bumps so cached clients refetch the merged entry.
 
+Operator exclusions (`app_download_exclusions`, §3) are applied before
+grouping: a release artifact whose package is excluded for the entry is
+dropped, and any stored candidate for it is deleted. When the root's
+stored `package_name` is the excluded one it is cleared, so the
+root-group selector falls back to a surviving group and the root rebinds
+to the remaining package; a same-label legacy variant then folds in as
+above. A variant whose only package was excluded is pruned and
+tombstoned. When a release offers only excluded packages and no
+non-excluded candidate is stored, nothing is dropped, so an operator
+typo cannot empty a row. But when a non-excluded candidate is already
+stored and only excluded artifacts were scanned this pass (a source
+without asset digests skips the stored sibling), the stored state wins
+and the excluded analysis is discarded, so a later partial pass cannot
+silently undo the exclusion. This is how `shizukuplus` serves only its
+unique-package APK without dropping the drop-in build's package from
+the unrelated Shizuku entry.
+
 `KieronQuinn/SmartspacerPlugins` publishes one plugin per GitHub
 release, so the newest-release scan cannot see them: it is a hard-coded
 special case that fetches **all** non-draft releases, flattens their
@@ -850,7 +872,7 @@ rather than persisting them.
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
 | `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
-| `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
+| `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |

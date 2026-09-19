@@ -289,4 +289,43 @@ public sealed class DbContextTests : IDisposable
 
         Assert.Equal(2, await _db.PackageExceptions.CountAsync());
     }
+
+    [Fact]
+    public async Task AppDownloadExclusionsRoundTripAndRejectDuplicate()
+    {
+        var now = new DateTimeOffset(2026, 9, 19, 0, 0, 0, TimeSpan.Zero);
+        _db.AppDownloadExclusions.Add(new AppDownloadExclusion
+        {
+            AppSlug = "shizukuplus",
+            PackageName = "moe.shizuku.privileged.api",
+            Note = "Drop-in shares the real Shizuku package",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await _db.SaveChangesAsync();
+
+        var saved = await _db.AppDownloadExclusions.SingleAsync();
+        Assert.Equal("shizukuplus", saved.AppSlug);
+        Assert.Equal("moe.shizuku.privileged.api", saved.PackageName);
+
+        // The same package is scoped per app, so another entry may still serve it.
+        _db.AppDownloadExclusions.Add(new AppDownloadExclusion
+        {
+            AppSlug = "shizuku-thedjchi-s-fork",
+            PackageName = "moe.shizuku.privileged.api",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await _db.SaveChangesAsync();
+        Assert.Equal(2, await _db.AppDownloadExclusions.CountAsync());
+
+        _db.AppDownloadExclusions.Add(new AppDownloadExclusion
+        {
+            AppSlug = "shizukuplus",
+            PackageName = "moe.shizuku.privileged.api",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await Assert.ThrowsAsync<DbUpdateException>(() => _db.SaveChangesAsync());
+    }
 }

@@ -33,7 +33,7 @@ public sealed class CategoriesTests(ShizuApiFactory factory) : IClassFixture<Shi
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var tree = (await response.Content.ReadFromJsonAsync<List<CategoryNodeDto>>(Json))!;
 
-        Assert.Equal(3, tree.Count); // audio, vendor-specific, coroutines (insertion order)
+        Assert.Equal(3, tree.Count); // audio, coroutines, vendor-specific (name order)
         var audio = tree.Single(n => n.Slug == "audio");
         Assert.Equal(2, audio.AppCount);
         Assert.Empty(audio.Children);
@@ -47,6 +47,29 @@ public sealed class CategoriesTests(ShizuApiFactory factory) : IClassFixture<Shi
         var libs = tree.Single(n => n.Slug == "coroutines");
         Assert.Equal("libraries", libs.Section);
         Assert.Equal(1, libs.AppCount);
+    }
+
+    [Fact]
+    public async Task TreeIsNameSortedPerLevel()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var vendor = Seeds.NewCategory("vendor-specific", "Vendor-specific");
+            var audio = Seeds.NewCategory("audio", "Audio");
+            var libs = Seeds.NewCategory("coroutines", "Coroutines", section: CategorySection.Libraries);
+            var oneui = Seeds.NewCategory("oneui", "OneUI", parent: vendor);
+            var pixel = Seeds.NewCategory("pixel", "Pixel", parent: vendor);
+            var miui = Seeds.NewCategory("miui", "MIUI", parent: vendor);
+            db.Categories.AddRange(vendor, audio, libs, oneui, pixel, miui);
+        });
+
+        var response = await factory.NewClient().GetAsync("/v1/categories");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var tree = (await response.Content.ReadFromJsonAsync<List<CategoryNodeDto>>(Json))!;
+
+        Assert.Equal(["Audio", "Coroutines", "Vendor-specific"], tree.Select(n => n.Name));
+        var vendor = tree.Single(n => n.Slug == "vendor-specific");
+        Assert.Equal(["MIUI", "OneUI", "Pixel"], vendor.Children.Select(n => n.Name));
     }
 
     [Fact]

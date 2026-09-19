@@ -36,7 +36,12 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
-        var categories = await db.Categories.AsNoTracking().OrderBy(c => c.Id).ToListAsync(ct);
+        // Name-sorted per level (case-insensitive, id breaks ties); the tree
+        // build below preserves this order for roots and children alike.
+        var categories = (await db.Categories.AsNoTracking().OrderBy(c => c.Id).ToListAsync(ct))
+            .OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(c => c.Id)
+            .ToList();
         var counts = await db.Apps.AsNoTracking()
             .Where(a => a.Availability != Availability.Excluded && listings.Contains(a.Listing))
             .GroupBy(a => a.CategoryId)

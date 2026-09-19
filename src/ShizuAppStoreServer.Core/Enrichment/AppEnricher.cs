@@ -1228,6 +1228,8 @@ public sealed class AppEnricher(
         var presented = new List<App>();
         var listPackage = ListEndpointPackage(root);
 
+        analyses = await ApplyDownloadExclusionsAsync(root, analyses, ct);
+
         // A repo can ship the same package for phone, TV and watch (for example
         // universal-installer's app/tv/wearos release APKs); the phone build is
         // the one a phone store should offer, so a package that also ships a
@@ -1296,6 +1298,90 @@ public sealed class AppEnricher(
 
         return result;
     }
+
+    /// <summary>
+    /// Drops operator-excluded packages (table <c>app_download_exclusions</c>)
+    /// from the release before it is grouped, and deletes the stale candidates
+    /// already stored for them. A root whose stored identity is excluded is
+    /// cleared so the surviving group becomes the entry instead of a variant.
+    /// When everything would be excluded the release is kept unchanged: an
+    /// operator typo must never empty a row.
+    /// </summary>
+    private async Task<IReadOnlyList<ArtifactAnalysis>> ApplyDownloadExclusionsAsync(
+        App root, IReadOnlyList<ArtifactAnalysis> analyses, CancellationToken ct)
+    {
+        var excluded = await LoadExcludedPackagesAsync(root.Slug, ct);
+        if (excluded.Count == 0)
+        {
+            return analyses;
+        }
+
+        var kept = analyses.Where(a => !IsExcluded(excluded, a.Badging.PackageName)).ToList();
+        if (kept.Count == 0)
+        {
+            // A partial pass can re-scan only the excluded artifact while its
+            // surviving sibling stays recorded and Complete, so re-applying the
+            // excluded analysis would silently undo the operator's exclusion.
+            // Keep the stored state in that case. Only when no non-excluded
+            // candidate is recorded is the release genuinely all-excluded
+            // (operator typo), and then it stays applied unchanged so the row
+            // never goes empty.
+            var stored = await LoadGroupDownloadsAsync(root, ct);
+            return stored.Any(d => !IsExcluded(excluded, d.PackageName)) ? [] : analyses;
+        }
+
+        foreach (var download in await LoadGroupDownloadsAsync(root, ct))
+        {
+            if (IsExcluded(excluded, download.PackageName))
+            {
+                db.Downloads.Remove(download);
+            }
+        }
+
+        // The stored package is the root-group selector: pointing at an
+        // excluded package would keep the removed group alive, so clear it and
+        // let SelectRootGroup fall back to the group that survives.
+        if (IsExcluded(excluded, root.PackageName))
+        {
+            root.PackageName = null;
+            root.ApkLabel = null;
+        }
+
+        // A variant whose only package was excluded must not linger as an
+        // empty entry; drop and tombstone it like a vanished variant.
+        foreach (var variant in await LoadVariantGroupAsync(root, ct))
+        {
+            if (!IsExcluded(excluded, variant.PackageName)
+                || (await LoadDownloadsAsync(variant, ct)).Count > 0)
+            {
+                continue;
+            }
+
+            var icon = variant.IconHash;
+            variant.IconHash = null;
+            if (icon is not null)
+            {
+                await DeleteIconIfOrphanedAsync(variant, icon, ct);
+            }
+
+            await WriteRemovedTombstoneAsync(variant, ct);
+            db.Apps.Remove(variant);
+        }
+
+        return kept;
+    }
+
+    private async Task<HashSet<string>> LoadExcludedPackagesAsync(string slug, CancellationToken ct)
+    {
+        var packages = await db.AppDownloadExclusions.AsNoTracking()
+            .Where(x => x.AppSlug == slug)
+            .Select(x => x.PackageName)
+            .ToListAsync(ct);
+        return new HashSet<string>(packages, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool IsExcluded(HashSet<string> excluded, string? packageName) =>
+        !string.IsNullOrEmpty(packageName) && excluded.Contains(packageName);
 
     /// <summary>
     /// One app name's artifacts within a release. Same label means the same
@@ -2070,7 +2156,9 @@ public sealed class AppEnricher(
             }
         }
 
-        return rows;
+        // A row marked for removal must not count as a candidate: the primary
+        // recompute would otherwise pick it and persist no live primary.
+        return rows.Where(r => db.Entry(r).State != EntityState.Deleted).ToList();
     }
 
     private static bool IsForApp(AppDownload row, App app) =>
