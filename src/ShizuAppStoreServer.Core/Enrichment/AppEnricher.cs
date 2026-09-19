@@ -232,7 +232,12 @@ public sealed class AppEnricher(
                 && await TryPlayIconAsync(app, now, ct))
             {
                 app.LastError = null;
-                return new EnrichResult(EnrichOutcome.AvatarFallback, null);
+                result = new EnrichResult(EnrichOutcome.AvatarFallback, null);
+            }
+
+            if (result.Outcome != EnrichOutcome.Failed)
+            {
+                await StampVariantGroupAsync(app, now, ct);
             }
 
             return result;
@@ -251,6 +256,22 @@ public sealed class AppEnricher(
             // Transport failure (DNS, TLS, reset): same treatment, with the
             // cause recorded instead of a silent Failed.
             return Fail(app, now, $"Upstream error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Variants are enriched through their root's pass and never selected
+    /// directly, so a completed root check must refresh them too. The skip
+    /// paths that stamp only the root (unchanged release, 304, all-assets-known)
+    /// would otherwise freeze variant timestamps until their own artifact is
+    /// re-analyzed, and the health snapshot flags them stale after two windows.
+    /// </summary>
+    private async Task StampVariantGroupAsync(App root, DateTimeOffset now, CancellationToken ct)
+    {
+        foreach (var variant in await LoadVariantGroupAsync(root, ct))
+        {
+            variant.LastCheckedAt = now;
+            variant.LastError = null;
         }
     }
 

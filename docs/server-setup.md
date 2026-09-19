@@ -391,8 +391,28 @@ systemctl status shizu-refresh-icons
 ```
 
 It runs `--refresh-icons --force`: it re-resolves the icon chain for
-every direct-APK app and rewrites icons even when the fresh bytes match;
-it never runs alongside the other two units.
+every direct-APK app and rewrites icons even when the fresh bytes match.
+The unit runs as a second process against the same DB and Gradle tool
+dir, so it must never overlap `shizuappstore.service` or
+`shizu-sync-once`.
+
+To heal a running deployment with no downtime, trigger the same pass
+inside the live server instead (it takes the shared sync gate, so the
+fast and nightly passes skip while it runs and the API keeps serving
+reads):
+
+```bash
+TOKEN=$(sudo sed -n 's/^SHIZU_ADMIN_SECRET=//p' /etc/shizuappstore/env)
+curl -fsS -X POST https://shizustore.timschneeberger.me/v1/admin/refresh-icons \
+  -H "Authorization: Bearer $TOKEN"                    # 202, body is the running status
+curl -fsS https://shizustore.timschneeberger.me/v1/admin/refresh-icons \
+  -H "Authorization: Bearer $TOKEN"                    # poll until state is completed/failed
+```
+
+The POST body is optional: `{"force":true}` recounts byte-identical
+renders as refreshed (the heal unit's `--force`); omit it for a normal
+refresh that only adopts changed renders. `DELETE` on the same route
+cancels a running refresh.
 
 `appsettings.Production.json` is written before the first
 `deploy.sh` run, because the rsync into `app/` excludes it and the

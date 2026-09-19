@@ -553,7 +553,12 @@ candidates on the root, each `app_downloads` row carrying its own
 as separate sources.
 
 Every other label becomes a variant `apps` row (§3) with its own slug
-(the slugified package, deduped), downloads and icon. The root's
+(the slugified package, deduped), downloads and icon. A completed root
+check stamps every live variant's `last_checked_at` too: variants are
+only ever enriched through the root's pass, and the skip paths that
+touch just the root (unchanged release, 304, all-assets-known) would
+otherwise freeze their timestamps until the health snapshot flags them
+stale after two windows. The root's
 `display_name` and every variant's is the APK's `application-label`;
 when a root has more than one label the label is qualified as
 `label (root list name)` so the extra apps stay traceable to their list
@@ -747,7 +752,9 @@ non-excluded row currently carrying `last_error`, quality rows from
 `CatalogHealthCheck` (missing license/description/icon, non-http
 entry or source URL, direct-APK rows without package name or primary
 download, never-checked or twice-window-stale rows; excluded rows are
-never checked). Due-only passes (HEAD unchanged) keep the previous
+never checked, and a variant shares its root's check freshness because
+the root's completed pass stamps the whole variant group). Due-only
+passes (HEAD unchanged) keep the previous
 parse rows and refresh only enrich + quality rows. Skipped and failed
 passes write no issues, so a crashed pass keeps the last good snapshot.
 Staleness is evaluated against the pass clock. The run row records the

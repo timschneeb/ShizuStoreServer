@@ -3701,6 +3701,42 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Single(_db.Apps.Local, a => a.RootAppId == app.Id);
     }
 
+    [Fact]
+    public async Task UnchangedReleaseStampsVariantsFresh()
+    {
+        var mainApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var pluginApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", mainApk.Length),
+            ("plugin-release.apk", "https://cdn.example/plugin.apk", pluginApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("plugin", StringComparison.Ordinal)
+                ? pluginApk
+                : mainApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == pluginApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.plugin", label: "Plugin")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("variant-freshness", "Variant Freshness", "https://github.com/example/variant-freshness");
+
+        await enricher.EnrichAsync(app, T0);
+        var variant = _db.Apps.Local.Single(a => a.RootAppId == app.Id);
+
+        // A later pass with the release unchanged must refresh the variant too:
+        // it is never selected directly, only through the root's pass.
+        Age(app);
+        Age(variant);
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(2, downloads.Calls); // second pass skipped both APKs
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(T0, app.LastCheckedAt);
+        Assert.Equal(T0, variant.LastCheckedAt);
+    }
+
     // ---- Flavor grouping: same-label APKs of one release become one app with per-package candidates ----
 
     [Fact]
