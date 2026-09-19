@@ -167,5 +167,21 @@ public sealed record HealthDto(string Status);
 
 public sealed record SyncAcceptedDto(bool Queued);
 
+/// <summary>Optional POST body for <c>POST /v1/admin/refresh-icons</c>.</summary>
+public sealed record IconRefreshRequestDto(bool Force = false);
+
+/// <summary>Operator view of the in-process icon refresh.</summary>
+public sealed record IconRefreshStatusDto(
+    string State,
+    bool Force,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? FinishedAt,
+    int Checked,
+    int Refreshed,
+    int AlreadyCurrent,
+    int Failed,
+    IReadOnlyList<string> Errors,
+    string? Error);
+
 /// <summary>Result of <c>POST /v1/apps/{slug}/installs</c>: the new total.</summary>
 public sealed record InstallRecordedDto(string Slug, long InstallCount);

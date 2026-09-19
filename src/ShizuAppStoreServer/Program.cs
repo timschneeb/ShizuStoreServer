@@ -169,6 +169,7 @@ builder.Services.AddSingleton<SyncGate>();
 builder.Services.AddSingleton<SyncSignal>();
 builder.Services.AddSingleton<SyncPassRunner>();
 builder.Services.AddSingleton<ISyncPassRunner>(sp => sp.GetRequiredService<SyncPassRunner>());
+builder.Services.AddSingleton<IconRefreshCoordinator>();
 builder.Services.AddHostedService<SyncWorker>();
 builder.Services.AddHostedService<NightlyWorker>();
 

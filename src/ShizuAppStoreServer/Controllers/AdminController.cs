@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -15,8 +14,6 @@ namespace ShizuAppStoreServer.Controllers;
 public sealed class AdminController(
     ShizuDbContext db, AdminOptions adminOptions, SyncSignal signal) : ControllerBase
 {
-    private const string AuthScheme = "Bearer";
-
     /// <summary>
     /// Queues a list-sync run and wakes the fast loop immediately.
     /// Authenticates with <c>Authorization: Bearer &lt;token&gt;</c>; the
@@ -38,7 +35,7 @@ public sealed class AdminController(
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
-        if (!IsValidToken(token))
+        if (!AdminAuth.IsValidToken(Request, token))
         {
             return Problem("Invalid or missing token.", statusCode: StatusCodes.Status401Unauthorized);
         }
@@ -73,25 +70,5 @@ public sealed class AdminController(
         signal.Request();
 
         return Accepted(new SyncAcceptedDto(true));
-    }
-
-    private bool IsValidToken(string token)
-    {
-        if (!Request.Headers.TryGetValue("Authorization", out var header))
-        {
-            return false;
-        }
-
-        var value = header.ToString();
-        if (!value.StartsWith(AuthScheme + " ", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var presented = value[(AuthScheme.Length + 1)..].Trim();
-        var expected = System.Text.Encoding.UTF8.GetBytes(token);
-        var actual = System.Text.Encoding.UTF8.GetBytes(presented);
-        return actual.Length == expected.Length
-            && CryptographicOperations.FixedTimeEquals(actual, expected);
     }
 }

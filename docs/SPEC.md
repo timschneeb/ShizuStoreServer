@@ -439,10 +439,15 @@ generated namespace (`shizu_N.xml`, referenced rasters copied
  aborting.
 the tool composites adaptive-icon layers through real Android
 drawables (AdaptiveIconDrawable itself cannot inflate under
-LayoutLib, so background/foreground resolve and draw full-bleed
-in a fixed-size view) and writes an exact-size PNG per icon, which
-the service normalizes (a defensive top-left crop only guards
-against a misbehaving renderer). Renders are serialized through one
+LayoutLib, so background/foreground resolve in a fixed-size view)
+and writes an exact-size PNG per icon. A launcher reveals only the
+central 72dp of the 108dp adaptive viewport, so an adaptive root is
+drawn scaled 108/72 about the view center, which clips the 18dp
+bleed per side and leaves the masked art filling the frame; plain
+vectors and rasters draw full-bleed. The service then normalizes
+(a defensive top-left crop only guards against a misbehaving
+renderer). The zoom changes adaptive renders byte-for-byte, so
+existing adaptive rows adopt new hashes on the next refresh. Renders are serialized through one
 Gradle invocation per pass (`renderIconBatch` over a manifest of
 `name|root|out` lines with per-app filename prefixes; a single
 `renderIcon` remains for one-offs), because each invocation pays a
@@ -498,7 +503,11 @@ stay `UpToDate` (missing files are still rewritten), changed
 renders adopt the new hash. `--force` additionally recounts
 identical renders as refreshed, which surfaces self-consistent
 wrong files (e.g. two swapped icons whose hashes matched their
-rows). It writes no `sync_runs` row.
+rows). It writes no `sync_runs` row. The CLI form runs as a second process
+and must not overlap a live server (both write `apps` and share the Gradle
+tool dir); to heal a running deployment use
+`POST /v1/admin/refresh-icons`, which runs the same work inside the server
+under the sync gate.
 
 `--sync-once [--full] [--skip-apk]` runs one sync pass in-process and
 exits (run with the server stopped, like `--refresh-icons`). `--full`
@@ -517,10 +526,10 @@ Icons are normalized to ≤192px PNGs, stored content-addressed as
 deterministic 192px PNGs (name-hashed background, embedded glyph).
 Every icon carries an `icon_adaptive` flag (`iconAdaptive` in the
 app DTOs): true only when the served file renders an
-`<adaptive-icon>` root (full-bleed, safe for rounded-square
-framing); plain vectors render full-bleed too but stay false, as do
-decoded rasters and avatars (framed in a squircle box). Refresh
-passes re-sync the flag without icon churn.
+`<adaptive-icon>` root (the central 72dp masked view, safe for
+rounded-square framing); plain vectors render full-bleed too but
+stay false, as do decoded rasters and avatars (framed in a squircle
+box). Refresh passes re-sync the flag without icon churn.
 
 ### 5.2 Multi-app repos (one list entry, several packages)
 
@@ -879,6 +888,9 @@ rather than persisting them.
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
 | `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
 | `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). |
+| `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Does not write a `sync_runs` row. |
+| `GET /v1/admin/refresh-icons` | Same token rules. Current refresh status: `state` (`idle\|running\|completed\|failed`), `force`, `startedAt`/`finishedAt`, `checked`/`refreshed`/`alreadyCurrent`/`failed`, `errors[]`, `error`. |
+| `DELETE /v1/admin/refresh-icons` | Same token rules. Cancels the running refresh → 202, or 409 when nothing is running. |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).
