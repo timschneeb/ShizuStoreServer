@@ -18,7 +18,7 @@ The client has a setting to show these entries which is off by default.
 | New release on Play/Codeberg/other sites | within 24 hours |
 | List entry added/edited | within 30 minutes (+ analysis time) |
 | Metadata refresh (GitHub stars, etc.) | within 24 hours |
-| New screenshots added | screenshots on F-Droid/Izzy within 24 hours, Git repos are scanned for screeenshots every week |
+| New screenshots added or removed | F-Droid/Izzy shots refresh within 24 hours; the app repo is re-scanned every week and dead URLs are cleared on the next scan |
 
 ## How the server finds releases
 
@@ -115,5 +115,6 @@ Resolution order:
    fastlane `phoneScreenshots` or `docs/screenshots`). Formats are png, jpg,
    jpeg, webp, gif and bmp. The resulting URLs are pinned to the fetched
    commit.
-   
-* Up to 12 screenshots are collected
+
+
+* Up to 12 screenshots are collected.

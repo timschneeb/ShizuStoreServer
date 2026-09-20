@@ -285,12 +285,15 @@ public sealed class AppEnricher(
     // whole lookup and silently dropped F-Droid screenshots for every app after
     // the first failure, so a repo that cannot be reached now keeps the URLs it
     // contributed earlier instead of taking the other repo's hits down with it.
-    // When F-Droid/Izzy end up with nothing, the app's own repo tree is the
-    // last resort (see RepoScreenshotResolver).
+    // A repo that answers replaces its URLs wholesale, so dead shots are
+    // cleared on rescan. When F-Droid/Izzy end up with nothing, the app's own
+    // repo tree is the last resort (see RepoScreenshotResolver).
     /// <summary>
     /// Screenshots-only maintenance refresh (the admin trigger): re-resolves
-    /// F-Droid/Izzy and forces the repo fallback past its recheck window. No
-    /// APK work. Returns <c>Enriched</c> only when the URL list changed.
+    /// F-Droid/Izzy and re-runs the repo fallback even when repo-sourced URLs
+    /// are already stored, so dead ones are cleared and fresh ones replace
+    /// them. No APK work. Returns <c>Enriched</c> only when the URL list
+    /// changed.
     /// </summary>
     public async Task<EnrichResult> RefreshScreenshotsAsync(
         App app, DateTimeOffset now, CancellationToken ct = default)
@@ -306,42 +309,50 @@ public sealed class AppEnricher(
     {
         try
         {
-            var (reached, urls) = await ResolveFdroidScreenshotsAsync(app, ct);
-            if (reached)
+            // Rebuild instead of append: an index that answers replaces its
+            // URLs entirely (an empty answer clears them), an unreachable one
+            // keeps the URLs it contributed earlier.
+            var (reached, freshIndex) = await ResolveFdroidScreenshotsAsync(app, ct);
+            var indexUrls = reached
+                ? freshIndex
+                : app.Screenshots.Where(IsFdroidSourced).ToList();
+
+            // Index shots win; repo-sourced leftovers are dropped and the repo
+            // is never cloned while the index supplies shots.
+            if (indexUrls.Count > 0)
             {
-                if (urls.Count > 0)
-                {
-                    if (!urls.SequenceEqual(app.Screenshots))
-                    {
-                        app.Screenshots = urls;
-                    }
-                }
-                else if (app.Screenshots.Count > 0 && app.Screenshots.All(IsFdroidSourced))
-                {
-                    // The index answered and no longer lists them. Repo-sourced
-                    // URLs are not the index's to clear.
-                    app.Screenshots = [];
-                }
+                SetScreenshots(app, indexUrls);
+                return;
             }
 
-            // An unreachable repo keeps whatever the app already stored; a
-            // reachable one that answers "no screenshots" clears them. Either
-            // way, only an empty field is eligible for the repo fallback.
-            if (app.Screenshots.Count > 0 || !ShouldTryRepoScreenshots(app, now, force))
+            // Only repo-sourced URLs can be stored now. They stay until the
+            // recheck window elapses; a forced refresh re-runs the lookup every
+            // time. The repository itself decides their fate: a listed tree
+            // replaces or clears them, a failed clone keeps them.
+            var storedRepo = app.Screenshots.Where(url => !IsFdroidSourced(url)).ToList();
+            if (!ShouldTryRepoScreenshots(app, now, force))
             {
+                SetScreenshots(app, storedRepo);
                 return;
             }
 
             app.ScreenshotsCheckedAt = now;
-            var fromRepo = await repoScreenshots!.ResolveAsync(app.Url, app.SourceUrl, ct);
-            if (fromRepo.Count > 0)
-            {
-                app.Screenshots = [.. fromRepo];
-            }
+            var resolved = await repoScreenshots!.ResolveAsync(app.Url, app.SourceUrl, ct);
+            SetScreenshots(app, resolved.Reached ? resolved.Urls : storedRepo);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log?.LogDebug(ex, "Screenshot lookup failed for {Slug}.", app.Slug);
+        }
+    }
+
+    /// <summary>Stores a fresh list, capped, and leaves identical content untouched.</summary>
+    private static void SetScreenshots(App app, IReadOnlyList<string> urls)
+    {
+        var capped = urls.Count > MaxScreenshots ? urls.Take(MaxScreenshots).ToList() : [.. urls];
+        if (!capped.SequenceEqual(app.Screenshots))
+        {
+            app.Screenshots = capped;
         }
     }
 

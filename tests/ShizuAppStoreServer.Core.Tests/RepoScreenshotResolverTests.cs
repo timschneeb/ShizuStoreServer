@@ -127,14 +127,35 @@ public sealed class RepoScreenshotResolverTests
         });
         var resolver = new RepoScreenshotResolver(git, new EnrichmentOptions());
 
-        var urls = await resolver.ResolveAsync("https://github.com/o/app", null);
+        var result = await resolver.ResolveAsync("https://github.com/o/app", null);
 
+        Assert.True(result.Reached);
         Assert.Equal(
             ["https://raw.githubusercontent.com/o/app/deadbeef/fastlane/metadata/android/en-US/images/phoneScreenshots/1.jpg"],
-            urls);
+            result.Urls);
         Assert.Equal(3, git.Calls);
         Assert.Contains("--filter=blob:none", git.Seen[0]);
         Assert.Contains("--no-checkout", git.Seen[0]);
+    }
+
+    [Fact]
+    public async Task EmptyTreeIsReachedWithNoScreenshots()
+    {
+        // A listed tree without screenshot images is a verified "none": the
+        // caller may clear stored repo URLs. Only failures are unreached.
+        var git = new FakeGit(args => args[0] switch
+        {
+            "clone" => new GitResult(0, string.Empty, string.Empty),
+            _ when args.Contains("rev-parse") => new GitResult(0, "deadbeef\n", string.Empty),
+            _ when args.Contains("ls-tree") => new GitResult(0, "README.md\0app/src/main/App.kt\0", string.Empty),
+            _ => new GitResult(1, string.Empty, "unexpected"),
+        });
+        var resolver = new RepoScreenshotResolver(git, new EnrichmentOptions());
+
+        var result = await resolver.ResolveAsync("https://github.com/o/app", null);
+
+        Assert.True(result.Reached);
+        Assert.Empty(result.Urls);
     }
 
     [Fact]
@@ -145,9 +166,10 @@ public sealed class RepoScreenshotResolverTests
             : new GitResult(1, string.Empty, "unexpected"));
         var resolver = new RepoScreenshotResolver(git, new EnrichmentOptions());
 
-        var urls = await resolver.ResolveAsync("https://github.com/o/missing", null);
+        var result = await resolver.ResolveAsync("https://github.com/o/missing", null);
 
-        Assert.Empty(urls);
+        Assert.False(result.Reached);
+        Assert.Empty(result.Urls);
         Assert.Equal(1, git.Calls); // no rev-parse/ls-tree after a failed clone
     }
 
@@ -158,7 +180,10 @@ public sealed class RepoScreenshotResolverTests
         var resolver = new RepoScreenshotResolver(
             git, new EnrichmentOptions { RepoScreenshotsEnabled = false });
 
-        Assert.Empty(await resolver.ResolveAsync("https://github.com/o/app", null));
+        var result = await resolver.ResolveAsync("https://github.com/o/app", null);
+
+        Assert.False(result.Reached);
+        Assert.Empty(result.Urls);
         Assert.Equal(0, git.Calls);
     }
 
@@ -178,7 +203,7 @@ public sealed class RepoScreenshotResolverTests
             new GitProcessRunner(gitPath),
             new EnrichmentOptions { RepoScreenshotsTimeout = TimeSpan.FromMinutes(3) });
 
-        var urls = await resolver.ResolveAsync(repo, null);
+        var urls = (await resolver.ResolveAsync(repo, null)).Urls;
 
         Assert.NotEmpty(urls);
         Assert.All(urls, url => Assert.Contains("screenshot", url, StringComparison.OrdinalIgnoreCase));

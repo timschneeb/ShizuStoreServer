@@ -108,11 +108,15 @@ public sealed class AppEnricherTests : IDisposable
     private sealed class FakeRepoScreenshots(Func<IReadOnlyList<string>> handler) : IRepoScreenshotResolver
     {
         public int Calls;
-        public Task<IReadOnlyList<string>> ResolveAsync(
+
+        /// <summary>False models an unreachable repo (clone or tree listing failed).</summary>
+        public bool Reached { get; set; } = true;
+
+        public Task<RepoScreenshotResult> ResolveAsync(
             string? url, string? sourceUrl, CancellationToken ct = default)
         {
             Calls++;
-            return Task.FromResult(handler());
+            return Task.FromResult(new RepoScreenshotResult(Reached, handler()));
         }
     }
 
@@ -2094,8 +2098,8 @@ public sealed class AppEnricherTests : IDisposable
     [Fact]
     public async Task RepoUrlsSurviveEmptyIndexOnNormalPass()
     {
-        // A reachable index that lists nothing must not wipe URLs that came
-        // from the repo fallback (they are not the index's to clear).
+        // The index answers with nothing but the repo recheck window has not
+        // elapsed: the stored repo URLs stay and no clone is paid for.
         var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
         var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
         var app = NewApp("repo-only", "Repo Only", "https://github.com/o/app");
@@ -2131,16 +2135,161 @@ public sealed class AppEnricherTests : IDisposable
     [Fact]
     public async Task RefreshScreenshotsIsUpToDateWhenUnchanged()
     {
-        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        // The forced refresh re-resolves repo URLs too; identical findings
+        // leave the stored list alone.
+        string[] stored = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
+        var repo = new FakeRepoScreenshots(() => stored);
         var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
         var app = NewApp("stable", "Stable", "https://github.com/o/app");
+        app.Screenshots = [.. stored];
+
+        var result = await enricher.RefreshScreenshotsAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(stored, app.Screenshots);
+        Assert.Equal(1, repo.Calls);
+        Assert.Equal(T0, app.ScreenshotsCheckedAt);
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsReplacesRepoUrls()
+    {
+        // Repo URLs are pinned to a commit; a new HEAD must replace them, the
+        // old list is not merged in or kept.
+        string[] fresh = ["https://raw.githubusercontent.com/o/app/def/docs/screenshots/2.png"];
+        var repo = new FakeRepoScreenshots(() => fresh);
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("moved", "Moved", "https://github.com/o/app");
+        app.Screenshots = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
+
+        var result = await enricher.RefreshScreenshotsAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(fresh, app.Screenshots);
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsClearsRepoUrlsWhenRepoIsEmpty()
+    {
+        // The repo answered and no longer offers screenshots: the dead URLs go.
+        var repo = new FakeRepoScreenshots(() => []);
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("cleaned", "Cleaned", "https://github.com/o/app");
+        app.Screenshots = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
+
+        var result = await enricher.RefreshScreenshotsAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Empty(app.Screenshots);
+        Assert.Equal(1, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsKeepsRepoUrlsWhenRepoUnreachable()
+    {
+        // Clone failure means the URLs are merely unverified, not dead.
+        var repo = new FakeRepoScreenshots(() => []) { Reached = false };
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("unreachable", "Unreachable", "https://github.com/o/app");
         app.Screenshots = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
 
         var result = await enricher.RefreshScreenshotsAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
         Assert.Single(app.Screenshots);
+        Assert.Equal(1, repo.Calls);
+        Assert.Equal(T0, app.ScreenshotsCheckedAt);
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsDropsRepoUrlsWhenIndexSuppliesShots()
+    {
+        // Index shots win wholesale: repo leftovers are dropped without a clone.
+        const string indexV2 = """
+            {
+              "packages": {
+                "com.example.app": {
+                  "metadata": {
+                    "screenshots": {
+                      "phone": {
+                        "en-US": [
+                          { "name": "/com.example.app/en-US/phoneScreenshots/00.png" }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        var (enricher, _, _) = FdroidHappyPath(indexV2Json: indexV2, repoScreenshots: repo);
+        var app = NewApp("index-wins", "Index Wins", "https://f-droid.org/packages/com.example.app/");
+        app.PackageName = "com.example.app";
+        app.Screenshots = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
+
+        var result = await enricher.RefreshScreenshotsAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(
+            ["https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png"],
+            app.Screenshots);
         Assert.Equal(0, repo.Calls);
+    }
+
+    [Fact]
+    public async Task RefreshScreenshotsReplacesMixedSourcesWithIndexUrls()
+    {
+        // A mixed list (index + repo URLs) is rebuilt from the index alone.
+        const string indexV2 = """
+            {
+              "packages": {
+                "com.example.app": {
+                  "metadata": {
+                    "screenshots": {
+                      "phone": {
+                        "en-US": [
+                          { "name": "/com.example.app/en-US/phoneScreenshots/00.png" }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        var repo = new FakeRepoScreenshots(() => throw new InvalidOperationException("must not clone"));
+        var (enricher, _, _) = FdroidHappyPath(indexV2Json: indexV2, repoScreenshots: repo);
+        var app = NewApp("mixed", "Mixed", "https://f-droid.org/packages/com.example.app/");
+        app.Screenshots =
+        [
+            "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/99.png",
+            "https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png",
+        ];
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(
+            ["https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png"],
+            app.Screenshots);
+        Assert.Equal(0, repo.Calls);
+    }
+
+    [Fact]
+    public async Task NormalPassRechecksRepoUrlsAfterWindow()
+    {
+        // Outside the recheck window a normal pass re-verifies repo-sourced
+        // URLs even though the field is not empty.
+        string[] fresh = ["https://raw.githubusercontent.com/o/app/def/docs/screenshots/2.png"];
+        var repo = new FakeRepoScreenshots(() => fresh);
+        var (enricher, _, _, _, _) = HappyPath(repoScreenshots: repo);
+        var app = NewApp("weekly", "Weekly", "https://github.com/o/app");
+        app.Screenshots = ["https://raw.githubusercontent.com/o/app/abc/docs/screenshots/1.png"];
+        app.ScreenshotsCheckedAt = T0 - TimeSpan.FromDays(8);
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(fresh, app.Screenshots);
+        Assert.Equal(1, repo.Calls);
+        Assert.Equal(T0, app.ScreenshotsCheckedAt);
     }
 
     [Fact]

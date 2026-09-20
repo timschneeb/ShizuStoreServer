@@ -98,14 +98,21 @@ public sealed record RepoRef(RepoForge Forge, string Owner, string ProjectPath)
         : $"https://gitlab.com/{ProjectPath}";
 }
 
+/// <summary>
+/// Outcome of one repo screenshot lookup. <c>Reached</c> is true only when the
+/// repo tree was actually listed, so an empty <c>Urls</c> then means "the repo
+/// has no screenshots" (the caller may clear stored ones) while
+/// <c>Reached == false</c> means "unknown, keep what is stored".
+/// </summary>
+public sealed record RepoScreenshotResult(bool Reached, IReadOnlyList<string> Urls);
+
 public interface IRepoScreenshotResolver
 {
     /// <summary>
-    /// Best-effort screenshot raw URLs for the app's repo; empty when the app
-    /// has no parseable GitHub/GitLab repo, the clone fails, or the tree has
-    /// no screenshot images. Never throws except on shutdown cancellation.
+    /// Best-effort screenshot raw URLs for the app's repo. Never throws except
+    /// on shutdown cancellation; failures return <c>Reached == false</c>.
     /// </summary>
-    Task<IReadOnlyList<string>> ResolveAsync(string? url, string? sourceUrl, CancellationToken ct = default);
+    Task<RepoScreenshotResult> ResolveAsync(string? url, string? sourceUrl, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -128,12 +135,12 @@ public sealed class RepoScreenshotResolver(
 
     private readonly SemaphoreSlim _gate = new(Math.Max(1, options.RepoScreenshotsMaxParallelism));
 
-    public async Task<IReadOnlyList<string>> ResolveAsync(
+    public async Task<RepoScreenshotResult> ResolveAsync(
         string? url, string? sourceUrl, CancellationToken ct = default)
     {
         if (!options.RepoScreenshotsEnabled || !TryParseRepo(url, sourceUrl, out var repo))
         {
-            return [];
+            return new RepoScreenshotResult(false, []);
         }
 
         await _gate.WaitAsync(ct);
@@ -147,14 +154,14 @@ public sealed class RepoScreenshotResolver(
             if (clone.ExitCode != 0)
             {
                 log?.LogDebug("Repo screenshot clone failed for {Repo}: {Error}", repo.CloneUrl, clone.Stderr.Trim());
-                return [];
+                return new RepoScreenshotResult(false, []);
             }
 
             var head = await git.RunAsync(["-C", dir, "rev-parse", "HEAD"], options.RepoScreenshotsTimeout, ct);
             var sha = head.ExitCode == 0 ? head.Stdout.Trim() : string.Empty;
             if (sha.Length == 0)
             {
-                return [];
+                return new RepoScreenshotResult(false, []);
             }
 
             var tree = await git.RunAsync(
@@ -162,10 +169,10 @@ public sealed class RepoScreenshotResolver(
                 options.RepoScreenshotsTimeout, ct);
             if (tree.ExitCode != 0)
             {
-                return [];
+                return new RepoScreenshotResult(false, []);
             }
 
-            return SelectScreenshots(SplitNul(tree.Stdout), repo, sha, MaxScreenshots);
+            return new RepoScreenshotResult(true, SelectScreenshots(SplitNul(tree.Stdout), repo, sha, MaxScreenshots));
         }
         catch (OperationCanceledException)
         {
@@ -174,7 +181,7 @@ public sealed class RepoScreenshotResolver(
         catch (Exception ex)
         {
             log?.LogDebug(ex, "Repo screenshot resolution failed for {Repo}.", repo.CloneUrl);
-            return [];
+            return new RepoScreenshotResult(false, []);
         }
         finally
         {

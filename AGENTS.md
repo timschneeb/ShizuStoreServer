@@ -15,7 +15,7 @@ dotnet test tests/ShizuAppStoreServer.Web.Tests/ShizuAppStoreServer.Web.Tests.cs
 
 ## Rules
 
-- Done means: build with 0 warnings 0 errors, full suite green (469 Core + 67 Web).
+- Done means: build with 0 warnings 0 errors, full suite green (476 Core + 67 Web).
 - Tests are hermetic (stubbed HTTP, fake runners, SQLite). No network, no binaries
   in the default run; external tools get verbatim-output tests plus `SHIZU_REAL_*`
   env-gated live tests.

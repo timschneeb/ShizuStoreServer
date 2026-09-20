@@ -267,10 +267,13 @@ passes touch too few apps to pay for the second download.
 Screenshots normally come from the F-Droid/Izzy `index-v2.json`. When
 both carry none, the app's GitHub/GitLab repo is cloned commits-and-trees
 only (`--filter=blob:none --no-checkout`, deleted right after) and
-screenshot paths become raw URLs pinned to the fetched commit. Knobs:
+screenshot paths become raw URLs pinned to the fetched commit. A rescan
+replaces the stored list instead of appending: an index that answers
+clears stale shots, and a repo lookup replaces or clears stored repo
+URLs (a failed clone keeps them). Knobs:
 `RepoScreenshotsEnabled` (default true), `GitPath` (default `git`),
 `RepoScreenshotsTimeout` (2min), `RepoScreenshotsRecheckInterval` (7 days;
-a repo that yielded none is not re-cloned within it),
+repo URLs are re-verified at most that often),
 `RepoScreenshotsMaxParallelism` (2). Clones land in `TMPDIR`
 (`/opt/shizuappstore/tmp`), which the unit keeps writable.
 
@@ -427,8 +430,8 @@ cancels a running refresh.
 
 Screenshots have the same no-downtime trigger. Use it after a deploy that
 changes screenshot resolution, or whenever rows need shots without
-waiting for the 24h cadence (it forces the per-app repo recheck window
-and re-resolves F-Droid/Izzy for every served app):
+waiting for the 24h cadence (it re-resolves F-Droid/Izzy for every served
+app and re-runs the repo lookup even inside the per-app recheck window):
 
 ```bash
 TOKEN=$(sudo sed -n 's/^SHIZU_ADMIN_SECRET=//p' /etc/shizuappstore/env)

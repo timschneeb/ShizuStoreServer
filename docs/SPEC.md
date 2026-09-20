@@ -113,11 +113,13 @@ bundle` is rebuilt per deploy, never committed.
     checked pass with none; sent only on the detail endpoint), `changelog_url`
     (browser page of the release the notes came from; null for index-sourced
     notes; sent only on the detail endpoint), `screenshots`
-    (screenshot URLs from the F-Droid/Izzy `index-v2.json`, matched by every
+    (screenshot URLs: the F-Droid/Izzy `index-v2.json` result for every
     package name the app publishes, else raw URLs lifted from the app's own
-    GitHub/GitLab tree when the indexes carry none, capped at 12, sent only
-    on the detail endpoint), `screenshots_checked_at` (last repo-fallback
-    attempt, throttles re-cloning a repo that yielded nothing), `enrich_etag` (conditional-request ETag
+    GitHub/GitLab tree when the indexes carry none; every rescan rebuilds
+    the list from what the sources return, capped at 12, sent only
+    on the detail endpoint), `screenshots_checked_at` (last repo lookup,
+    throttles re-verification to
+    `Enrichment:RepoScreenshotsRecheckInterval`), `enrich_etag` (conditional-request ETag
     reuse), `stars` (GitHub stargazers or GitLab star count), `download_total` (popularity, §8), `install_count`
     (successful installs reported by clients via
     `POST /v1/apps/{slug}/installs`; monotonic, never bumps `updated_at`), `version_updated_at`
@@ -375,14 +377,17 @@ therefore treats Izzy as forge-like.
   merely named `screenshot` with no image does not count. Raw URLs are
   pinned to the fetched commit (GitHub
   `raw.githubusercontent.com/{owner}/{repo}/{sha}/{path}`, GitLab
-  `gitlab.com/{project}/-/raw/{sha}/{path}`), capped at 12, and only fill
-  an empty field: F-Droid/Izzy results always win and existing shots are
-  never replaced; repo-sourced URLs also survive an index that answers
-  with none (the index may only clear its own URLs). A lookup stamps
-  `screenshots_checked_at`, and a repo that yielded none is not re-cloned
-  for `Enrichment:RepoScreenshotsRecheckInterval` (7 days);
+  `gitlab.com/{project}/-/raw/{sha}/{path}`), capped at 12.
+  Resolution rebuilds the list instead of only filling holes: an index
+  that answers replaces the index-sourced URLs wholesale (an empty answer
+  clears them) and repo leftovers are dropped, so one source can never pin
+  URLs the other source does not serve. Repo-sourced URLs stay until the
+  recheck window elapses, then the repo tree decides their fate: a listed
+  tree replaces or clears them, a failed clone keeps them. A lookup stamps
+  `screenshots_checked_at`, so repo URLs are re-verified every
+  `Enrichment:RepoScreenshotsRecheckInterval` (7 days);
   `POST /v1/admin/refresh-screenshots` forces a lookup for every served
-  app past that window. Same apk URL + version code →
+  app regardless of the window. Same apk URL + version code →
   `UpToDate` with zero downloads (tightened to also require the
   recorded SHA-256 to match the index `sha256` when the index
   declares one, and a complete row: `package_name` and `icon_hash`
@@ -918,7 +923,7 @@ rather than persisting them.
 | `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Does not write a `sync_runs` row. |
 | `GET /v1/admin/refresh-icons` | Same token rules. Current refresh status: `state` (`idle\|running\|completed\|failed`), `force`, `startedAt`/`finishedAt`, `checked`/`refreshed`/`alreadyCurrent`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-icons` | Same token rules. Cancels the running refresh → 202, or 409 when nothing is running. |
-| `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy and forces the repo fallback past its per-app recheck window for every served app. Takes the shared sync gate exactly like `refresh-icons`. Does not write a `sync_runs` row. |
+| `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy for every served app and forces the repo lookup when the indexes carry nothing, even inside the per-app recheck window; stored repo URLs are dropped when an index supplies shots. Takes the shared sync gate exactly like `refresh-icons`. Does not write a `sync_runs` row. |
 | `GET /v1/admin/refresh-screenshots` | Same token rules. Current status: `state` (`idle\|running\|completed\|failed`), `startedAt`/`finishedAt`, `checked`/`updated`/`current`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-screenshots` | Same token rules. Cancels the running pass → 202, or 409 when nothing is running. |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
