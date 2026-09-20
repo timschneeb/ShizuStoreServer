@@ -245,6 +245,52 @@ public sealed class ChangesTests(ShizuApiFactory factory) : IClassFixture<ShizuA
         Assert.Empty(changes.Updated);
         Assert.Equal(new Dictionary<string, long> { ["counted"] = 5 }, changes.InstallsUpdated);
     }
+
+    [Fact]
+    public async Task PurgeRequestedAtIsNullWithoutConfigFlag()
+    {
+        await factory.ResetAsync(_ => { });
+
+        var response = await factory.NewClient().GetAsync("/v1/changes?since=" + Since);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var changes = (await response.Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+
+        Assert.Null(changes.CatalogPurgeRequestedAt);
+    }
+
+    [Fact]
+    public async Task PurgeRequestedAtSurfacesTheFlagAndIgnoresGarbage()
+    {
+        var purgeAt = new DateTimeOffset(2026, 7, 2, 12, 0, 0, TimeSpan.Zero);
+        await factory.ResetAsync(db =>
+        {
+            db.ConfigFlags.Add(new ConfigFlag
+            {
+                Key = ConfigFlags.CatalogPurgeRequestedAt,
+                Value = purgeAt.ToString("O"),
+                UpdatedAt = purgeAt,
+            });
+        });
+
+        var response = await factory.NewClient().GetAsync("/v1/changes?since=" + Since);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var changes = (await response.Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+        Assert.Equal(purgeAt, changes.CatalogPurgeRequestedAt);
+
+        await factory.ResetAsync(db =>
+        {
+            db.ConfigFlags.Add(new ConfigFlag
+            {
+                Key = ConfigFlags.CatalogPurgeRequestedAt,
+                Value = "not-a-date",
+                UpdatedAt = purgeAt,
+            });
+        });
+
+        var garbage = (await (await factory.NewClient().GetAsync("/v1/changes?since=" + Since))
+            .Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+        Assert.Null(garbage.CatalogPurgeRequestedAt);
+    }
 }
 
 public sealed class MetaTests(ShizuApiFactory factory) : IClassFixture<ShizuApiFactory>

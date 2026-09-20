@@ -30,6 +30,16 @@ public static class ConfigFlags
     /// </summary>
     public const string UseInstallCountsForPopularity = "use_install_counts_for_popularity";
 
+    /// <summary>
+    /// ISO-8601 timestamp of the latest operator request to clear client
+    /// catalog caches. Surfaced as <c>catalogPurgeRequestedAt</c> on
+    /// <c>GET /v1/changes</c>; a client that has not yet applied this
+    /// timestamp wipes its cached app list and downloads, never user data
+    /// (favourites, blocklist), and bootstraps fresh. Missing or unparsable
+    /// reads as null, i.e. no purge requested.
+    /// </summary>
+    public const string CatalogPurgeRequestedAt = "catalog_purge_requested_at";
+
     /// <summary>Reads a boolean flag; missing or unparsable rows yield <paramref name="defaultValue"/>.</summary>
     public static async Task<bool> GetBoolAsync(
         ShizuDbContext db, string key, bool defaultValue = false, CancellationToken ct = default)
@@ -39,5 +49,16 @@ public static class ConfigFlags
             .Select(f => f.Value)
             .FirstOrDefaultAsync(ct);
         return raw is not null && bool.TryParse(raw.Trim(), out var value) ? value : defaultValue;
+    }
+
+    /// <summary>Reads a timestamp flag; missing or unparsable rows yield null.</summary>
+    public static async Task<DateTimeOffset?> GetDateTimeOffsetAsync(
+        ShizuDbContext db, string key, CancellationToken ct = default)
+    {
+        var raw = await db.ConfigFlags.AsNoTracking()
+            .Where(f => f.Key == key)
+            .Select(f => f.Value)
+            .FirstOrDefaultAsync(ct);
+        return raw is not null && DateTimeOffset.TryParse(raw.Trim(), out var value) ? value : null;
     }
 }

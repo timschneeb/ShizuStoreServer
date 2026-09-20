@@ -443,6 +443,23 @@ curl -fsS https://shizustore.timschneeberger.me/v1/admin/refresh-screenshots \
 
 No request body; `DELETE` on the same route cancels a running pass.
 
+To force every client to drop its cached catalog and pull a fresh one
+(after a server-side repair left dead rows in local caches), stamp the
+purge flag. Clients wipe only their app list and downloads; favourites
+and blocklist survive, and each client applies a given timestamp once.
+Leave the row in place so clients that sync later still see it:
+
+```bash
+sudo -u postgres psql -d shizuappstore -c "
+INSERT INTO config_flags (key, value, updated_at)
+VALUES ('catalog_purge_requested_at', now()::text, now())
+ON CONFLICT (key) DO UPDATE SET value = now()::text, updated_at = now();"
+```
+
+The next `/v1/changes` response carries the timestamp as
+`catalogPurgeRequestedAt`; the endpoint's 30s output cache and each
+client's sync cadence bound how fast it spreads.
+
 `appsettings.Production.json` is written before the first
 `deploy.sh` run, because the rsync into `app/` excludes it and the
 migration bundle needs the connection string. Later passes are cheap: a

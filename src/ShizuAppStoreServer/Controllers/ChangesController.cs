@@ -27,6 +27,10 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
     /// listing is opt-in) and filters added, updated, removed and
     /// <c>installsUpdated</c> alike.
     /// <c>excluded</c> rows never appear.
+    /// <c>catalogPurgeRequestedAt</c> is the operator's
+    /// <c>config_flags</c> high-water mark for clearing client catalog
+    /// caches (null = never requested). A client that has not applied it
+    /// yet wipes its cached app list, never user data, and bootstraps.
     /// </summary>
     [HttpGet]
     [OutputCache(PolicyName = "changes")]
@@ -51,6 +55,11 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
                 $"Invalid listing '{listing}'. Use main|closed_source (comma-separated).",
                 statusCode: StatusCodes.Status400BadRequest);
         }
+
+        // Operator high-water mark for remote catalog purges; read live so
+        // flipping the config_flags row needs no restart.
+        var purgeRequestedAt = await ConfigFlags.GetDateTimeOffsetAsync(
+            db, ConfigFlags.CatalogPurgeRequestedAt, ct);
 
         // NOTE: the since-comparisons AND the oldest-first ordering run in
         // memory (see AppsController: SQLite cannot compare or ORDER BY
@@ -88,6 +97,7 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
             added.Select(AppMapper.ToSummary).ToList(),
             updated.Select(AppMapper.ToSummary).ToList(),
             removed.Select(AppMapper.ToRemoved).ToList(),
-            installsUpdated));
+            installsUpdated,
+            purgeRequestedAt));
     }
 }

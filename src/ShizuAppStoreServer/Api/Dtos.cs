@@ -132,7 +132,8 @@ public sealed record ChangesDto(
     IReadOnlyList<AppSummaryDto> Added,
     IReadOnlyList<AppSummaryDto> Updated,
     IReadOnlyList<RemovedAppDto> Removed,
-    IReadOnlyDictionary<string, long> InstallsUpdated);
+    IReadOnlyDictionary<string, long> InstallsUpdated,
+    DateTimeOffset? CatalogPurgeRequestedAt);
 
 public sealed record CountsDto(int Apps, int Categories);
 
