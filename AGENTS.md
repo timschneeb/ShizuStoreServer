@@ -1,7 +1,8 @@
 # AGENTS.md
 
 C# / .NET 10 backend for a Shizuku-app store. Single binary + systemd, Postgres.
-Behavior spec: `docs/SPEC.md`. Ops: `docs/server-setup.md`. State: `HANDOFF.md`.
+Behavior spec: `docs/SPEC.md`. App developer guide: `docs/listing-and-metadata.md`.
+Ops: `docs/server-setup.md`. State: `HANDOFF.md`.
 Governance: `docs/constitution.md`.
 
 ## Commands
@@ -22,4 +23,5 @@ dotnet test tests/ShizuAppStoreServer.Web.Tests/ShizuAppStoreServer.Web.Tests.cs
 - Concise comments (WHY, not WHAT). No em-dashes in code, comments, or docs.
 - Forge-first; variant data never alters the primary outcome; `apps.url` is not identity.
 - Update the affected docs (`docs/SPEC.md`, `HANDOFF.md`, `PLAN.md`) in the same pass.
+- Keep `docs/listing-and-metadata.md` current: any change to how apps are discovered, enriched, scheduled or displayed updates it in the same pass.
 - Never commit unless asked. Never copy AGPL-licensed code or files into the repo.
