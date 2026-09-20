@@ -13,7 +13,7 @@ The client has a setting to show these entries which is off by default.
 ## When a change becomes visible
 
 | Change | Usually visible in the catalog |
-|---|---|---|
+|---|---|
 | New release on GitHub/GitLab/F-Droid/IzzyOnDroid | within 30 minutes (+ analysis time) |
 | New release on Play/Codeberg/other sites | within 24 hours |
 | List entry added/edited | within 30 minutes (+ analysis time) |
