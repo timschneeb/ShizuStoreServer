@@ -110,6 +110,8 @@ public sealed class SyncService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // The error row keeps only the message; the journal keeps the stack.
+            _log?.LogError(ex, "Sync pass failed; writing an error run row.");
             // The upserter may already have saved; discard any half-tracked
             // state so the error row below is the only thing written.
             db.ChangeTracker.Clear();
