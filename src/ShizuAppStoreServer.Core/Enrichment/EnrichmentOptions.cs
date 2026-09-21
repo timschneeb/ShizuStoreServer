@@ -34,6 +34,37 @@ public sealed class EnrichmentOptions
     /// </summary>
     public string? IconRenderCpuAffinity { get; set; }
 
+    /// <summary>
+    /// Run each Gradle render in a transient systemd user scope instead of
+    /// this service's cgroup. The fresh daemon plus test JVM (~1GB) charged
+    /// to the API unit crossed its <c>MemoryHigh</c> without ever hitting
+    /// <c>MemoryMax</c>: the kernel throttled the whole cgroup and the API
+    /// stopped answering until a restart. A scope has its own boundaries,
+    /// so a runaway render throttles or OOM-kills itself. Linux/systemd
+    /// only; needs a lingering service user (<c>loginctl enable-linger</c>),
+    /// <c>XDG_RUNTIME_DIR</c> in the unit, and a unit <c>ProtectHome</c>
+    /// setting that keeps <c>/run/user</c> visible (read-only, not yes).
+    /// </summary>
+    public bool IconRenderScope { get; set; }
+
+    /// <summary>Path to <c>systemd-run</c> for <see cref="IconRenderScope"/>.</summary>
+    public string SystemdRunPath { get; set; } = "systemd-run";
+
+    /// <summary>Scope <c>MemoryHigh</c>: reclaim/throttle boundary for render JVMs.</summary>
+    public string IconRenderScopeMemoryHigh { get; set; } = "1G";
+
+    /// <summary>Scope <c>MemoryMax</c>: only the render is OOM-killed at this boundary.</summary>
+    public string IconRenderScopeMemoryMax { get; set; } = "1400M";
+
+    /// <summary>Scope <c>MemorySwapMax</c>; 0 keeps render memory out of swap.</summary>
+    public string IconRenderScopeSwapMax { get; set; } = "0";
+
+    /// <summary>
+    /// Scope <c>CPUQuota</c>. The render runs outside the API unit now, so
+    /// the unit's own quota no longer limits it.
+    /// </summary>
+    public string IconRenderScopeCpuQuota { get; set; } = "150%";
+
     /// <summary>Directory for <c>{sha256}.png</c> icons (deployed to <c>/opt/shizuappstore/icons/</c>).</summary>
     public string IconStorePath { get; set; } = "icons";
 
@@ -74,10 +105,22 @@ public sealed class EnrichmentOptions
     /// Full rechecks stop rendering XML icons one Gradle invocation at a
     /// time: enrichment resolves raster icons only, then the pass ends with
     /// the same batched render pipeline as <c>--refresh-icons</c> (seconds
-    /// per icon, one test JVM). Worth it on full passes (hundreds of apps);
-    /// fast passes touch too few apps to pay for the second APK download.
+    /// per icon). Worth it on full passes (hundreds of apps); fast passes
+    /// touch too few apps to pay for the second APK download.
     /// </summary>
     public bool BatchIconsOnFullPass { get; set; }
+
+    /// <summary>
+    /// Most icons one Gradle batch invocation may render. Refresh work is
+    /// split into chunks of this size and every chunk runs with
+    /// <c>--no-daemon</c>, so no render JVM survives into the next chunk and
+    /// memory cannot accumulate across a backfill. A whole-refresh
+    /// invocation charged about 1GB of JVMs to the API unit and stalled it
+    /// in cgroup reclaim; the bound also caps what one chunk timeout can
+    /// lose. Each chunk pays a cold Gradle start, so very small values slow
+    /// a full pass down.
+    /// </summary>
+    public int IconBatchChunkSize { get; set; } = 50;
 
     /// <summary>
     /// Set by the sync engine around a full-pass enrichment when

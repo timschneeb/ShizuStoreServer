@@ -21,11 +21,18 @@ Environment=ANDROID_HOME=/opt/android-sdk
 # 4GB box a single 400MB APK there is charged to this cgroup, pushes it over
 # MemoryHigh and stalls the API in reclaim. Keep the temp dir on disk.
 Environment=TMPDIR=/opt/shizuappstore/tmp
+# Icon renders move into a transient systemd user scope so their JVMs are not
+# charged to this unit's cgroup; systemd-run --user reaches the service user's
+# manager through this runtime dir (needs linger, see the setup doc). The
+# numeric UID is the service user's: %U expands to the system manager's UID.
+Environment=XDG_RUNTIME_DIR=/run/user/958
 Restart=on-failure
 RestartSec=10
 # The worker enriches APKs in parallel; hard-cap CPU/memory/IO so a full
-# backfill cannot starve the rest of the box. The JVMs are additionally capped
-# in gradle-home/gradle.properties and tools/icon-render/app/build.gradle.
+# backfill cannot starve the rest of the box. Icon render JVMs live outside
+# this cgroup in a bounded user scope (Enrichment:IconRenderScope) and are
+# additionally heap-capped in gradle-home/gradle.properties and
+# tools/icon-render/app/build.gradle.
 MemoryHigh=1500M
 MemoryMax=1800M
 MemorySwapMax=256M
@@ -43,7 +50,10 @@ LogsDirectory=shizu
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# ProtectHome=yes masks /run/user, hiding the service user's systemd manager
+# bus: the render scope (systemd-run --user) could not connect and every icon
+# would silently fall back to a letter avatar.
+ProtectHome=read-only
 ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list /opt/shizuappstore/tmp
 
 [Install]

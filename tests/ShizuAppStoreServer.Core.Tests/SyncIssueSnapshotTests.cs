@@ -310,5 +310,8 @@ public sealed class SyncIssueSnapshotTests : IDisposable
         public Task<byte[]?[]> RenderBatchAsync(
             string stagedResDir, IReadOnlyList<BatchRenderRequest> batch, int sizePx, CancellationToken ct = default) =>
             throw new InvalidOperationException("renderer must stay untouched");
+
+        public Task StopGradleDaemonsAsync() =>
+            throw new InvalidOperationException("renderer must stay untouched");
     }
 }

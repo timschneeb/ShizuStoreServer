@@ -211,6 +211,8 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
     /// <c>SaveChanges</c>, so <c>UpdatedAt</c> never bumps and the
     /// added/updated feed does not churn; the move is visible only through
     /// <c>installsUpdated</c> in <c>/v1/changes</c>).
+    /// A second write upserts the per-UTC-day row in <c>app_install_days</c>,
+    /// both in one transaction.
     /// <c>excluded</c> rows read as 404.
     /// </summary>
     [HttpPost("{slug}/installs")]
@@ -221,6 +223,8 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
         // ExecuteUpdate is expression-based, so the timestamp is captured
         // into a local first; both columns land in one atomic UPDATE.
         var now = DateTimeOffset.UtcNow;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+
         var updated = await db.Apps
             .Where(a => a.Slug == slug && a.Availability != Availability.Excluded)
             .ExecuteUpdateAsync(s => s
@@ -232,12 +236,24 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
             return NotFound();
         }
 
-        var count = await db.Apps.AsNoTracking()
+        var app = await db.Apps.AsNoTracking()
             .Where(a => a.Slug == slug)
-            .Select(a => a.InstallCount)
+            .Select(a => new { a.Id, a.InstallCount })
             .FirstAsync(ct);
 
-        return Ok(new InstallRecordedDto(slug, count));
+        // Server UTC clock decides the bucket; clients cannot backfill days.
+        // ON CONFLICT covers Postgres and the SQLite test provider.
+        var day = DateOnly.FromDateTime(now.UtcDateTime);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO app_install_days (app_id, day, install_count)
+            VALUES ({app.Id}, {day}, 1)
+            ON CONFLICT (app_id, day)
+            DO UPDATE SET install_count = app_install_days.install_count + 1
+            """, ct);
+
+        await tx.CommitAsync(ct);
+
+        return Ok(new InstallRecordedDto(slug, app.InstallCount));
     }
 
     /// <summary>

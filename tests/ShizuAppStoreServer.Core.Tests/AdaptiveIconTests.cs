@@ -354,6 +354,8 @@ public sealed class AdaptiveIconTests
             SeenBatches.Add(batch);
             return Task.FromResult(batch.Select(_ => (byte[]?)png).ToArray());
         }
+
+        public Task StopGradleDaemonsAsync() => Task.CompletedTask;
     }
 
     [Fact]

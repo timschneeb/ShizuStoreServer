@@ -542,10 +542,14 @@ public sealed class SyncService(
     /// <c>--refresh-icons</c> run). Renderer upgrades never reach unchanged
     /// releases through normal passes (304 keeps the old icon file), so this
     /// re-downloads + re-resolves each icon. Two phases: per-app
-    /// download + analyze + stage (parallel, no Gradle), then ONE Gradle
-    /// invocation renders every staged XML icon (a task graph + test JVM
-    /// per icon costs minutes; shared, seconds per icon), then per-app
-    /// commit. Writes no <c>sync_runs</c> row: a row would poison HEAD
+    /// download + analyze + stage (parallel, no Gradle), then batched Gradle
+    /// invocations render the staged XML icons in chunks of
+    /// <see cref="EnrichmentOptions.IconBatchChunkSize"/> (a task graph +
+    /// test JVM per icon costs minutes; shared, seconds per icon). Every
+    /// chunk runs isolated so its JVMs exit before the next one, and a
+    /// failed chunk only fails its own apps; the refresh continues. The warm
+    /// daemon is stopped once, after the last chunk. Writes no
+    /// <c>sync_runs</c> row: a row would poison HEAD
     /// tracking (null head forces a full re-parse next loop).
     /// Force re-renders and rewrites every icon (equal bytes count as
     /// refreshed): the only way to catch self-consistent wrong files
@@ -615,43 +619,54 @@ public sealed class SyncService(
                 }
             }
 
-            // Phase B: one Gradle invocation for everything staged. A total
-            // tool failure keeps every pending icon (per-icon fallbacks
-            // cannot run without renders).
+            // Phase B: chunked Gradle invocations over everything staged.
+            // Each chunk isolates its JVMs (the renderer passes
+            // --no-daemon) so memory cannot accumulate across a backfill,
+            // and a failed chunk only fails its own apps: one bad chunk
+            // must not strand the rest of the refresh.
             var pngs = new Dictionary<long, byte[]?>();
-            if (pending.Count > 0)
+            var chunkSize = Math.Max(1, enrichment.IconBatchChunkSize);
+            for (var offset = 0; offset < pending.Count; offset += chunkSize)
             {
+                var chunk = pending.GetRange(offset, Math.Min(chunkSize, pending.Count - offset));
                 byte[]?[] rendered;
                 try
                 {
                     rendered = await renderer.RenderBatchAsync(
                         Path.Combine(batchWorkDir, "res"),
-                        pending.Select(p => p.Request).ToList(),
+                        chunk.Select(p => p.Request).ToList(),
                         LauncherIconService.RenderSize, ct);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    foreach (var (id, _) in pending)
+                    _log?.LogWarning(
+                        ex, "Icon batch chunk {Offset}-{End} of {Total} failed; continuing.",
+                        offset, offset + chunk.Count, pending.Count);
+                    foreach (var (id, _) in chunk)
                     {
                         failed++;
                         errors.Add($"[{id}] Icon refresh: batch render failed: {ex.Message}");
                     }
 
-                    return new IconRefreshResult(ids.Count, refreshed, current, failed) { Errors = errors };
+                    continue;
                 }
 
-                for (var i = 0; i < pending.Count; i++)
+                for (var i = 0; i < chunk.Count; i++)
                 {
-                    pngs[pending[i].Id] = rendered[i];
+                    pngs[chunk[i].Id] = rendered[i];
                 }
             }
 
             // Phase C: adopt the renders (parallel row updates, no Gradle).
+            // Only ids with a render attempt are committed: failed chunks
+            // are already tallied, and a blank entry means "no output" for
+            // that icon (commit keeps the current icon).
             // The adaptive flag travels per app: only <adaptive-icon>
             // roots count, plain vectors stay false.
-            var adaptive = pending.ToDictionary(p => p.Id, p => p.Request.IsAdaptive);
+            var attempted = pending.Where(p => pngs.ContainsKey(p.Id)).ToList();
+            var adaptive = attempted.ToDictionary(p => p.Id, p => p.Request.IsAdaptive);
             var commits = await BulkEnricher.EnrichManyAsync(
-                pending.Select(p => p.Id).ToList(),
+                attempted.Select(p => p.Id).ToList(),
                 (id, c) => enrich.CommitIconRefreshAsync(id, pngs[id], c, force, adaptive[id]),
                 enrichment.MaxParallelism, ct);
             foreach (var (id, r) in commits)
@@ -662,6 +677,10 @@ public sealed class SyncService(
         finally
         {
             try { Directory.Delete(batchWorkDir, recursive: true); } catch { /* best effort */ }
+            // One stop, after the last chunk: fresh chunks already exited
+            // their own JVMs, this frees the daemon left warm by single
+            // renders. Runs after a cancelled refresh too.
+            await renderer.StopGradleDaemonsAsync();
         }
 
         return new IconRefreshResult(ids.Count, refreshed, current, failed) { Errors = errors };

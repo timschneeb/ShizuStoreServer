@@ -68,6 +68,9 @@ the request). `UserAgentTrackingWorker` flushes the buffer into
 `client_user_agents` + `client_user_agent_days` every
 `UserAgentTracking:FlushInterval` and on shutdown; flush failures are
 logged and never kill the host. DB-only: no endpoint exposes these tables.
+The separate `ShizuAppStoreStats` app reads both tables read-only for its HTML
+dashboard, and the same app also reads `app_install_days` and
+`apps.install_count`; the API surface is unchanged.
 
 Startup gate: after `builder.Build()`, the host probes
 `aapt2 version`, `apksigner --version` (30s/60s timeouts),
@@ -239,6 +242,12 @@ bundle` is rebuilt per deploy, never committed.
   unique `(user_agent, day)`, `request_count`. The day comes from the
   server's UTC clock, so day boundaries follow UTC regardless of client
   timezone.
+- **app_install_days** - per-app per-UTC-day install counts: PK
+  `(app_id, day)` (FK to `apps`, cascade delete), `install_count`.
+  Upserted by `POST /v1/apps/{slug}/installs` in the same transaction
+  as the total counter; rejected (unknown or `excluded`) reports write
+  nothing. The day comes from the server's UTC clock. Read with SQL; no
+  endpoint.
 
 ## 4. List ingestion
 
@@ -469,10 +478,20 @@ render writes the exact-size bitmap directly (no screen-sized snapshot),
 a failed or timed-out build still contributes a complete PNG when one
 was written, artifacts of the same package share one render per app pass,
 and a full pass with `Enrichment:BatchIconsOnFullPass` defers the XML
-levels to one batched call after enrichment (while deferred, the inline
+levels to the batched icon phase after enrichment (while deferred, the inline
 analysis resolves rasters but never writes an icon, so a fallback raster
 cannot downgrade an existing adaptive icon; the batch phase owns icon
-commits).
+commits). With `Enrichment:IconRenderScope` the Gradle call runs in a
+transient systemd user scope (`systemd-run --user --scope`) with its own
+memory/CPU boundaries, so render JVMs are never charged to the API unit's
+cgroup (an over-budget render is throttled or killed inside the scope
+instead of stalling the API in cgroup reclaim). Batched rendering is chunked
+at `Enrichment:IconBatchChunkSize` icons per Gradle invocation; each chunk
+runs with `--no-daemon`, so no render JVM survives into the next chunk and
+memory cannot accumulate across a backfill. A failed chunk fails only its
+own apps and the refresh continues with the next chunk; the warm daemon left
+by single renders is stopped once, after the last chunk (`gradle --stop`,
+also after a cancelled refresh).
 `DrawableStager` turns binary AXML into text XML under a flat
 generated namespace (`shizu_N.xml`, referenced rasters copied
  alongside, literals inlined, framework non-color refs and theme
@@ -507,11 +526,14 @@ bleed per side and leaves the masked art filling the frame; plain
 vectors and rasters draw full-bleed. The service then normalizes
 (a defensive top-left crop only guards against a misbehaving
 renderer). The zoom changes adaptive renders byte-for-byte, so
-existing adaptive rows adopt new hashes on the next refresh. Renders are serialized through one
-Gradle invocation per pass (`renderIconBatch` over a manifest of
-`name|root|out` lines with per-app filename prefixes; a single
+existing adaptive rows adopt new hashes on the next refresh. Renders are serialized through
+chunked Gradle invocations (`renderIconBatch` over a manifest of
+`name|root|out` lines with per-app filename prefixes, at most
+`Enrichment:IconBatchChunkSize` icons per chunk; a single
 `renderIcon` remains for one-offs), because each invocation pays a
-full task graph + test-JVM + LayoutLib boot. When
+full task graph + test-JVM + LayoutLib boot; chunks run with
+`--no-daemon` so their JVMs exit between chunks and one failed chunk
+cannot strand the rest. When
 `Enrichment:IconRenderCpuAffinity` is set, the renderer launches
 Gradle through `taskset -c <list>`, so the warm daemon and its
 forked test JVMs stay within the allowed cores. F-Droid primaries fall back to
@@ -875,8 +897,9 @@ stalls can be attributed: `download start <url>` /
 hashed <bytes>B in <ms>ms` or `analyze <apk> badging Xms,
 signers Yms, icon Zms, total Tms`, `github|gitlab|gitcode release
 list <target> ok|304|failed in <ms>ms`, `render <drawable>
-start|done|salvaged|failed in <ms>ms`, and `batch render N icons
-start|done x/N in <ms>ms`. A pass that finds nothing due
+start|done|salvaged|failed in <ms>ms`, `batch render N icons
+start|done x/N in <ms>ms` (once per chunk), and `gradle --stop done
+after refresh (exit N)` when the post-refresh daemon stop ran. A pass that finds nothing due
 writes a single `nothing due` line so the cadence stays visible,
 and a crashed pass writes a `pass failed: <msg>` line. File IO
 failures are warned once and never fail the pass. The log rotates
@@ -962,7 +985,7 @@ rather than persisting them.
 | `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy for every served app and forces the repo lookup when the indexes carry nothing, even inside the per-app recheck window; stored repo URLs are dropped when an index supplies shots. Takes the shared sync gate exactly like `refresh-icons`. Does not write a `sync_runs` row. |
 | `GET /v1/admin/refresh-screenshots` | Same token rules. Current status: `state` (`idle\|running\|completed\|failed`), `startedAt`/`finishedAt`, `checked`/`updated`/`current`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-screenshots` | Same token rules. Cancels the running pass → 202, or 409 when nothing is running. |
-| `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
+| `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. In the same transaction it upserts the `app_install_days` row for the server's current UTC day (`app_id` + `day`, count +1). The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).
 Caching: server-side output cache per the table above. Dynamic GET
@@ -990,8 +1013,15 @@ all environments; Scalar UI is development-only.
 | `Enrichment:IzzyRepoBase` | `null` (upstream apt.izzysoft.de) | IzzyOnDroid base override; the official host refuses datacenter IPs, production uses `https://izzy.katastima.org/fdroid/repo/` |
 | `Enrichment:IzzyRepoBaseFallback` | `null` | Second Izzy mirror tried once when the primary base fails; production uses `https://izzy.zw.is/fdroid/repo/` |
 | `Enrichment:PaparazziTimeout` | `15min` | Per-icon render timeout |
-| `Enrichment:BatchIconsOnFullPass` | `false` | Full rechecks resolve rasters only and batch-render XML icons in one call after enrichment; fast passes render per icon |
+| `Enrichment:BatchIconsOnFullPass` | `false` | Full rechecks resolve rasters only and batch-render XML icons after enrichment; fast passes render per icon |
+| `Enrichment:IconBatchChunkSize` | `50` | Most icons one batch Gradle invocation renders; chunks run with `--no-daemon` and a failed chunk only fails its own apps |
 | `Enrichment:IconRenderCpuAffinity` | `null` | `taskset -c` CPU list for the render JVM (for example `0` pins renders to one core); null uses every core |
+| `Enrichment:IconRenderScope` | `false` | Run each Gradle render in a transient `systemd-run --user --scope` (under `nice -n 5`) with its own memory/CPU bounds, so render JVMs are not charged to the API unit's cgroup; needs linger plus `XDG_RUNTIME_DIR` and `ProtectHome=read-only` |
+| `Enrichment:SystemdRunPath` | `systemd-run` | `systemd-run` binary for the render scope, verified at startup when the scope is on |
+| `Enrichment:IconRenderScopeMemoryHigh` | `1G` | Render scope `MemoryHigh` |
+| `Enrichment:IconRenderScopeMemoryMax` | `1400M` | Render scope `MemoryMax`; only the render is OOM-killed at this boundary |
+| `Enrichment:IconRenderScopeSwapMax` | `0` | Render scope `MemorySwapMax`; keeps render memory out of swap |
+| `Enrichment:IconRenderScopeCpuQuota` | `150%` | Render scope `CPUQuota`; the API unit's own quota no longer covers the render |
 | `Enrichment:IconStorePath` | `icons` | `{sha256}.png` icon store |
 | `Enrichment:MaxParallelism` | `4` | Concurrent enrichments |
 | `Enrichment:SuccessRecheckInterval` | `24h` | Healthy-app re-check window |

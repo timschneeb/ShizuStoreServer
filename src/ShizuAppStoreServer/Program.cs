@@ -132,10 +132,20 @@ builder.Services.AddHttpClient("apk-download", client =>
 });
 builder.Services.AddSingleton<IAapt2Runner>(_ => new Aapt2Runner(enrichment.Aapt2Path));
 builder.Services.AddSingleton<IApkSignerRunner>(_ => new ApkSignerRunner(enrichment.ApksignerPath));
+// Renders run in a transient systemd user scope when enabled: the render
+// JVMs (~1GB) charged to this unit crossed its MemoryHigh and stalled every
+// API request in cgroup reclaim. A scope is bounded on its own, so a runaway
+// render throttles or OOM-kills itself instead of taking the API down.
+var renderScope = enrichment.IconRenderScope
+    ? new RenderScope(
+        enrichment.SystemdRunPath, enrichment.IconRenderScopeMemoryHigh,
+        enrichment.IconRenderScopeMemoryMax, enrichment.IconRenderScopeSwapMax,
+        enrichment.IconRenderScopeCpuQuota)
+    : null;
 builder.Services.AddSingleton<IPaparazziRenderer>(sp => new PaparazziRenderer(
     enrichment.GradlePath, enrichment.IconToolDir, enrichment.PaparazziTimeout,
     enrichment.IconRenderCpuAffinity, sp.GetRequiredService<ILogger<PaparazziRenderer>>(),
-    sp.GetRequiredService<IRunLog>()));
+    sp.GetRequiredService<IRunLog>(), renderScope));
 builder.Services.AddSingleton<ILauncherIconService, LauncherIconService>();
 builder.Services.AddSingleton<IGitRunner>(_ => new GitProcessRunner(enrichment.GitPath));
 builder.Services.AddSingleton<IRepoScreenshotResolver>(sp => new RepoScreenshotResolver(
@@ -204,11 +214,31 @@ if (string.IsNullOrEmpty(enrichment.GitHubToken))
 
 if (!app.Environment.IsEnvironment("Testing"))
 {
-    var probes = await Task.WhenAll(
+    var probeTasks = new List<Task<ToolProbeResult>>
+    {
         ExternalToolProbe.CheckAsync("aapt2", enrichment.Aapt2Path, ["version"], TimeSpan.FromSeconds(30)),
         ExternalToolProbe.CheckAsync("apksigner", enrichment.ApksignerPath, ["--version"], TimeSpan.FromSeconds(60)),
         ExternalToolProbe.CheckAsync("gradle", enrichment.GradlePath, ["--version"], TimeSpan.FromMinutes(2)),
-        ExternalToolProbe.CheckAsync("git", enrichment.GitPath, ["--version"], TimeSpan.FromSeconds(30)));
+        ExternalToolProbe.CheckAsync("git", enrichment.GitPath, ["--version"], TimeSpan.FromSeconds(30)),
+    };
+    if (enrichment.IconRenderScope)
+    {
+        // Renders silently fall back to letter avatars when the scope cannot
+        // start, so probe one real scope: this fails on a missing linger or
+        // a unit that masks /run/user (ProtectHome=yes).
+        probeTasks.Add(ExternalToolProbe.CheckAsync(
+            "systemd-run (render scope)", enrichment.SystemdRunPath,
+            ["--user", "--scope", "--quiet", "--collect",
+             $"--unit=shizu-scope-probe-{Guid.NewGuid():N}",
+             "-p", $"MemoryHigh={enrichment.IconRenderScopeMemoryHigh}",
+             "-p", $"MemoryMax={enrichment.IconRenderScopeMemoryMax}",
+             "-p", $"MemorySwapMax={enrichment.IconRenderScopeSwapMax}",
+             "-p", $"CPUQuota={enrichment.IconRenderScopeCpuQuota}",
+             "--", "/bin/true"],
+            TimeSpan.FromSeconds(30)));
+    }
+
+    var probes = await Task.WhenAll(probeTasks);
     foreach (var probe in probes)
     {
         if (probe.Available)
@@ -226,7 +256,8 @@ if (!app.Environment.IsEnvironment("Testing"))
     {
         throw new InvalidOperationException(
             $"Cannot start without required external tools ({string.Join(", ", missing.Select(m => $"{m.Name} at '{m.Path}'"))}); " +
-            "see docs/server-setup.md (aapt2/apksigner/gradle sections).");
+            "see docs/server-setup.md (aapt2/apksigner/gradle sections; the render-scope entry needs a lingering " +
+            "service user and ProtectHome=read-only so /run/user stays visible).");
     }
 
     // The Paparazzi renderer runs Gradle with `-p <IconToolDir>` relative to

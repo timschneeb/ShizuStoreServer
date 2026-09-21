@@ -22,6 +22,15 @@ public interface IPaparazziRenderer
     /// </summary>
     Task<byte[]?[]> RenderBatchAsync(
         string stagedResDir, IReadOnlyList<BatchRenderRequest> batch, int sizePx, CancellationToken ct = default);
+
+    /// <summary>
+    /// Stops the warm Gradle daemon(s) for this tool. Called after a batched
+    /// refresh: chunks already ran with <c>--no-daemon</c> and exited, but
+    /// the daemon left warm by earlier single renders would otherwise sit on
+    /// a few hundred MB. Best effort; a failure just means the daemon idles
+    /// out on its own.
+    /// </summary>
+    Task StopGradleDaemonsAsync();
 }
 
 /// <summary>One batch entry: merged-resource name plus the staged
@@ -35,22 +44,38 @@ public sealed record BatchRenderRequest(string DrawableName, string? RootFile)
 }
 
 /// <summary>
+/// Transient systemd user scope for the Gradle process tree: the render
+/// JVMs must not be charged to the API unit's cgroup, whose MemoryHigh they
+/// can trip into a reclaim stall that takes the API down until a restart.
+/// The scope is bounded on its own, so a runaway render throttles or
+/// OOM-kills itself and the API keeps serving.
+/// </summary>
+public sealed record RenderScope(
+    string SystemdRunPath, string MemoryHigh, string MemoryMax, string SwapMax, string CpuQuota);
+
+/// <summary>
 /// Renders staged drawable resources through the Paparazzi Gradle tool
 /// (LayoutLib, the same engine Android Studio previews use). The daemon
 /// stays warm between renders. Renders are serialized: concurrent
 /// invocations share one project dir and one snapshot file name, so
 /// parallel runs would serve each other icons. Batch mode exists because
 /// one Gradle invocation per icon costs a task graph + test JVM each
-/// (~minutes for an icon backfill); one invocation renders the whole
-/// batch at seconds per icon. Any failure throws and the caller falls
+/// (~minutes for an icon backfill); one invocation renders a chunk of the
+/// batch at seconds per icon. The caller bounds the chunk and this class
+/// runs every batch invocation with <c>--no-daemon</c>, so no render JVM
+/// survives it; the caller stops the warm daemon once the refresh is done.
+/// Any failure throws and the caller falls
 /// back to a letter avatar; before throwing, a failed run is checked for
 /// a complete PNG the test JVM already wrote (it writes the exact output
 /// before anything optional), because a killed client or a slow daemon
-/// must not discard an icon that is sitting on disk.
+/// must not discard an icon that is sitting on disk. With a
+/// <see cref="RenderScope"/> the Gradle process tree runs in a transient
+/// systemd user scope instead of the API unit's cgroup.
 /// </summary>
 public sealed class PaparazziRenderer(
     string gradlePath, string toolDir, TimeSpan timeout, string? cpuAffinity = null,
-    ILogger<PaparazziRenderer>? log = null, IRunLog? runLog = null) : IPaparazziRenderer
+    ILogger<PaparazziRenderer>? log = null, IRunLog? runLog = null, RenderScope? scope = null)
+    : IPaparazziRenderer
 {
     private static readonly byte[] PngMagic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -152,7 +177,7 @@ public sealed class PaparazziRenderer(
                                 $"-Pbatch={manifestPath}",
                                 $"-PiconPx={sizePx}",
                             ],
-                            batchTimeout, ct);
+                            batchTimeout, isolate: true, ct);
                     }
                     catch (PaparazziException ex)
                     {
@@ -204,6 +229,62 @@ public sealed class PaparazziRenderer(
     }
 
     /// <summary>
+    /// Stops the warm daemon(s) for this tool through <c>gradle --stop</c>.
+    /// Best effort with its own budget: a cancelled refresh still gets the
+    /// daemon freed, and a failure only means it idles out on its own.
+    /// </summary>
+    public async Task StopGradleDaemonsAsync()
+    {
+        Process? process;
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = gradlePath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            startInfo.ArgumentList.Add("--stop");
+            startInfo.ArgumentList.Add("--console=plain");
+            process = Process.Start(startInfo);
+        }
+        catch (Exception ex)
+        {
+            log?.LogDebug(ex, "gradle --stop could not start; any daemon idles out on its own.");
+            return;
+        }
+
+        if (process is null)
+        {
+            return;
+        }
+
+        using (process)
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            try
+            {
+                process.OutputDataReceived += (_, _) => { };
+                process.BeginOutputReadLine();
+                process.ErrorDataReceived += (_, _) => { };
+                process.BeginErrorReadLine();
+                await process.WaitForExitAsync(cts.Token);
+                _runLog.Detail($"gradle --stop done after refresh (exit {process.ExitCode})");
+            }
+            catch (OperationCanceledException)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { /* already exiting */ }
+                log?.LogDebug("gradle --stop did not finish within 60s; the daemon idles out on its own.");
+            }
+            catch (Exception ex)
+            {
+                log?.LogDebug(ex, "gradle --stop failed; the daemon idles out on its own.");
+            }
+        }
+    }
+
+    /// <summary>
     /// Reads the output file when a failed run left a complete PNG (magic
     /// bytes intact); a truncated file is not an icon.
     /// </summary>
@@ -238,7 +319,7 @@ public sealed class PaparazziRenderer(
                 $"-PiconPx={sizePx}",
                 $"-Pout={outPng}",
             ],
-            timeout, ct);
+            timeout, isolate: false, ct);
 
         if (!File.Exists(outPng))
         {
@@ -247,52 +328,97 @@ public sealed class PaparazziRenderer(
     }
 
     private async Task RunGradleAsync(
-        IReadOnlyList<string> taskArgs, TimeSpan limit, CancellationToken ct)
+        IReadOnlyList<string> taskArgs, TimeSpan limit, bool isolate, CancellationToken ct)
     {
         using var timeoutCts = new CancellationTokenSource(limit);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var token = linked.Token;
 
+        var launcherPath = scope?.SystemdRunPath ?? (cpuAffinity is null ? gradlePath : "taskset");
         Process? process;
         try
         {
-            // With an affinity set, launch through taskset so the build and
-            // the daemon it starts (workers inherit affinity) stay on the
-            // allowed cores. The warm daemon is kept.
+            // The build and the daemon it starts (workers inherit affinity)
+            // go through taskset when an affinity is set. With a scope the
+            // whole command line runs under systemd-run, which puts it in a
+            // transient user scope with its own memory/CPU boundaries.
+            var command = new List<string>();
+            if (cpuAffinity is not null)
+            {
+                command.Add("taskset");
+                command.Add("-c");
+                command.Add(cpuAffinity);
+            }
+
+            command.Add(gradlePath);
+            if (isolate)
+            {
+                // A batch chunk must not leave a daemon behind: the next
+                // chunk starts its own JVM, and the heap it used is returned
+                // to the OS between chunks.
+                command.Add("--no-daemon");
+            }
+
+            command.Add("-p");
+            command.Add(toolDir);
+            command.AddRange(taskArgs);
+            command.Add("--console=plain");
+            command.Add("-q");
+
+            if (scope is not null)
+            {
+                // The API unit's Nice=5 does not cover the render once it
+                // sits outside the cgroup, and Nice is not a settable
+                // transient property, so lower priority in-band; the daemon
+                // the client starts inherits it.
+                command.Insert(0, "nice");
+                command.Insert(1, "-n");
+                command.Insert(2, "5");
+            }
+
             var startInfo = new ProcessStartInfo
             {
-                FileName = cpuAffinity is null ? gradlePath : "taskset",
+                FileName = launcherPath,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
             };
-            if (cpuAffinity is not null)
+            var firstArg = 0;
+            if (scope is not null)
             {
-                startInfo.ArgumentList.Add("-c");
-                startInfo.ArgumentList.Add(cpuAffinity);
-                startInfo.ArgumentList.Add(gradlePath);
+                startInfo.ArgumentList.Add("--user");
+                startInfo.ArgumentList.Add("--scope");
+                startInfo.ArgumentList.Add("--quiet");
+                startInfo.ArgumentList.Add("--collect");
+                // Unique per render: renders are serialized, and a scope a
+                // killed render left behind must not block a later one.
+                startInfo.ArgumentList.Add($"--unit=shizu-render-{Guid.NewGuid():N}");
+                AddScopeProperty(startInfo, "MemoryHigh", scope.MemoryHigh);
+                AddScopeProperty(startInfo, "MemoryMax", scope.MemoryMax);
+                AddScopeProperty(startInfo, "MemorySwapMax", scope.SwapMax);
+                AddScopeProperty(startInfo, "CPUQuota", scope.CpuQuota);
+                startInfo.ArgumentList.Add("--");
+            }
+            else
+            {
+                firstArg = 1;
             }
 
-            startInfo.ArgumentList.Add("-p");
-            startInfo.ArgumentList.Add(toolDir);
-            foreach (var arg in taskArgs)
+            for (var i = firstArg; i < command.Count; i++)
             {
-                startInfo.ArgumentList.Add(arg);
+                startInfo.ArgumentList.Add(command[i]);
             }
-
-            startInfo.ArgumentList.Add("--console=plain");
-            startInfo.ArgumentList.Add("-q");
 
             process = Process.Start(startInfo);
         }
         catch (Exception ex)
         {
-            throw new PaparazziException($"Cannot start gradle '{gradlePath}': {ex.Message}");
+            throw new PaparazziException($"Cannot start '{launcherPath}' for gradle '{gradlePath}': {ex.Message}");
         }
 
         if (process is null)
         {
-            throw new PaparazziException($"Cannot start gradle '{gradlePath}'.");
+            throw new PaparazziException($"Cannot start '{launcherPath}' for gradle '{gradlePath}'.");
         }
 
         using (process)
@@ -330,5 +456,12 @@ public sealed class PaparazziRenderer(
                 throw new PaparazziException($"Paparazzi render failed (exit {process.ExitCode}): {err}");
             }
         }
+    }
+
+    /// <summary>One <c>systemd-run -p Name=Value</c> property pair.</summary>
+    private static void AddScopeProperty(ProcessStartInfo startInfo, string name, string value)
+    {
+        startInfo.ArgumentList.Add("-p");
+        startInfo.ArgumentList.Add($"{name}={value}");
     }
 }

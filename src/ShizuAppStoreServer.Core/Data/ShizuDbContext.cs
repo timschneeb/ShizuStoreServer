@@ -18,6 +18,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
     public DbSet<ClientUserAgent> ClientUserAgents => Set<ClientUserAgent>();
     public DbSet<ClientUserAgentDay> ClientUserAgentDays => Set<ClientUserAgentDay>();
+    public DbSet<AppInstallDay> AppInstallDays => Set<AppInstallDay>();
 
     public override int SaveChanges()
     {
@@ -363,6 +364,17 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Day).HasColumnName("day").IsRequired();
             e.Property(x => x.RequestCount).HasColumnName("request_count");
             e.HasIndex(x => new { x.UserAgent, x.Day }).IsUnique();
+        });
+
+        b.Entity<AppInstallDay>(e =>
+        {
+            e.ToTable("app_install_days");
+            e.HasKey(x => new { x.AppId, x.Day });
+            e.Property(x => x.AppId).HasColumnName("app_id");
+            e.Property(x => x.Day).HasColumnName("day").IsRequired();
+            e.Property(x => x.InstallCount).HasColumnName("install_count");
+            e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         b.Entity<PackageException>(e =>

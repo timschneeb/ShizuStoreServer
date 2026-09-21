@@ -231,7 +231,7 @@ files once on the server:
 
 ```bash
 sudo -u shizu sh -c 'printf "sdk.dir=/opt/android-sdk\n" > /opt/shizuappstore/icon-render/local.properties'
-sudo -u shizu sh -c 'printf "org.gradle.jvmargs=-Xmx512m -XX:MaxMetaspaceSize=256m\norg.gradle.daemon.idletimeout=600000\n" > /opt/shizuappstore/gradle-home/gradle.properties'
+sudo -u shizu sh -c 'printf "org.gradle.jvmargs=-Xmx384m -XX:MaxMetaspaceSize=256m\norg.gradle.daemon.idletimeout=600000\n" > /opt/shizuappstore/gradle-home/gradle.properties'
 ```
 
 Gradle writes its daemon registry and caches into `GRADLE_USER_HOME`
@@ -239,11 +239,16 @@ Gradle writes its daemon registry and caches into `GRADLE_USER_HOME`
 directory inside the tool; both are in the unit's `ReadWritePaths`, which
 `ProtectSystem=strict` otherwise blocks. Heap is capped at every level so
 the first icon backfill cannot throw the host into swap: the daemon at
-512m (file above), the forked Paparazzi test JVM at 512m plus a single
+384m (file above), the forked Paparazzi test JVM at 512m plus a single
 fork (`tools/icon-render/app/build.gradle`), one Gradle worker
 (`tools/icon-render/gradle.properties`), the daemon's idle timeout at
 10min, and the unit itself at `MemoryHigh=1500M` / `MemoryMax=1800M` /
 `MemorySwapMax=256M` / `CPUQuota=150%` with `Nice=5` and low IO weight.
+Batched renders are chunked (`IconBatchChunkSize`, default 50) and every
+chunk runs with `--no-daemon`, so no render JVM survives into the next
+chunk and memory cannot accumulate across a backfill; a failed chunk
+fails only its own apps, and the warm daemon is stopped once after the
+last chunk.
 Raise these only after watching `systemctl status` and `free -h` during a
 full pass. The units set `TMPDIR=/opt/shizuappstore/tmp`: APK downloads
 and staged render dirs are disk-backed, because on a 4GB box a single
@@ -251,6 +256,27 @@ and staged render dirs are disk-backed, because on a 4GB box a single
 it over `MemoryHigh` and stalls the API in reclaim for minutes. The temp
 dir holds at most one candidate (downloads are serial) plus the staged
 batch inputs, so keep the volume sized for one large APK.
+
+Renders run outside the service cgroup by default: with
+`Enrichment:IconRenderScope` every Gradle invocation goes through
+`systemd-run --user --scope` into a transient scope under the service
+user's manager, bounded by `IconRenderScopeMemoryHigh` (default `1G`),
+`IconRenderScopeMemoryMax` (default `1400M`), `IconRenderScopeSwapMax`
+(default `0`, so render memory stays out of swap) and
+`IconRenderScopeCpuQuota` (default `150%`), with the render started under
+`nice -n 5` (`Nice=` is not a settable transient property, and the API
+unit's own `Nice=5` no longer covers it). This is the fix for the outage where a batch render charged two
+JVMs (~1GB) to the API unit: the cgroup crossed `MemoryHigh=1500M`, the
+kernel reclaimed inside it, and Kestrel stopped answering while
+`MemoryMax` was never reached and no OOM kill fired, leaving only a
+restart as the way out. Scoped, a runaway render is throttled or killed
+inside its own boundaries and the API keeps serving. The scope needs the
+one-time `loginctl enable-linger shizu` (below), `XDG_RUNTIME_DIR` in
+each unit (the deploy units set `/run/user/958`, the service user's UID,
+because `%U` expands to the system manager's UID), and
+`ProtectHome=read-only` rather than `yes`, which would mask `/run/user`
+and break the manager bus. Do not add an IO weight to the scope: the
+service user's slice provides `cpu memory pids` controllers only.
 
 Knobs (`Enrichment:` section): `GradlePath` (point at
 `/opt/gradle-8.14/bin/gradle`), `IconToolDir` (point at
@@ -263,6 +289,15 @@ before the change (`gradle --stop`) so the next launch starts it inside
 `taskset`. `BatchIconsOnFullPass` (default false) makes a full recheck
 resolve rasters only and batch-render the XML icons after enrichment; fast
 passes touch too few apps to pay for the second download.
+`IconBatchChunkSize` (default 50) bounds how many icons one batch Gradle
+invocation renders; each chunk runs `--no-daemon` so its JVMs exit before
+the next chunk, and the daemon left warm by single renders is stopped once
+after the last chunk. Lower it if a chunk's memory peak is too close to
+the scope's `MemoryMax`; every chunk pays a cold Gradle start.
+`IconRenderScope` (default false; see above) moves each render into its
+own user scope; `SystemdRunPath` (default `systemd-run`) and the four
+`IconRenderScopeMemoryHigh`/`MemoryMax`/`SwapMax`/`CpuQuota` strings
+tune that scope.
 
 Screenshots normally come from the F-Droid/Izzy `index-v2.json`. When
 both carry none, the app's GitHub/GitLab repo is cloned commits-and-trees
@@ -296,10 +331,13 @@ gradle -p tools/icon-render renderIcon -PstagedRes=<res-dir> \
 `-PstagedRes` is the staged `res` dir the enricher prepares per icon;
 `--rerun-tasks` defeats stale up-to-date checks while iterating.
 The `--refresh-icons` heal pass and full passes running with
-`BatchIconsOnFullPass: true` render batched: one
-`renderIconBatch -PstagedRes=<shared-res> -Pbatch=<manifest>` per pass,
-because each Gradle invocation pays a full task graph + test-JVM +
-LayoutLib boot. While a pass defers XML renders, the inline analysis
+`BatchIconsOnFullPass: true` render batched and chunked: at most
+`IconBatchChunkSize` icons per `renderIconBatch -PstagedRes=<shared-res>
+-Pbatch=<manifest>` call, each chunk with `--no-daemon`, and one
+`gradle --stop` after the last chunk. Each Gradle invocation pays a full
+task graph + test-JVM + LayoutLib boot, which is why the batch exists at
+all; the chunk bound is what keeps a backfill from holding gigabytes of
+JVM memory. While a pass defers XML renders, the inline analysis
 never writes an icon, so a raster fallback cannot downgrade an existing
 adaptive icon; the batched phase commits every icon. Fast passes render
 XML icons one Gradle call at a time
@@ -314,7 +352,10 @@ single-icon mode against a nonexistent drawable.
 The server verifies `aapt2 version`, `apksigner --version`,
 `gradle --version` and `git --version` (all must exit 0) at startup, logs
 the detected versions, and refuses to boot without them instead of
-serving a catalog that never enriches. `Enrichment:IconToolDir` is resolved against the
+serving a catalog that never enriches. With `IconRenderScope` a fifth
+probe runs a real `systemd-run --user --scope -- /bin/true`, so missing
+linger or a `ProtectHome=yes` masking `/run/user` fails boot instead of
+degrading every icon to a letter avatar. `Enrichment:IconToolDir` is resolved against the
 process working directory, so the production config must use the absolute
 `/opt/shizuappstore/icon-render` (the unit's `WorkingDirectory` is
 `/opt/shizuappstore/app`, which contains no `tools/`). Only the `Testing`
@@ -345,12 +386,17 @@ sudo sh -c 'umask 027; printf "SHIZU_GITHUB_TOKEN=github_pat_…\nSHIZU_ADMIN_SE
 sudo chown root:shizu /etc/shizuappstore/env
 sudo chmod 640 /etc/shizuappstore/env
 sudo systemctl daemon-reload
+# The scoped icon renders need a systemd user manager for shizu to exist
+# even when nobody is logged in (see the icon rendering section).
+sudo loginctl enable-linger shizu
 sudo systemctl enable shizuappstore.service
 ```
 
 The unit assumes `/opt/shizuappstore` is traversable by the service user
 and ships `GRADLE_USER_HOME=/opt/shizuappstore/gradle-home`,
-`ANDROID_HOME=/opt/android-sdk`, `LogsDirectory=shizu`, and
+`ANDROID_HOME=/opt/android-sdk`, `XDG_RUNTIME_DIR=/run/user/958` (with
+`ProtectHome=read-only` so the render scope can reach the manager bus),
+`LogsDirectory=shizu`, and
 `ReadWritePaths` for `icons`, `icon-render`, `gradle-home` and `list`
 (the list clone is `git fetch`ed in place).
 

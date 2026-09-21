@@ -429,6 +429,44 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
+    public async Task RecordInstallUpsertsDailyRowAndKeepsAppsSeparate()
+    {
+        await SeedAsync(SeedDirectory);
+        var client = factory.NewClient();
+
+        await client.PostAsync("/v1/apps/micup/installs", null);
+        await client.PostAsync("/v1/apps/micup/installs", null);
+        await client.PostAsync("/v1/apps/tuner/installs", null);
+
+        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+        var days = await factory.QueryAsync(db => db.AppInstallDays.AsNoTracking()
+            .OrderBy(d => d.Day).ToListAsync());
+        Assert.Equal(2, days.Count);
+        Assert.All(days, d => Assert.Equal(today, d.Day));
+
+        var micup = await factory.QueryAsync(db => db.Apps.AsNoTracking().SingleAsync(a => a.Slug == "micup"));
+        var tuner = await factory.QueryAsync(db => db.Apps.AsNoTracking().SingleAsync(a => a.Slug == "tuner"));
+        Assert.Equal(2, days.Single(d => d.AppId == micup.Id).InstallCount);
+        Assert.Equal(1, days.Single(d => d.AppId == tuner.Id).InstallCount);
+        Assert.Equal(micup.InstallCount, days.Where(d => d.AppId == micup.Id).Sum(d => d.InstallCount));
+        Assert.Equal(tuner.InstallCount, days.Where(d => d.AppId == tuner.Id).Sum(d => d.InstallCount));
+    }
+
+    [Fact]
+    public async Task RejectedInstallsWriteNoDailyRow()
+    {
+        await SeedAsync(SeedDirectory);
+        var client = factory.NewClient();
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.PostAsync("/v1/apps/no-such-app/installs", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.PostAsync("/v1/apps/hidden/installs", null)).StatusCode);
+
+        Assert.Equal(0, await factory.QueryAsync(db => db.AppInstallDays.AsNoTracking().CountAsync()));
+    }
+
+    [Fact]
     public async Task DetailNotFoundAndExcludedHidden()
     {
         await SeedAsync(SeedDirectory);

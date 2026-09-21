@@ -794,6 +794,9 @@ public sealed class SyncServiceTests : IDisposable
         public Task<byte[]?[]> RenderBatchAsync(
             string stagedResDir, IReadOnlyList<BatchRenderRequest> batch, int sizePx, CancellationToken ct = default) =>
             throw new InvalidOperationException("renderer must stay untouched");
+
+        public Task StopGradleDaemonsAsync() =>
+            throw new InvalidOperationException("renderer must stay untouched");
     }
 
     /// <summary>Records run-log calls; the run log itself is file IO, tested separately.</summary>
@@ -902,9 +905,11 @@ public sealed class SyncServiceTests : IDisposable
         }
     }
 
-    private sealed class CannedBatchRenderer(byte[] png, bool throwAll = false) : IPaparazziRenderer
+    private sealed class CannedBatchRenderer(byte[] png, bool throwAll = false, int throwCalls = 0) : IPaparazziRenderer
     {
         public List<IReadOnlyList<BatchRenderRequest>> Calls { get; } = [];
+
+        public int StopDaemonCalls { get; private set; }
 
         public Task<byte[]> RenderAsync(
             string stagedResDir, string drawableName, int sizePx, CancellationToken ct = default) =>
@@ -914,12 +919,18 @@ public sealed class SyncServiceTests : IDisposable
             string stagedResDir, IReadOnlyList<BatchRenderRequest> batch, int sizePx, CancellationToken ct = default)
         {
             Calls.Add(batch);
-            if (throwAll)
+            if (throwAll || Calls.Count <= throwCalls)
             {
                 throw new PaparazziException("tool exploded");
             }
 
             return Task.FromResult(batch.Select(_ => (byte[]?)png).ToArray());
+        }
+
+        public Task StopGradleDaemonsAsync()
+        {
+            StopDaemonCalls++;
+            return Task.CompletedTask;
         }
     }
 
@@ -987,7 +998,8 @@ public sealed class SyncServiceTests : IDisposable
         _db.SaveChanges();
     }
 
-    private SyncService RefreshService(IEnrichmentRunner runner, IPaparazziRenderer renderer) => new(
+    private SyncService RefreshService(
+        IEnrichmentRunner runner, IPaparazziRenderer renderer, EnrichmentOptions? enrichment = null) => new(
         _db,
         new CatalogUpserter(_db),
         new GitHistoryService(),
@@ -995,7 +1007,7 @@ public sealed class SyncServiceTests : IDisposable
         new FakePoller(),
         renderer,
         new SyncOptions { ListPath = _repo },
-        new EnrichmentOptions { MaxParallelism = 2 });
+        enrichment ?? new EnrichmentOptions { MaxParallelism = 2 });
 
     [Fact]
     public async Task RefreshIconsBatchesXmlRendersIntoOneGradleCall()
@@ -1047,14 +1059,72 @@ public sealed class SyncServiceTests : IDisposable
 
         _runner.PrepareHook = id =>
             new PrepareIconResult(EnrichOutcome.UpToDate, null, new PendingBatchIcon($"b{id}_0", null));
-        var result = await RefreshService(_runner, new CannedBatchRenderer([7], throwAll: true))
-            .RefreshIconsAsync();
+        var renderer = new CannedBatchRenderer([7], throwAll: true);
+        var result = await RefreshService(_runner, renderer).RefreshIconsAsync();
 
         Assert.Equal(3, result.Checked);
         Assert.Equal(0, result.Refreshed);
         Assert.Equal(3, result.Failed);
         Assert.All(result.Errors, e => Assert.Contains("batch render failed", e));
         Assert.Empty(_runner.Commits); // phase C never runs
+        Assert.Equal(1, renderer.StopDaemonCalls); // the daemon is freed either way
+    }
+
+    [Fact]
+    public async Task RefreshIconsChunksBatchRendersAtTheConfiguredSize()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        MarkDirectApk();
+
+        _runner.PrepareHook = id =>
+            new PrepareIconResult(EnrichOutcome.UpToDate, null, new PendingBatchIcon($"b{id}_0", null));
+        var renderer = new CannedBatchRenderer([7]);
+        var result = await RefreshService(
+                _runner, renderer, new EnrichmentOptions { MaxParallelism = 2, IconBatchChunkSize = 2 })
+            .RefreshIconsAsync();
+
+        Assert.Equal(3, result.Checked);
+        Assert.Equal(3, result.Refreshed);
+        Assert.Equal(2, renderer.Calls.Count); // 3 pending icons split into 2 + 1
+        Assert.Equal(2, renderer.Calls[0].Count);
+        Assert.Single(renderer.Calls[1]);
+        Assert.Equal(3, _runner.Commits.Count);
+        Assert.Equal(1, renderer.StopDaemonCalls); // one stop after the last chunk
+    }
+
+    [Fact]
+    public async Task RefreshIconsContinuesWithTheNextChunkAfterAFailedOne()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        MarkDirectApk();
+
+        _runner.PrepareHook = id =>
+            new PrepareIconResult(EnrichOutcome.UpToDate, null, new PendingBatchIcon($"b{id}_0", null));
+        var renderer = new CannedBatchRenderer([7], throwCalls: 1);
+        var result = await RefreshService(
+                _runner, renderer, new EnrichmentOptions { MaxParallelism = 2, IconBatchChunkSize = 2 })
+            .RefreshIconsAsync();
+
+        Assert.Equal(3, result.Checked);
+        Assert.Equal(1, result.Refreshed); // only the surviving chunk commits
+        Assert.Equal(2, result.Failed);
+        Assert.Equal(2, renderer.Calls.Count);
+        Assert.Equal(2, result.Errors.Count);
+        Assert.All(result.Errors, e => Assert.Contains("batch render failed", e));
+        Assert.Single(_runner.Commits);
+        Assert.Equal(1, renderer.StopDaemonCalls);
     }
 
     [Fact]
