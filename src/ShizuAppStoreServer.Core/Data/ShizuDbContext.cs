@@ -16,6 +16,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<PackageException> PackageExceptions => Set<PackageException>();
     public DbSet<AppDownloadExclusion> AppDownloadExclusions => Set<AppDownloadExclusion>();
     public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
+    public DbSet<ClientUserAgent> ClientUserAgents => Set<ClientUserAgent>();
+    public DbSet<ClientUserAgentDay> ClientUserAgentDays => Set<ClientUserAgentDay>();
 
     public override int SaveChanges()
     {
@@ -335,6 +337,32 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Key).HasColumnName("key").HasMaxLength(200).IsRequired();
             e.Property(x => x.Value).HasColumnName("value").IsRequired();
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+        });
+
+        b.Entity<ClientUserAgent>(e =>
+        {
+            e.ToTable("client_user_agents");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.UserAgent).HasColumnName("user_agent")
+                .HasMaxLength(ClientUserAgent.MaxUserAgentLength).IsRequired();
+            e.HasIndex(x => x.UserAgent).IsUnique();
+            e.Property(x => x.RequestCount).HasColumnName("request_count");
+            e.Property(x => x.FirstSeenAt).HasColumnName("first_seen_at").IsRequired();
+            e.Property(x => x.LastSeenAt).HasColumnName("last_seen_at").IsRequired();
+            e.Property(x => x.LastPath).HasColumnName("last_path").HasMaxLength(512);
+        });
+
+        b.Entity<ClientUserAgentDay>(e =>
+        {
+            e.ToTable("client_user_agent_days");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.UserAgent).HasColumnName("user_agent")
+                .HasMaxLength(ClientUserAgent.MaxUserAgentLength).IsRequired();
+            e.Property(x => x.Day).HasColumnName("day").IsRequired();
+            e.Property(x => x.RequestCount).HasColumnName("request_count");
+            e.HasIndex(x => new { x.UserAgent, x.Day }).IsUnique();
         });
 
         b.Entity<PackageException>(e =>

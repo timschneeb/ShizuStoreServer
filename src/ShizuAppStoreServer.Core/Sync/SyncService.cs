@@ -383,7 +383,7 @@ public sealed class SyncService(
             return (0, []);
         }
 
-        var archived = new AwesomeListParser().Parse(await File.ReadAllTextAsync(path, ct), "archived");
+        var archived = new AwesomeListParser().Parse(await File.ReadAllTextAsync(path, ct), "archived", allowUncategorized: true);
         var urls = new HashSet<string>(StringComparer.Ordinal);
         foreach (var category in archived.Categories)
         {

@@ -14,6 +14,7 @@ using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Sources;
 using ShizuAppStoreServer.Core.Sync;
 using ShizuAppStoreServer.Sync;
+using ShizuAppStoreServer.Tracking;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -179,6 +180,13 @@ builder.Services.AddSingleton<ScreenshotRefreshCoordinator>();
 builder.Services.AddHostedService<SyncWorker>();
 builder.Services.AddHostedService<NightlyWorker>();
 
+// Anonymous client usage stats (aggregate per User-Agent + per UTC day).
+// DB-only, no endpoint; the buffer keeps request latency unaffected.
+var userAgentTracking = builder.Configuration.GetSection("UserAgentTracking").Get<UserAgentTrackingOptions>() ?? new();
+builder.Services.AddSingleton(userAgentTracking);
+builder.Services.AddSingleton<UserAgentTracker>();
+builder.Services.AddHostedService<UserAgentTrackingWorker>();
+
 var app = builder.Build();
 
 // Fail fast when the enrichment toolchain is missing: without aapt2 (or
@@ -301,6 +309,13 @@ if (app.Environment.IsDevelopment())
 // Compression outside the output cache: cached bodies stay uncompressed and
 // are compressed per request on the way out.
 app.UseResponseCompression();
+
+// Before the output cache so cache hits are counted; records after the
+// response, which keeps 429s out of the stats.
+if (userAgentTracking.Enabled)
+{
+    app.UseMiddleware<UserAgentTrackingMiddleware>();
+}
 
 // Output cache first so cache hits don't consume rate-limit permits.
 if (apiOptions.EnableOutputCache)

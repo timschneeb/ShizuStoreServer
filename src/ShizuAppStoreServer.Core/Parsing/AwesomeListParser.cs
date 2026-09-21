@@ -12,6 +12,8 @@ namespace ShizuAppStoreServer.Core.Parsing;
 /// with <c>##</c> sections, <c>###</c> categories, <c>####</c> subcategories
 /// and indented nested entries. Mirrors the grammar enforced by scripts/lint.py.
 /// </summary>
+/// <param name="allowUncategorized">When true, entries directly under a
+/// <c>##</c> section count as an implicit category (the flat ARCHIVED.md list).</param>
 public sealed partial class AwesomeListParser
 {
     // Same grammar as lint.py's app_pattern (bullet marker already stripped by Markdig).
@@ -39,7 +41,7 @@ public sealed partial class AwesomeListParser
 
     private readonly MarkdownPipeline _pipeline = new MarkdownPipelineBuilder().Build();
 
-    public ParsedDocument Parse(string markdown, string listingName)
+    public ParsedDocument Parse(string markdown, string listingName, bool allowUncategorized = false)
     {
         var document = new ParsedDocument { ListingName = listingName };
         var ast = Markdown.Parse(markdown, _pipeline);
@@ -82,13 +84,21 @@ public sealed partial class AwesomeListParser
                     break;
 
                 case ListBlock list when inContent:
-                    if (currentCategoryName is null)
+                    // ARCHIVED.md is a flat list: its entries carry no category
+                    // heading and are still part of the exclusion set.
+                    var categoryName = currentCategoryName;
+                    if (categoryName is null && allowUncategorized && currentSection.Length > 0)
+                    {
+                        categoryName = currentSection;
+                    }
+
+                    if (categoryName is null)
                     {
                         document.Warnings.Add(new ParseWarning(currentSection, "List entries outside of any category; skipped."));
                     }
                     else
                     {
-                        var category = EnsureCategory(document, usedSlugs, currentSection, currentCategoryName, currentSubcategoryName);
+                        var category = EnsureCategory(document, usedSlugs, currentSection, categoryName, currentSubcategoryName);
                         ParseList(document, usedSlugs, markdown, list, category, depth: 0, parent: null);
                     }
                     break;
@@ -160,7 +170,7 @@ public sealed partial class AwesomeListParser
         var preTags = item.Groups["pretags"].Value;
         var rest = item.Groups["rest"].Value;
 
-        var trialDays = ParseTrialDays(document, name, preTags);
+        var trialDays = ParseTrialDays(preTags);
         var leftover = KnownPreTags().Replace(preTags, string.Empty).Trim();
         if (leftover.Length > 0)
         {
@@ -203,7 +213,7 @@ public sealed partial class AwesomeListParser
         };
     }
 
-    private static int? ParseTrialDays(ParsedDocument document, string entryName, string preTags)
+    private static int? ParseTrialDays(string preTags)
     {
         var trial = TrialPattern().Match(preTags);
         if (!trial.Success)
@@ -211,10 +221,11 @@ public sealed partial class AwesomeListParser
             return null;
         }
 
+        // Units other than `day` (e.g. `15-minute trial`) cannot be stored as
+        // a day count; count them as a same-day trial instead of warning.
         if (!trial.Groups["unit"].Value.StartsWith("day", StringComparison.OrdinalIgnoreCase))
         {
-            document.Warnings.Add(new ParseWarning(entryName, $"Unsupported trial unit '{trial.Groups["unit"].Value}'; only day-based trials are tracked."));
-            return null;
+            return 0;
         }
 
         return int.TryParse(trial.Groups["days"].Value, out var days) ? days : null;

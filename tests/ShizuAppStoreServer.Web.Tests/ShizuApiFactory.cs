@@ -10,6 +10,7 @@ using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.Sync;
 using ShizuAppStoreServer.Sync;
+using ShizuAppStoreServer.Tracking;
 
 namespace ShizuAppStoreServer.Web.Tests;
 
@@ -87,6 +88,16 @@ public sealed class ShizuApiFactory : WebApplicationFactory<Program>
             });
             services.RemoveAll<SyncSignal>();
             services.AddSingleton<SyncSignal>(new IdleSyncSignal());
+
+            // Keep the user-agent flush timer out of tests: a timer flush
+            // runs on a worker thread and races the shared SQLite connection
+            // (CreateFunction fails while another statement is active).
+            // Tracking tests call UserAgentTrackingWorker.FlushAsync directly.
+            services.RemoveAll<UserAgentTrackingOptions>();
+            services.AddSingleton(new UserAgentTrackingOptions
+            {
+                FlushInterval = TimeSpan.FromHours(1),
+            });
 
             // Disable output caching: replace every production policy with a
             // no-op (re-adding a policy name overwrites the earlier one).

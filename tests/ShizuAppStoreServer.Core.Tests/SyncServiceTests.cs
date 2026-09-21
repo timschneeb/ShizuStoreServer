@@ -45,9 +45,9 @@ public sealed class SyncServiceTests : IDisposable
     private const string ArchivedTuner = """
         # Archived
 
-        ## Apps
+        ## Archived apps
 
-        ### Audio
+        All projects in this section have been deprecated or abandoned by the developer.
 
         * [Tuner](https://github.com/acme/tuner) - Old tuner `GPL-3.0`
         """;
@@ -257,6 +257,7 @@ public sealed class SyncServiceTests : IDisposable
         var archived = await Service().RunAsync("scheduled", fullRecheck: false, T0);
 
         Assert.Equal(1, archived.ArchivedChanged);
+        Assert.Equal(0, archived.ParseWarnings);
         var tuner = _db.Apps.Single(a => a.Slug == "tuner");
         Assert.Equal(Availability.Excluded, tuner.Availability);
         Assert.Equal(SyncService.ArchivedReason, tuner.ExcludedReason);

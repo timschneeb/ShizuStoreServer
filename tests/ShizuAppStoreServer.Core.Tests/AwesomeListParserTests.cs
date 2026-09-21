@@ -71,6 +71,48 @@ public sealed class AwesomeListParserTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void TreatsNonDayTrialUnitsAsSameDay()
+    {
+        const string markdown = """
+            ## Apps
+
+            ### Audio
+
+            * [PrecisEQ](https://play.google.com/store/apps/details?id=com.yokodev.preciseqpro) `IAP` `15-minute trial` 💰 - Spatial audio, headphone calibration and PEQ system-wide `Proprietary`
+            """;
+
+        var doc = Parser.Parse(markdown, "main");
+        var entry = Assert.Single(Assert.Single(doc.Categories).Entries);
+
+        Assert.Equal(0, entry.TrialDays);
+        Assert.True(entry.HasIap);
+        Assert.Empty(doc.Warnings);
+    }
+
+    [Fact]
+    public void ParsesFlatListWhenUncategorizedAllowed()
+    {
+        const string markdown = """
+            ## Archived apps
+
+            All projects in this section have been deprecated.
+
+            * [Anywhere](https://github.com/zhaobozhen/Anywhere-/) - Shortcut folder `Apache-2.0`
+            * [setbox](https://github.com/YasserNull/setbox) - System settings `GPL-3.0`
+            """;
+
+        var doc = Parser.Parse(markdown, "archived", allowUncategorized: true);
+        var category = Assert.Single(doc.Categories);
+        Assert.Equal("Archived apps", category.Name);
+        Assert.Equal(2, category.Entries.Count);
+        Assert.Empty(doc.Warnings);
+
+        var strict = Parser.Parse(markdown, "main");
+        Assert.Empty(strict.Categories);
+        Assert.Single(strict.Warnings);
+    }
+
+    [Fact]
     public void NormalizesPropietaryTypo()
     {
         const string markdown = """

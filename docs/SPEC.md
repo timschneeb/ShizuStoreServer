@@ -40,13 +40,13 @@ boundary through constructor injection (`IAapt2Runner`,
 `Program.cs` wires, in order: controllers, OpenAPI document (all
 environments) + Scalar UI (development only), Npgsql `DbContext`,
 option singletons (`ApiOptions`, `EnrichmentOptions`, `AdminOptions`,
-`SyncOptions`), typed HTTP clients (GitHub/GitLab 30s timeouts,
+`SyncOptions`, `UserAgentTrackingOptions`), typed HTTP clients (GitHub/GitLab 30s timeouts,
 F-Droid index 60s, `apk-download` uses the configured download
 timeout), singleton runners (`Aapt2Runner`, `ApkSignerRunner`,
 `PaparazziRenderer`), scoped `AppEnricher` factory, singleton `FdroidIndexProvider`,
 sync services (`GitHistoryService`, `CatalogUpserter`, `SyncService`,
 `IEnrichmentRunner`), single-flight `SyncGate` + `SyncPassRunner`,
-and two hosted workers (fast loop + nightly).
+and three hosted workers (fast loop, nightly, user-agent flush).
 
 Request pipeline order matters: `UseOutputCache` runs **before**
 `UseRateLimiter`, so cache hits don't consume rate-limit permits.
@@ -57,6 +57,17 @@ them instead of the origin enforcing a limit. The `api` policy is a
 per-IP (fallback `"unknown"`) fixed window: 100 req/min by default, no queue -
 excess gets 429. `ApiOptions` is resolved per request (not captured),
 so tests can swap the registration per suite.
+
+Anonymous usage stats: `UserAgentTrackingMiddleware` sits right after
+response compression and **before** `UseOutputCache`, so it sees every
+`/v1/*` request including cache hits. It records after the response,
+skipping `/v1/admin/*`, `/healthz`, `/icons/*`, requests without a
+`User-Agent` header, and 429 responses; UA and path are truncated to 512
+chars. Hits go to a bounded in-memory channel (drop-on-full, never blocks
+the request). `UserAgentTrackingWorker` flushes the buffer into
+`client_user_agents` + `client_user_agent_days` every
+`UserAgentTracking:FlushInterval` and on shutdown; flush failures are
+logged and never kill the host. DB-only: no endpoint exposes these tables.
 
 Startup gate: after `builder.Build()`, the host probes
 `aapt2 version`, `apksigner --version` (30s/60s timeouts),
@@ -100,6 +111,9 @@ bundle` is rebuilt per deploy, never committed.
     (`is_recommended`, `has_paid`, `has_iap`, `has_ads`,
     `trial_days`, `requires_root`), `parent_id` (nested entries),
     `url`, `source_url`, `source_kind`, `availability`, `store_url`.
+    `trial_days` is the day count of an `n-day trial` tag; a trial with
+    another unit (for example `15-minute trial`) is stored as `0`, and an
+    entry without a trial tag leaves it null.
   - Enrichment fields: `package_name`, `icon_hash`, `icon_adaptive`,
     `author_key`/`author_name`/`author_url` (stable developer identity:
     `github:<owner>` or `gitlab:<group>`; summary-visible so clients can
@@ -216,6 +230,15 @@ bundle` is rebuilt per deploy, never committed.
   optional `note`, timestamps. Applied during enrichment (§5.1), seeded
   with SQL; no admin endpoint. Scoping by `app_slug` keeps the same
   package available on other entries that legitimately ship it.
+- **client_user_agents** - anonymous usage aggregate per `User-Agent`
+  string (`user_agent` unique, truncated to 512 chars): `request_count`,
+  `first_seen_at`, `last_seen_at`, `last_path` (512 chars, nullable).
+  `/v1/admin/*`, `/healthz`, `/icons/*`, UA-less and rate-limited
+  requests are never recorded (see §2). Read with SQL; no endpoint.
+- **client_user_agent_days** - per-UTC-day split of the same hits:
+  unique `(user_agent, day)`, `request_count`. The day comes from the
+  server's UTC clock, so day boundaries follow UTC regardless of client
+  timezone.
 
 ## 4. List ingestion
 
@@ -259,6 +282,10 @@ bundle` is rebuilt per deploy, never committed.
   marked `Excluded` with a fixed reason; un-listed apps are
   un-marked (reason cleared, check fields nulled). An emptied file
   still clears - emptiness is meaningful, there is no early return.
+  The page is a flat list whose entries sit directly under its `##`
+  section, so the parser treats that section as an implicit category
+  for this file (no category headings are required, and none of the
+  flat-list entries raise the uncategorized warning).
 
 ## 5. Enrichment pipeline (`Enrichment/`, `Sources/`)
 
@@ -953,6 +980,9 @@ all environments; Scalar UI is development-only.
 |---|---|---|
 | `Api:RateLimitPerMinute` | `100` | Fixed-window limit per client IP |
 | `Api:EnableOutputCache` | `true` | Server-side GET caching (tests disable it) |
+| `UserAgentTracking:Enabled` | `true` | Anonymous per-UA request stats, DB-only (§2) |
+| `UserAgentTracking:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
+| `UserAgentTracking:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
 | `Enrichment:Aapt2Path` / `ApksignerPath` | `aapt2` / `apksigner` | Binaries, verified at startup |
 | `Enrichment:GradlePath` | `gradle` | Gradle binary for icon renders, verified at startup |
 | `Enrichment:IconToolDir` | `tools/icon-render` | Paparazzi tool checkout |
