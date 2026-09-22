@@ -40,13 +40,13 @@ boundary through constructor injection (`IAapt2Runner`,
 `Program.cs` wires, in order: controllers, OpenAPI document (all
 environments) + Scalar UI (development only), Npgsql `DbContext`,
 option singletons (`ApiOptions`, `EnrichmentOptions`, `AdminOptions`,
-`SyncOptions`, `UserAgentTrackingOptions`), typed HTTP clients (GitHub/GitLab 30s timeouts,
+`SyncOptions`, `UserAgentTrackingOptions`, `RequestLogOptions`), typed HTTP clients (GitHub/GitLab 30s timeouts,
 F-Droid index 60s, `apk-download` uses the configured download
 timeout), singleton runners (`Aapt2Runner`, `ApkSignerRunner`,
 `PaparazziRenderer`), scoped `AppEnricher` factory, singleton `FdroidIndexProvider`,
 sync services (`GitHistoryService`, `CatalogUpserter`, `SyncService`,
 `IEnrichmentRunner`), single-flight `SyncGate` + `SyncPassRunner`,
-and three hosted workers (fast loop, nightly, user-agent flush).
+and four hosted workers (fast loop, nightly, user-agent flush, non-client request log).
 
 Request pipeline order matters: `UseOutputCache` runs **before**
 `UseRateLimiter`, so cache hits don't consume rate-limit permits.
@@ -71,6 +71,23 @@ logged and never kill the host. DB-only: no endpoint exposes these tables.
 The separate `ShizuAppStoreStats` app reads both tables read-only for its HTML
 dashboard, and the same app also reads `app_install_days` and
 `apps.install_count`; the API surface is unchanged.
+
+Non-client traffic: `NonClientRequestLoggingMiddleware` sits next to the UA
+middleware (after response compression, before `UseOutputCache`) and records
+one row per request whose `User-Agent` is not a
+`ShizuStore/<major>.<minor>.<patch>` client (debug builds append
+`-<commit>`, which still matches); requests without the header count as
+non-client. Scope is **every** path: `/v1/*`, `/icons/*`, `/healthz`,
+`/v1/admin/*`, 404s, cache hits and 429s. The row stores the request line, all
+request headers as `jsonb` and the raw reconstructed request (both verbatim,
+`Authorization` included, nothing truncated), plus transport fields: socket
+peer, `CF-Connecting-IP` (else the first `X-Forwarded-For` hop), raw
+`X-Forwarded-For`, `CF-Ray`, `CF-IPCountry`, status and duration. Hits go to
+the same kind of bounded drop-on-full channel and `RequestLogWorker` writes
+them to `request_logs` every `RequestLog:FlushInterval` and on shutdown;
+flush failures are logged and never kill the host. There is no body to store
+(no endpoint accepts one). DB-only, no endpoint, no pruning: rows are kept
+until an operator deletes them.
 
 Startup gate: after `builder.Build()`, the host probes
 `aapt2 version`, `apksigner --version` (30s/60s timeouts),
@@ -248,6 +265,18 @@ bundle` is rebuilt per deploy, never committed.
   as the total counter; rejected (unknown or `excluded`) reports write
   nothing. The day comes from the server's UTC clock. Read with SQL; no
   endpoint.
+- **request_logs** - append-only log of non-client requests (see §2):
+  `seen_at` (indexed), the request line (`method`, `path`,
+  `query_string`, `raw_target`, `protocol`, `scheme`, `host`), the
+  reconstructed `raw_request` (request line + headers, no body),
+  `headers` as `jsonb` (verbatim, `Authorization`/`Cookie` included),
+  `status_code` (smallint), `duration_ms`, `user_agent`, `origin`,
+  `remote_ip` (socket peer; loopback behind the tunnel),
+  `client_ip` (`CF-Connecting-IP`, else first `X-Forwarded-For` hop),
+  `forwarded_for`, `cf_ray`, `country` (`CF-IPCountry`) and `trace_id`.
+  All string columns are uncapped `text`: Kestrel's request-line (8 KiB)
+  and header-total (32 KiB) limits are the only bound. No pruning;
+  delete rows with SQL. Read with SQL; no endpoint.
 
 ## 4. List ingestion
 
@@ -1006,6 +1035,9 @@ all environments; Scalar UI is development-only.
 | `UserAgentTracking:Enabled` | `true` | Anonymous per-UA request stats, DB-only (§2) |
 | `UserAgentTracking:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `UserAgentTracking:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
+| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths, DB-only (§2) |
+| `RequestLog:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
+| `RequestLog:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
 | `Enrichment:Aapt2Path` / `ApksignerPath` | `aapt2` / `apksigner` | Binaries, verified at startup |
 | `Enrichment:GradlePath` | `gradle` | Gradle binary for icon renders, verified at startup |
 | `Enrichment:IconToolDir` | `tools/icon-render` | Paparazzi tool checkout |

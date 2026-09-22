@@ -98,6 +98,13 @@ public sealed class ShizuApiFactory : WebApplicationFactory<Program>
             {
                 FlushInterval = TimeSpan.FromHours(1),
             });
+            // Same for the request-log timer; RequestLoggingTests call
+            // RequestLogWorker.FlushAsync directly.
+            services.RemoveAll<RequestLogOptions>();
+            services.AddSingleton(new RequestLogOptions
+            {
+                FlushInterval = TimeSpan.FromHours(1),
+            });
 
             // Disable output caching: replace every production policy with a
             // no-op (re-adding a policy name overwrites the earlier one).

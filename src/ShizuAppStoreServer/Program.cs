@@ -197,6 +197,13 @@ builder.Services.AddSingleton(userAgentTracking);
 builder.Services.AddSingleton<UserAgentTracker>();
 builder.Services.AddHostedService<UserAgentTrackingWorker>();
 
+// Non-client request log: every request whose User-Agent is not a ShizuStore
+// release, on all paths (icons and admin included). DB-only, append-only.
+var requestLog = builder.Configuration.GetSection("RequestLog").Get<RequestLogOptions>() ?? new();
+builder.Services.AddSingleton(requestLog);
+builder.Services.AddSingleton<RequestLogTracker>();
+builder.Services.AddHostedService<RequestLogWorker>();
+
 var app = builder.Build();
 
 // Fail fast when the enrichment toolchain is missing: without aapt2 (or
@@ -340,6 +347,13 @@ if (app.Environment.IsDevelopment())
 // Compression outside the output cache: cached bodies stay uncompressed and
 // are compressed per request on the way out.
 app.UseResponseCompression();
+
+// Before the output cache so cache hits and 429s are visible; records the
+// response for requests that are not from a ShizuStore client.
+if (requestLog.Enabled)
+{
+    app.UseMiddleware<NonClientRequestLoggingMiddleware>();
+}
 
 // Before the output cache so cache hits are counted; records after the
 // response, which keeps 429s out of the stats.

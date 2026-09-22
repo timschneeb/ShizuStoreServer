@@ -19,6 +19,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<ClientUserAgent> ClientUserAgents => Set<ClientUserAgent>();
     public DbSet<ClientUserAgentDay> ClientUserAgentDays => Set<ClientUserAgentDay>();
     public DbSet<AppInstallDay> AppInstallDays => Set<AppInstallDay>();
+    public DbSet<RequestLog> RequestLogs => Set<RequestLog>();
 
     public override int SaveChanges()
     {
@@ -375,6 +376,35 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.InstallCount).HasColumnName("install_count");
             e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<RequestLog>(e =>
+        {
+            e.ToTable("request_logs");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.SeenAt).HasColumnName("seen_at").IsRequired();
+            e.HasIndex(x => x.SeenAt);
+            e.Property(x => x.Method).HasColumnName("method").IsRequired();
+            e.Property(x => x.Path).HasColumnName("path").IsRequired();
+            e.Property(x => x.QueryString).HasColumnName("query_string");
+            e.Property(x => x.RawTarget).HasColumnName("raw_target").IsRequired();
+            e.Property(x => x.Protocol).HasColumnName("protocol").IsRequired();
+            e.Property(x => x.Scheme).HasColumnName("scheme").IsRequired();
+            e.Property(x => x.Host).HasColumnName("host");
+            e.Property(x => x.RawRequest).HasColumnName("raw_request").IsRequired();
+            // jsonb so an operator can query individual headers with SQL.
+            e.Property(x => x.Headers).HasColumnName("headers").HasColumnType("jsonb").IsRequired();
+            e.Property(x => x.StatusCode).HasColumnName("status_code");
+            e.Property(x => x.DurationMs).HasColumnName("duration_ms");
+            e.Property(x => x.UserAgent).HasColumnName("user_agent");
+            e.Property(x => x.Origin).HasColumnName("origin");
+            e.Property(x => x.RemoteIp).HasColumnName("remote_ip");
+            e.Property(x => x.ClientIp).HasColumnName("client_ip");
+            e.Property(x => x.ForwardedFor).HasColumnName("forwarded_for");
+            e.Property(x => x.CfRay).HasColumnName("cf_ray");
+            e.Property(x => x.Country).HasColumnName("country");
+            e.Property(x => x.TraceId).HasColumnName("trace_id");
         });
 
         b.Entity<PackageException>(e =>
