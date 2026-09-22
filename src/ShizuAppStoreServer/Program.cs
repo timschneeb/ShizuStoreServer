@@ -374,6 +374,10 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+// The API has no HTML surface; a browser hitting the bare host gets the
+// project page instead of a 404.
+app.MapGet("/", () => Results.Redirect("https://github.com/timschneeb/ShizuStore"));
+
 app.Run();
 
 return 0;

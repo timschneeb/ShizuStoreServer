@@ -78,7 +78,10 @@ one row per request whose `User-Agent` is not a
 `ShizuStore/<major>.<minor>.<patch>` client (debug builds append
 `-<commit>`, which still matches); requests without the header count as
 non-client. Scope is **every** path: `/v1/*`, `/icons/*`, `/healthz`,
-`/v1/admin/*`, 404s, cache hits and 429s. The row stores the request line, all
+404s, cache hits and 429s. Two exceptions are never logged: `GET /`, the
+browser-facing redirect to the project repo (browsers, bots and scanners hit
+it constantly and it says nothing about API use), and operator `/v1/admin/*`
+traffic. The row stores the request line, all
 request headers as `jsonb` and the raw reconstructed request (both verbatim,
 `Authorization` included, nothing truncated), plus transport fields: socket
 peer, `CF-Connecting-IP` (else the first `X-Forwarded-For` hop), raw
@@ -1006,6 +1009,7 @@ rather than persisting them.
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
+| `GET /` | 302 to the project repo (`https://github.com/timschneeb/ShizuStore`); the bare host is a browser entry point, not part of the API. No rate limit, no cache. |
 | `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
 | `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). |
 | `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Does not write a `sync_runs` row. |
@@ -1035,7 +1039,7 @@ all environments; Scalar UI is development-only.
 | `UserAgentTracking:Enabled` | `true` | Anonymous per-UA request stats, DB-only (§2) |
 | `UserAgentTracking:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `UserAgentTracking:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
-| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths, DB-only (§2) |
+| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/` and `/v1/admin/*`, DB-only (§2) |
 | `RequestLog:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `RequestLog:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
 | `Enrichment:Aapt2Path` / `ApksignerPath` | `aapt2` / `apksigner` | Binaries, verified at startup |

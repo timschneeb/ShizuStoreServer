@@ -8,16 +8,19 @@ namespace ShizuAppStoreServer.Tracking;
 
 /// <summary>
 /// Records every request whose User-Agent is not a ShizuStore client, on every
-/// path: icons, health, admin, 404s and 429s included. Registered next to the
-/// UA middleware (after response compression, before the output cache), so
-/// cache hits and rate-limited requests are visible too. Records after the
-/// response; headers and the raw request line are stored verbatim.
+/// path: icons, health, 404s and 429s included. Two exceptions stay out of the
+/// log: the bare host (the browser-facing redirect to the project repo) and
+/// operator <c>/v1/admin/*</c> traffic. Registered next to the UA middleware
+/// (after response compression, before the output cache), so cache hits and
+/// rate-limited requests are visible too. Records after the response; headers
+/// and the raw request line are stored verbatim.
 /// </summary>
 public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
 {
     public async Task InvokeAsync(HttpContext context, RequestLogTracker tracker)
     {
-        if (ClientUserAgentMatcher.IsClient(context.Request.Headers.UserAgent.ToString()))
+        if (IsExcluded(context.Request.Path)
+            || ClientUserAgentMatcher.IsClient(context.Request.Headers.UserAgent.ToString()))
         {
             await next(context);
             return;
@@ -43,6 +46,11 @@ public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
             tracker.Record(Capture(context, statusCode, (int)stopwatch.ElapsedMilliseconds));
         }
     }
+
+    // Root is a browser entry point and admin traffic is operator-only;
+    // neither says anything about how the public API is used.
+    private static bool IsExcluded(PathString path) =>
+        path == "/" || path.StartsWithSegments("/v1/admin");
 
     private static RequestLogHit Capture(HttpContext context, int statusCode, int durationMs)
     {
