@@ -81,15 +81,24 @@ factor is the app.
 ### What the server reads from an APK
 
 - package name, version code, version name
-- minimum SDK
+- minimum SDK, target SDK, compile SDK and the declared locale list
 - application label
 - requested permissions
 - native ABI code
 - required features, used to detect TV and Wear builds
 - signing certificate
+- the declared Dhizuku permission, if any
+- Exodus tracker code signatures matched in the DEX
 
 The application label becomes the display name for the store entry. 
 The awesome-shizuku list name is only used when no APK label is known.
+
+Tracker detection matches only the Exodus code signatures (class-name
+prefixes in the DEX string pool); the server performs no network analysis, so
+an app without matches is not "tracker-free", only "not detected by code
+signature". The Dhizuku flag means the build declares a
+`com.rosan.dhizuku.permission.*` permission; the Shizuku permission is not
+tracked because nearly every app declares it.
 
 ### Icons
 

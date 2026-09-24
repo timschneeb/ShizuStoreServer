@@ -84,7 +84,8 @@ public sealed class FdroidTests
         return response;
     }
 
-    // Only index-v2.json carries screenshots (index.xml has none).
+    // index-v2.json carries screenshots (index.xml has none) and the
+    // authoritative signer certificate SHA-256 map.
     private const string IndexV2Json = """
         {
           "packages": {
@@ -102,6 +103,15 @@ public sealed class FdroidTests
                   },
                   "sevenInch": {
                     "en-US": [ { "name": "/com.example.app/en-US/sevenInchScreenshots/00.png" } ]
+                  }
+                }
+              },
+              "versions": {
+                "AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111": {
+                  "manifest": {
+                    "signer": {
+                      "sha256": [ "980CEB20FD248B13EB6E224D73B3DFCD722AB120DFA6632AE8528E7BE1CFD6C9" ]
+                    }
                   }
                 }
               }
@@ -179,6 +189,22 @@ public sealed class FdroidTests
     }
 
     [Fact]
+    public void ParsesIndexV2SignerCertificates()
+    {
+        // The map keys are APK file SHA-256 values; the fixture uses uppercase
+        // to prove both the key and the certificate digest are normalized.
+        var data = FdroidIndexV2Parser.Parse(Encoding.UTF8.GetBytes(IndexV2Json));
+
+        var byFile = data.Signers["com.example.app"];
+        Assert.Equal(
+            ["980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9"],
+            byFile["aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"]);
+        Assert.DoesNotContain("com.example.tv", data.Signers);
+        Assert.DoesNotContain("com.example.bare", data.Signers);
+        Assert.DoesNotContain("com.example.nometa", data.Signers);
+    }
+
+    [Fact]
     public void ParsesNewestPackagePerApp()
     {
         using var xml = new MemoryStream(Encoding.UTF8.GetBytes(IndexXml));
@@ -206,8 +232,9 @@ public sealed class FdroidTests
     public void ParsesRealElementFormatVersionsAndSig()
     {
         // Shape of the live f-droid.org/repo/index.xml (verified 2026-09-12):
-        // version/versioncode/sig are child elements, never attributes, and
-        // <sig> is a 32-hex (MD5) fingerprint.
+        // version/versioncode/sig are child elements, never attributes. <sig>
+        // is F-Droid's legacy 32-hex fingerprint (MD5 over the certificate
+        // hex), not the certificate MD5, so it is display-only.
         const string xml = """
             <?xml version="1.0" encoding="utf-8"?>
             <fdroid>

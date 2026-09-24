@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260924190957_AddDownloadSdkAndLocales")]
+    partial class AddDownloadSdkAndLocales
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -312,10 +315,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("compile_sdk");
 
-                    b.Property<bool>("DhizukuDeclared")
-                        .HasColumnType("boolean")
-                        .HasColumnName("dhizuku_declared");
-
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("boolean")
                         .HasColumnName("is_primary");
@@ -377,16 +376,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Property<int?>("TargetSdk")
                         .HasColumnType("integer")
                         .HasColumnName("target_sdk");
-
-                    b.Property<string>("TrackerSignatures")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("tracker_signatures");
-
-                    b.Property<string>("Trackers")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("trackers");
 
                     b.Property<long?>("VersionCode")
                         .HasColumnType("bigint")

@@ -197,8 +197,9 @@ bundle` is rebuilt per deploy, never committed.
   (`GitHub|GitLab|Codeberg|FDroid|Izzy|Play|Other`), `source_ref`,
   `package_name` (the package this build installs; differs per flavor),
   `apk_url`, `archive_entry`, `version_code`, `version_name`,
-  `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `min_sdk`, `abi`,
-  `sig_key`, `is_primary`, `resolved_at`.
+  `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `analyzed`, `min_sdk`,
+  `target_sdk`, `compile_sdk`, `locales`, `dhizuku_declared`, `trackers`,
+  `tracker_signatures`, `abi`, `sig_key`, `is_primary`, `resolved_at`.
   - `sig_key` = lowercased first space-token of `sig_sha256`, else of
     `sig_md5`, else `url:<apk_url>`; `abi` = the analyzed APK's
     `native-code` ABI (null for fat/universal builds, or the F-Droid
@@ -208,17 +209,45 @@ bundle` is rebuilt per deploy, never committed.
     Izzy mirrors of forge builds) collapse into one row while the
     per-architecture APKs of one release stay separate, and two flavors
     that share a signer and version never overwrite each other.
+  - Fingerprints: analyzed rows record the `apksigner` digests
+    (space-joined sets, matched by membership). Index-only F-Droid/Izzy
+    rows take the signing-cert SHA-256 from the repo's `index-v2.json`
+    (`packages.<id>.versions.<fileSha>.manifest.signer.sha256`); the
+    legacy v1 `index.xml` `<sig>` is an F-Droid-specific fingerprint
+    (MD5 over the certificate hex), not a certificate digest, so it is
+    never recorded.
+  - `analyzed` = true once the recorded build was downloaded and
+    inspected (badging plus signer extraction), false for index-only
+    rows; never downgraded. Only analyzed rows re-run the permission
+    heal.
+  - `target_sdk`/`compile_sdk`/`locales` come from badging on analyzed
+    rows only; `locales` is newline-joined (the `--_--` pseudo-locale is
+    dropped) and stays empty on index-only rows.
+  - Analysis signals (analyzed rows only, empty elsewhere):
+    `dhizuku_declared` = the build declares a
+    `com.rosan.dhizuku.permission.*` permission; `trackers` = names and
+    `tracker_signatures` = the matched code signatures of the Exodus
+    trackers found in the DEX. Only code signatures are matched (the
+    server does no network analysis), so an empty tracker list means
+    "not detected by code signature", never "tracker-free". The Shizuku
+    permission is intentionally not tracked: nearly every app in the
+    catalog declares it, so it separates nothing.
   - Upsert: same `(package_name, sig_key, abi)` updates in place only
     when the new `version_code` is higher; on an equal `version_code`
     the preferred source's URL is kept; lower versions are ignored. A
     legacy row with a null `package_name` adopts the package of the
-    candidate that claims it.
+    candidate that claims it. A candidate whose APK `sha256` matches an
+    existing row of the same package and ABI claims that row too, so
+    index-only and analyzed twins created before the signer map merge in
+    place. Non-null fingerprints are never cleared by an index-only
+    update.
   - `is_primary` = fresh-install/no-match default. Selection prefers
     non-F-Droid sources (GitHub/GitLab/Izzy/Codeberg/Other count as
     forge-like), then higher `version_code`, then ABI (`null` universal
     first, then `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then
-    others), then a fixed source order. Exactly one primary per app
-    (partial unique index on `app_id` where `is_primary`).
+    others), then a non-null `sig_sha256` (an analyzed identity beats an
+    index-only twin), then a fixed source order. Exactly one primary per
+    app (partial unique index on `app_id` where `is_primary`).
 - **app_versions** - (`app_id`, `version_code`, `version_name`,
   `apk_url`, `detected_at`); a row is appended only when the
   `version_code` is unseen for the app (append-only history). The
@@ -820,27 +849,34 @@ NULLS NOT DISTINCT, so same-signature same-ABI candidates (reproducible
 F-Droid builds, Izzy mirrors of forge builds) collapse into one row,
 the per-architecture APKs of one release stay separate, and two flavors
 that share a signer and version never overwrite each other. Fingerprints
-come
-from `apksigner` (every `Signer #N certificate … digest` line is
+come from `apksigner` (every `Signer #N certificate … digest` line is
 collected - key rotation yields space-joined sets matched by
-membership; MD5 is optional for old build-tools) or the index `<sig>`
-MD5 for index-only F-Droid/Izzy rows.
+membership; MD5 is optional for old build-tools). Index-only F-Droid/Izzy
+rows take the signing-cert SHA-256 from the repo's `index-v2.json`
+(`packages.<id>.versions.<fileSha>.manifest.signer.sha256`); the legacy
+v1 `index.xml` `<sig>` is an F-Droid-specific fingerprint (MD5 over the
+certificate hex), not a certificate digest, and is never used for
+identity or client matching.
 
 Upsert rule: a candidate with the same `package_name`, `sig_key` and
 `abi` updates the row in place only when its `version_code` is higher;
 on an equal `version_code` the preferred source's URL is kept; a lower
-version is ignored. An index-only row (MD5 identity) upgrades in place
-when the analyzed build reveals the SHA-256 identity; a legacy row with
-a null `package_name` is claimed by the matching candidate instead of
-spawning a twin.
+version is ignored. A candidate whose APK `sha256` matches an existing
+row of the same package and ABI claims that row, so an index-only row
+(no SHA-256 identity) upgrades in place once analysis or the index-v2
+signer map reveals its identity, and twins created before the signer map
+merge instead of multiplying. Non-null fingerprints are never cleared
+by an index-only update. A legacy row with a null `package_name` is
+claimed by the matching candidate instead of spawning a twin.
 
 `is_primary` marks the default candidate for fresh installs / clients
 with no fingerprint match. Selection: non-F-Droid sources first
 (GitHub/GitLab/Izzy/Codeberg/Other all count as forge-like), then
 higher `version_code`, then ABI (`null` universal first, then
 `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then others), then a
-fixed source order. Exactly one primary per app (partial unique index
-on `app_id` where `is_primary`). This keeps a release that ships only
+non-null `sig_sha256` (an analyzed identity beats an index-only
+twin), then a fixed source order. Exactly one primary per app
+(partial unique index on `app_id` where `is_primary`). This keeps a release that ships only
 per-architecture APKs (BiliDownOut-style) from defaulting to whichever
 asset happens to be largest.
 

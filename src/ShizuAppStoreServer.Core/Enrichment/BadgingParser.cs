@@ -19,6 +19,15 @@ public sealed record BadgingInfo(
     /// <summary>Required <c>uses-feature</c> names (never the not-required ones).</summary>
     public IReadOnlyList<string> Features { get; init; } = [];
 
+    /// <summary>Declared <c>targetSdkVersion</c>, when the output lists one.</summary>
+    public int? TargetSdk { get; init; }
+
+    /// <summary>Declared <c>compileSdkVersion</c> from the package line, when listed.</summary>
+    public int? CompileSdk { get; init; }
+
+    /// <summary>Declared resource locales; the <c>--_--</c> pseudo-locale is dropped.</summary>
+    public IReadOnlyList<string> Locales { get; init; } = [];
+
     /// <summary>Android TV build (leanback launcher or the legacy television type).</summary>
     public bool IsTvFormFactor =>
         Features.Contains(FeatureLeanback) || Features.Contains(FeatureTelevision);
@@ -45,6 +54,17 @@ public static partial class BadgingParser
     // minSdkVersion = build-tools 30+; sdkVersion = older output. Both seen in the wild.
     [GeneratedRegex(@"^(?:minSdkVersion|sdkVersion):'(?<sdk>\d+)'", RegexOptions.Multiline)]
     private static partial Regex SdkLine();
+
+    [GeneratedRegex(@"^targetSdkVersion:'(?<sdk>\d+)'", RegexOptions.Multiline)]
+    private static partial Regex TargetSdkLine();
+
+    // compileSdkVersion is an attribute of the package line.
+    [GeneratedRegex(@"^package:.*\bcompileSdkVersion='(?<sdk>\d+)'", RegexOptions.Multiline)]
+    private static partial Regex CompileSdkLine();
+
+    // `locales: '--_--' 'de' 'en' ...`; the pseudo-locale is not a real translation.
+    [GeneratedRegex(@"^locales:(?<list>.*)$", RegexOptions.Multiline)]
+    private static partial Regex LocalesLine();
 
     [GeneratedRegex(@"^application-icon(?:-(?<density>\d+))?:'(?<path>[^']*)'", RegexOptions.Multiline)]
     private static partial Regex IconLine();
@@ -74,6 +94,8 @@ public static partial class BadgingParser
     [GeneratedRegex(@"'(?<abi>[^']+)'")]
     private static partial Regex AbiToken();
 
+    private const string PseudoLocale = "--_--";
+
     public static BadgingInfo Parse(string output)
     {
         var package = PackageLine().Match(output);
@@ -96,6 +118,27 @@ public static partial class BadgingParser
         {
             minSdk = sdkNum;
         }
+
+        int? targetSdk = null;
+        if (TargetSdkLine().Match(output) is { Success: true } target
+            && int.TryParse(target.Groups["sdk"].Value, out var targetNum))
+        {
+            targetSdk = targetNum;
+        }
+
+        int? compileSdk = null;
+        if (CompileSdkLine().Match(output) is { Success: true } compile
+            && int.TryParse(compile.Groups["sdk"].Value, out var compileNum))
+        {
+            compileSdk = compileNum;
+        }
+
+        var locales = LocalesLine().Matches(output)
+            .SelectMany(m => AbiToken().Matches(m.Groups["list"].Value))
+            .Select(m => m.Groups["abi"].Value)
+            .Where(l => l.Length > 0 && l != PseudoLocale)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         var icons = IconLine().Matches(output)
             .Select(m => new BadgingIcon(
@@ -135,6 +178,9 @@ public static partial class BadgingParser
         return new BadgingInfo(package.Groups["name"].Value, versionCode, versionName, minSdk, icons, permissions, abi, label)
         {
             Features = features,
+            TargetSdk = targetSdk,
+            CompileSdk = compileSdk,
+            Locales = locales,
         };
     }
 }

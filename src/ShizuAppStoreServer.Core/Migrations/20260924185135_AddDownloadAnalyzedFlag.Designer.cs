@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260924185135_AddDownloadAnalyzedFlag")]
+    partial class AddDownloadAnalyzedFlag
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -308,22 +311,9 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("character varying(256)")
                         .HasColumnName("archive_entry");
 
-                    b.Property<int?>("CompileSdk")
-                        .HasColumnType("integer")
-                        .HasColumnName("compile_sdk");
-
-                    b.Property<bool>("DhizukuDeclared")
-                        .HasColumnType("boolean")
-                        .HasColumnName("dhizuku_declared");
-
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("boolean")
                         .HasColumnName("is_primary");
-
-                    b.Property<string>("Locales")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("locales");
 
                     b.Property<int?>("MinSdk")
                         .HasColumnType("integer")
@@ -373,20 +363,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)")
                         .HasColumnName("source_ref");
-
-                    b.Property<int?>("TargetSdk")
-                        .HasColumnType("integer")
-                        .HasColumnName("target_sdk");
-
-                    b.Property<string>("TrackerSignatures")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("tracker_signatures");
-
-                    b.Property<string>("Trackers")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("trackers");
 
                     b.Property<long?>("VersionCode")
                         .HasColumnType("bigint")

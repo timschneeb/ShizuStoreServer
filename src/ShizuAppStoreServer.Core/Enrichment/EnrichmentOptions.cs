@@ -163,4 +163,18 @@ public sealed class EnrichmentOptions
 
     /// <summary>Max parallel repo clones (each is a network git process).</summary>
     public int RepoScreenshotsMaxParallelism { get; set; } = 2;
+
+    /// <summary>
+    /// Exodus Privacy tracker signature JSON (code signatures only; the
+    /// server does no dynamic traffic analysis, so network signatures are
+    /// never matched). Null disables tracker detection; an unreachable
+    /// endpoint keeps the last good catalog.
+    /// </summary>
+    public string? ExodusTrackerUrl { get; set; } = "https://reports.exodus-privacy.eu.org/api/trackers";
+
+    /// <summary>On-disk cache of the tracker JSON; null keeps it in memory only.</summary>
+    public string? ExodusTrackerCachePath { get; set; }
+
+    /// <summary>How long a fetched tracker catalog stays fresh.</summary>
+    public TimeSpan ExodusTrackerRefreshInterval { get; set; } = TimeSpan.FromHours(24);
 }

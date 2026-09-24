@@ -56,14 +56,23 @@ public sealed record FdroidPackageInfo(
     long? Size,
     int? MinSdk,
     string? IconFile,
-    /// <summary>Signing-cert MD5 from <c>&lt;sig&gt;</c> (matches apksigner MD5).</summary>
+    /// <summary>
+    /// Legacy F-Droid v1 fingerprint from <c>&lt;sig&gt;</c>; NOT an
+    /// apksigner certificate digest, so never use it for identity or client
+    /// matching. Kept only so index metadata can still be displayed.
+    /// </summary>
     string? SigMd5,
     /// <summary>Upstream source repo URL from the application-level <c>&lt;source&gt;</c>.</summary>
     string? SourceUrl = null,
     /// <summary>Native ABI from <c>&lt;nativecode&gt;</c>; null for fat/universal builds.</summary>
     string? Abi = null,
     /// <summary>Long description from the application-level <c>&lt;desc&gt;</c> (HTML).</summary>
-    string? LongDescription = null);
+    string? LongDescription = null,
+    /// <summary>
+    /// Signing-cert SHA-256 from <c>index-v2.json</c>, the authoritative
+    /// fingerprint; null when the index did not carry it.
+    /// </summary>
+    string? SigSha256 = null);
 
 /// <summary>
 /// Streaming parser for F-Droid repo <c>index.xml</c> (v1 format): collects
@@ -73,7 +82,7 @@ public sealed record FdroidPackageInfo(
 /// analyze. Real indexes carry <c>version</c>/<c>versioncode</c> as child
 /// elements (package attributes are accepted as a fallback), plus
 /// <c>apkname</c>, <c>hash</c>, <c>size</c>, <c>sdkver</c> (min SDK),
-/// <c>sig</c> (signing-cert MD5), <c>nativecode</c> and the top-level
+/// <c>sig</c> (legacy fingerprint, not a cert digest), <c>nativecode</c> and the top-level
 /// <c>&lt;icon&gt;</c>/<c>&lt;source&gt;</c>/<c>&lt;desc&gt;</c>. Unknown
 /// elements are ignored, so <c>&lt;localized&gt;</c> blocks and future fields
 /// don't break parsing.

@@ -82,6 +82,9 @@ public sealed class BadgingParserTests
         Assert.Equal(24, info.MinSdk);
         Assert.Equal(2, info.Icons.Count);
         Assert.Equal(["android.permission.INTERNET"], info.Permissions);
+        Assert.Equal(34, info.TargetSdk);
+        Assert.Equal(34, info.CompileSdk);
+        Assert.Empty(info.Locales);
     }
 
     [Fact]
@@ -110,6 +113,9 @@ public sealed class BadgingParserTests
         Assert.Null(info.VersionName);
         Assert.Null(info.MinSdk);
         Assert.Empty(info.Icons);
+        Assert.Null(info.TargetSdk);
+        Assert.Null(info.CompileSdk);
+        Assert.Empty(info.Locales);
     }
 
     [Fact]
@@ -210,6 +216,21 @@ public sealed class BadgingParserTests
     }
 
     [Fact]
+    public void ParsesTargetSdkCompileSdkAndLocales()
+    {
+        var info = BadgingParser.Parse("""
+            package: name='com.x' versionCode='1' compileSdkVersion='34'
+            minSdkVersion:'24'
+            targetSdkVersion:'33'
+            locales: '--_--' 'de' 'en-US' 'de'
+            """);
+
+        Assert.Equal(33, info.TargetSdk);
+        Assert.Equal(34, info.CompileSdk);
+        Assert.Equal(["de", "en-US"], info.Locales);
+    }
+
+    [Fact]
     public void MapsUnqualifiedIconToDensityZero()
     {
         var info = BadgingParser.Parse("package: name='com.x' versionCode='1'\napplication-icon:'res/drawable/icon.png'\n");
@@ -252,6 +273,9 @@ public sealed class BadgingParserTests
         Assert.Equal(
             ["res/mipmap-mdpi-v4/ic_launcher.png", "res/mipmap-xxxhdpi-v4/ic_launcher.png"],
             info.Icons.OrderBy(i => i.Density).Select(i => i.Path));
+        Assert.Equal(34, info.TargetSdk);
+        Assert.Equal(34, info.CompileSdk);
+        Assert.Empty(info.Locales);
     }
 }
 

@@ -174,8 +174,11 @@ developers' own upstream builds (normally crawled from GitHub/GitLab),
 so Izzy builds are signature-compatible with forge releases.
 
 - `sig_sha256` / `sig_md5` come from `apksigner verify --print-certs`
-  (SHA-256 + MD5 lines; rotation-aware, space-joined sets), or from the
-  F-Droid index `<sig>` 32-hex MD5 for index-only rows.
+  (SHA-256 + MD5 lines; rotation-aware, space-joined sets). Index-only
+  F-Droid/Izzy rows take the signing-cert SHA-256 from the repo's
+  `index-v2.json` signer map; the legacy index `<sig>` is an F-Droid
+  specific fingerprint, not a certificate digest, and is never recorded
+  as `sig_md5`.
 
 Client matching: hash the installed app's signing cert and filter
 `downloads[]` to candidates whose `sigSha256`/`sigMd5` match (membership
@@ -202,9 +205,9 @@ and leave `sig_sha256`/`sig_md5` null instead. Java lands on the default
 Then point `Enrichment:ApksignerPath` at
 `/opt/android-sdk/build-tools/34.0.0/apksigner` (verified with 35.0.0,
 which prints SHA-256 + SHA-1 + MD5 digests per signer). Signature
-extraction is best-effort: without Java/apksigner `sig_sha256`/`sig_md5`
-stay null and enrichment still succeeds (the F-Droid `<sig>` MD5 from the
-index is always recorded for F-Droid/Izzy rows).
+extraction is best-effort: without Java/apksigner analyzed rows keep both
+digests null and enrichment still succeeds; index-only F-Droid/Izzy rows
+still carry their index-v2 signer SHA-256 when the repo publishes one.
 
 ## Icon rendering (Gradle + Paparazzi)
 

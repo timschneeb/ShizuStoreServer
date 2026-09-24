@@ -120,6 +120,16 @@ public sealed class AppEnricherTests : IDisposable
         }
     }
 
+    private sealed class FakeTrackerCatalog(params TrackerSignature[] signatures) : ITrackerCatalog
+    {
+        public int Calls;
+        public Task<IReadOnlyList<TrackerSignature>> GetAsync(CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult<IReadOnlyList<TrackerSignature>>(signatures);
+        }
+    }
+
     /// <summary>
     /// Verbatim <c>apksigner verify --print-certs</c> output for a test key
     /// (captured from build-tools 35.0.0; the MD5 line is what matches the
@@ -256,7 +266,8 @@ public sealed class AppEnricherTests : IDisposable
         IGitCodeReleaseClient? gitcode = null,
         IPlayStoreClient? play = null,
         IzzyStatsProvider? izzyStats = null,
-        IRepoScreenshotResolver? repoScreenshots = null) =>
+        IRepoScreenshotResolver? repoScreenshots = null,
+        ITrackerCatalog? trackers = null) =>
         new(new GitHubReleaseClient(new HttpClient(github), "tok"),
             new GitLabReleaseClient(new HttpClient(gitlab ?? new StubHandler(_ =>
                 throw new InvalidOperationException("must not call GitLab")))),
@@ -272,7 +283,7 @@ public sealed class AppEnricherTests : IDisposable
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
             launcherIcons ?? new LauncherIconService(),
             new HttpClient(downloads), _options, _db, gitcode, play, izzyStats,
-            repoScreenshots: repoScreenshots);
+            repoScreenshots: repoScreenshots, trackers: trackers);
 
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
@@ -583,6 +594,100 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("https://cdn.example/app-release.apk", row.ApkUrl);
         Assert.Equal(41, row.VersionCode);
         Assert.Equal("Universal Installer", app.DisplayName);
+    }
+
+    [Fact]
+    public async Task EnrichmentRecordsTargetSdkCompileSdkAndLocales()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("sdkapp", "SdkApp", "https://github.com/example/sdkapp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var primary = Primary(app);
+        Assert.Equal(34, primary.TargetSdk);
+        Assert.Equal(34, primary.CompileSdk);
+        Assert.Empty(primary.Locales);
+    }
+
+    [Fact]
+    public async Task EnrichmentStoresDeclaredLocalesWithoutThePseudoLocale()
+    {
+        var apk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(200, 200, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app-release.apk", apk.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(apk),
+        });
+        // The pseudo-locale is not a translation and must not reach the row.
+        var aapt2 = new FakeAapt2Runner(_ =>
+            TestAssets.CannedBadging() + "\nlocales: '--_--' 'de' 'en-US'\n");
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("localeapp", "LocaleApp", "https://github.com/example/localeapp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var primary = Primary(app);
+        Assert.Equal(34, primary.TargetSdk);
+        Assert.Equal(["de", "en-US"], primary.Locales);
+    }
+
+    [Fact]
+    public async Task EnrichmentRecordsDeclaredDhizukuPermission()
+    {
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ =>
+            TestAssets.CannedBadging() + "\nuses-permission: name='com.rosan.dhizuku.permission.API'\n");
+        var enricher = BuildEnricher(github, downloads, aapt2);
+        var app = NewApp("dhizukuapp", "DhizukuApp", "https://github.com/example/dhizukuapp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var primary = Primary(app);
+        Assert.True(primary.DhizukuDeclared);
+        // No catalog is injected in tests by default, so no DEX scan runs.
+        Assert.Empty(primary.Trackers);
+    }
+
+    [Fact]
+    public async Task EnrichmentDetectsExodusTrackerCodeSignatures()
+    {
+        // A class descriptor from the AppLovin SDK; the scanner matches the
+        // Exodus code signature as a substring of the decoded DEX text.
+        var dex = "Lcom/applovin/impl/sdk/AppLovinSdk;"u8.ToArray();
+        var zip = TestAssets.BuildApk(
+            ("classes.dex", dex),
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var trackers = new FakeTrackerCatalog(
+            new TrackerSignature(1, "Google Analytics", "com.google.android.apps.analytics.", ["Analytics"]),
+            new TrackerSignature(2, "AppLovin", "com.applovin.", ["Advertisement"]));
+        var enricher = BuildEnricher(github, downloads, aapt2, trackers: trackers);
+        var app = NewApp("trackerapp", "TrackerApp", "https://github.com/example/trackerapp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var primary = Primary(app);
+        Assert.Equal(["AppLovin"], primary.Trackers);
+        Assert.Equal(["com.applovin."], primary.TrackerSignatures);
+        Assert.False(primary.DhizukuDeclared);
     }
 
     [Fact]
@@ -1468,6 +1573,26 @@ public sealed class AppEnricherTests : IDisposable
         </fdroid>
         """;
 
+    // index-v2 signer map for FdroidIndexXml: the authoritative certificate
+    // SHA-256 for the primary APK, as served by a real F-Droid repo.
+    private const string FdroidIndexV2Json = """
+        {
+          "packages": {
+            "com.example.app": {
+              "versions": {
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                  "manifest": {
+                    "signer": {
+                      "sha256": [ "980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9" ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """;
+
     /// <summary>F-Droid wiring: index fetch + icon mirror; the APK download is attempted but 404s, exercising the index-only fallback.</summary>
     private (AppEnricher Enricher, StubHandler Fdroid, StubHandler Downloads)
         FdroidHappyPath(byte[]? iconBytes = null, bool icon404 = false, Func<HttpResponseMessage>? githubResponse = null,
@@ -1840,7 +1965,9 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(1234567L, primary.SizeBytes);
         Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", primary.Sha256);
         Assert.Null(primary.SigSha256); // no APK analyzed: SHA-256 unknown
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", primary.SigMd5); // index <sig>
+        // The v1 index <sig> is a legacy fingerprint, not a cert digest, so
+        // it is never recorded as a signing-cert MD5.
+        Assert.Null(primary.SigMd5);
         Assert.Null(app.LastError);
         // F-Droid publishes no release dates, so the app stays unknown and sorts
         // last under "recently updated".
@@ -2439,7 +2566,7 @@ public sealed class AppEnricherTests : IDisposable
         var sibling = rows.Single(row => row.Abi == "armeabi-v7a");
         Assert.False(sibling.IsPrimary);
         Assert.Equal(2003, sibling.VersionCode);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", sibling.SigMd5);
+        Assert.Null(sibling.SigMd5); // legacy v1 <sig> is not a cert digest
         Assert.Equal("bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222", sibling.Sha256);
 
         Assert.Equal("com.example.app", app.PackageName);
@@ -2534,6 +2661,27 @@ public sealed class AppEnricherTests : IDisposable
         Age(app);
 
         var (second, _, downloads) = FdroidHappyPath();
+        Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(0, downloads.Calls);
+    }
+
+    [Fact]
+    public async Task FdroidIndexOnlyRowBackfillsSignerFromIndexV2()
+    {
+        // Legacy index-only rows have no SHA-256 identity; the v2 signer map
+        // backfills it without a re-download, and the backfill must not keep
+        // the row healing once it succeeded.
+        var (first, _, _) = FdroidHappyPath(indexV2Json: FdroidIndexV2Json);
+        var app = NewApp("fdv2", "FdV2", "https://f-droid.org/packages/com.example.app/");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        var primary = Primary(app);
+        Assert.Equal("980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9", primary.SigSha256);
+        Assert.Null(primary.SigMd5);
+        Assert.False(primary.Analyzed);
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var (second, _, downloads) = FdroidHappyPath(indexV2Json: FdroidIndexV2Json);
         Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(0, downloads.Calls);
     }
@@ -2898,7 +3046,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Null(primary.SigMd5);
         var variant = rows.Single(d => d.Source == SourceKind.FDroid);
         Assert.Null(variant.SigSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5); // index <sig> still recorded
+        Assert.Null(variant.SigMd5); // legacy v1 <sig> is not a cert digest
         Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", variant.ApkUrl);
     }
 
@@ -2918,7 +3066,9 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(1, downloads.Calls); // primary only
         var variant = _db.Downloads.Local.Single(d => d.AppId == app.Id && d.Source == SourceKind.FDroid);
         Assert.Equal("unchanged", variant.Sha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5); // refreshed from the index
+        // The legacy v1 <sig> is not a cert digest, so the seeded row keeps
+        // its fingerprints and nothing is refreshed from the index.
+        Assert.Null(variant.SigMd5);
     }
 
     [Fact]
@@ -2955,7 +3105,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(42L, variant.VersionCode);
         Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", variant.Sha256);
         Assert.Null(variant.SigSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5);
+        Assert.Null(variant.SigMd5); // legacy v1 <sig> is not a cert digest
     }
 
     [Fact]

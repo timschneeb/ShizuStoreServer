@@ -33,7 +33,12 @@ public sealed record AppSummaryDto(
     DateTimeOffset? ListUpdatedAt,
     string? AuthorKey,
     string? AuthorName,
-    string SourceName);
+    string SourceName,
+    int? TargetSdk = null,
+    int? CompileSdk = null,
+    int? LocaleCount = null,
+    bool DhizukuDeclared = false,
+    IReadOnlyList<string>? Trackers = null);
 
 /// <summary>
 /// One installable candidate of an app, keyed by signing identity. Clients
@@ -56,7 +61,12 @@ public sealed record DownloadDto(
     string? SigMd5,
     int? MinSdk,
     string? Abi,
-    bool Primary);
+    bool Primary,
+    int? TargetSdk = null,
+    int? CompileSdk = null,
+    IReadOnlyList<string>? Locales = null,
+    bool DhizukuDeclared = false,
+    IReadOnlyList<string>? Trackers = null);
 
 /// <summary>
 /// Full app detail: summary fields flattened plus URLs, relations and every
@@ -106,7 +116,13 @@ public sealed record AppDetailDto(
     string? Changelog,
     string? ChangelogUrl,
     IReadOnlyList<string> Screenshots,
-    string SourceName);
+    string SourceName,
+    int? TargetSdk = null,
+    int? CompileSdk = null,
+    int? LocaleCount = null,
+    IReadOnlyList<string>? Locales = null,
+    bool DhizukuDeclared = false,
+    IReadOnlyList<string>? Trackers = null);
 
 public sealed record CategoryPathDto(string Slug, string Name);
 

@@ -46,7 +46,12 @@ public static class AppMapper
             a.ListUpdatedAt,
             a.AuthorKey,
             a.AuthorName,
-            SourceName(a));
+            SourceName(a),
+            primary?.TargetSdk,
+            primary?.CompileSdk,
+            primary?.Locales.Count,
+            primary?.DhizukuDeclared ?? false,
+            primary?.Trackers ?? []);
     }
 
     /// <summary>
@@ -104,7 +109,13 @@ public static class AppMapper
             a.Changelog,
             a.ChangelogUrl,
             a.Screenshots,
-            SourceName(a));
+            SourceName(a),
+            primary?.TargetSdk,
+            primary?.CompileSdk,
+            primary?.Locales.Count,
+            primary?.Locales ?? [],
+            primary?.DhizukuDeclared ?? false,
+            primary?.Trackers ?? []);
     }
 
     /// <summary>
@@ -128,7 +139,12 @@ public static class AppMapper
         d.SigMd5,
         d.MinSdk,
         d.Abi,
-        d.IsPrimary);
+        d.IsPrimary,
+        d.TargetSdk,
+        d.CompileSdk,
+        d.Locales,
+        d.DhizukuDeclared,
+        d.Trackers);
 
     /// <summary>Root→leaf <c>(slug, name)</c> chain for a category (max depth 2 in real data).</summary>
     public static IReadOnlyList<CategoryPathDto> CategoryPath(Category? category)

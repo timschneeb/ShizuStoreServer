@@ -88,7 +88,8 @@ public sealed class AppEnricher(
     IzzyStatsProvider? izzyStats = null,
     ILogger<AppEnricher>? log = null,
     IRunLog? runLog = null,
-    IRepoScreenshotResolver? repoScreenshots = null)
+    IRepoScreenshotResolver? repoScreenshots = null,
+    ITrackerCatalog? trackers = null)
 {
     // Runtime progress lines land in the enrichment run log; without one
     // configured the no-op instance keeps tests and library use silent.
@@ -1234,7 +1235,11 @@ public sealed class AppEnricher(
                 analysis.Badging.VersionCode, analysis.Badging.VersionName,
                 analysis.FileSize, analysis.FileSha256, analysis.SigSha256, analysis.SigMd5,
                 analysis.Badging.MinSdk, analysis.Badging.Abi,
-                PackageName: analysis.Badging.PackageName), now, ct);
+                TargetSdk: analysis.Badging.TargetSdk,
+                CompileSdk: analysis.Badging.CompileSdk,
+                Locales: analysis.Badging.Locales,
+                Inspection: analysis.Inspection,
+                PackageName: analysis.Badging.PackageName, Analyzed: true), now, ct);
         }
 
         if (recomputePrimary)
@@ -2033,14 +2038,26 @@ public sealed class AppEnricher(
     /// <summary>
     /// Pre-fix rows recorded a fully analyzed build but never persisted its
     /// permissions (the F-Droid path never wrote them); the same-asset
-    /// short-circuits would keep them blank forever, so re-analyze once. A
-    /// SHA-256 identity proves a full analysis ran before: index-only rows
-    /// (MD5 at most) never had one and stay up-to-date. A genuinely
-    /// permission-less build re-verifies each pass; such builds are all but
-    /// nonexistent.
+    /// short-circuits would keep them blank forever, so re-analyze once. Only
+    /// analyzed rows heal: index-only rows never went through a badging pass,
+    /// so their empty permission list is not an error. A genuinely
+    /// permission-less analyzed build re-verifies each pass; such builds are
+    /// all but nonexistent.
     /// </summary>
     private static bool NeedsPermissionHeal(App app, AppDownload? primary) =>
-        app.Permissions is not { Count: > 0 } && primary?.SigSha256 is not null;
+        primary is not null
+        && primary.Analyzed
+        && app.Permissions is not { Count: > 0 };
+
+    /// <summary>
+    /// True when an index-only row predates the index-v2 signer map and the
+    /// fresh index entry now carries a certificate SHA-256 to backfill it.
+    /// </summary>
+    private static bool NeedsSignerBackfill(AppDownload? primary, FdroidPackageInfo package) =>
+        primary is not null
+        && !primary.Analyzed
+        && primary.SigSha256 is null
+        && package.SigSha256 is not null;
 
     /// <summary>
     /// The top-level GitLab namespace (group or user) is a stable developer
@@ -2173,7 +2190,12 @@ public sealed class AppEnricher(
         string? SigMd5,
         int? MinSdk,
         string? Abi = null,
-        string? PackageName = null);
+        string? PackageName = null,
+        bool Analyzed = false,
+        int? TargetSdk = null,
+        int? CompileSdk = null,
+        IReadOnlyList<string>? Locales = null,
+        ApkInspection? Inspection = null);
 
     /// <summary>
     /// Signing identity of a candidate: the first SHA-256 token, else the
@@ -2271,9 +2293,10 @@ public sealed class AppEnricher(
 
     /// <summary>
     /// Upserts the row for the candidate's signing identity. Newer versions
-    /// replace older ones; on a version tie the forge source's URL wins.
-    /// An index-only row (MD5 fingerprint) is upgraded in place when the
-    /// analyzed build reveals the SHA-256 identity.
+    /// replace older ones; on a version tie the forge source's URL wins. A
+    /// row is matched by signing key, then by MD5, then by the APK's SHA-256,
+    /// so an index-only twin without a SHA-256 identity merges with its
+    /// analyzed counterpart instead of duplicating it.
     /// </summary>
     private async Task UpsertDownloadAsync(App app, DownloadCandidate candidate, DateTimeOffset now, CancellationToken ct)
     {
@@ -2288,7 +2311,8 @@ public sealed class AppEnricher(
         bool SamePackage(string? value) =>
             candidate.PackageName is null || string.Equals(value, candidate.PackageName, StringComparison.OrdinalIgnoreCase);
         var row = rows.FirstOrDefault(d => SamePackage(d.PackageName) && d.SigKey == sigKey && d.Abi == candidate.Abi)
-            ?? (md5 is null ? null : rows.FirstOrDefault(d => SamePackage(d.PackageName) && FirstFingerprint(d.SigMd5) == md5 && d.Abi == candidate.Abi));
+            ?? (md5 is null ? null : rows.FirstOrDefault(d => SamePackage(d.PackageName) && FirstFingerprint(d.SigMd5) == md5 && d.Abi == candidate.Abi))
+            ?? (candidate.Sha256 is null ? null : rows.FirstOrDefault(d => SamePackage(d.PackageName) && d.Abi == candidate.Abi && d.Sha256 is not null && HashMatches(d.Sha256, candidate.Sha256)));
         if (row is null)
         {
             row = new AppDownload { App = app, SigKey = sigKey, ApkUrl = candidate.ApkUrl, Abi = candidate.Abi };
@@ -2319,9 +2343,34 @@ public sealed class AppEnricher(
         row.VersionName = candidate.VersionName;
         row.SizeBytes = candidate.SizeBytes;
         row.Sha256 = candidate.Sha256;
-        row.SigSha256 = candidate.SigSha256;
-        row.SigMd5 = candidate.SigMd5;
+        // Index-only candidates carry no fingerprints; never clear what a
+        // previous analysis established.
+        row.SigSha256 = candidate.SigSha256 ?? row.SigSha256;
+        row.SigMd5 = candidate.SigMd5 ?? row.SigMd5;
+        // Once a build has been inspected, a later index-only update must not
+        // make the row forget that its data came from a real analysis.
+        row.Analyzed = row.Analyzed || candidate.Analyzed;
         row.MinSdk = candidate.MinSdk;
+        // SDK levels and locales only come from a real analysis; index-only
+        // updates must not clear what a previous analysis established.
+        row.TargetSdk = candidate.TargetSdk ?? row.TargetSdk;
+        row.CompileSdk = candidate.CompileSdk ?? row.CompileSdk;
+        if (candidate.Locales is { Count: > 0 })
+        {
+            row.Locales = candidate.Locales.ToList();
+        }
+
+        // Signals come from a real inspection only; an index-only update
+        // keeps whatever the last analysis recorded.
+        if (candidate.Inspection is not null)
+        {
+            row.DhizukuDeclared = candidate.Inspection.Signals.DhizukuDeclared;
+            row.Trackers = candidate.Inspection.Trackers
+                .Select(t => t.Name).Distinct(StringComparer.Ordinal).ToList();
+            row.TrackerSignatures = candidate.Inspection.Trackers
+                .Select(t => t.Signature).Distinct(StringComparer.Ordinal).ToList();
+        }
+
         row.Abi = candidate.Abi;
         row.ResolvedAt = now;
     }
@@ -2378,6 +2427,13 @@ public sealed class AppEnricher(
         if (aAbi != bAbi)
         {
             return aAbi < bAbi ? a : b;
+        }
+
+        // An analyzed row carries the real SHA-256 identity; prefer it over a
+        // twin that only has index metadata when everything else ties.
+        if ((a.SigSha256 is null) != (b.SigSha256 is null))
+        {
+            return a.SigSha256 is not null ? a : b;
         }
 
         return SourceOrder(a.Source) <= SourceOrder(b.Source) ? a : b;
@@ -2463,8 +2519,8 @@ public sealed class AppEnricher(
                 sibling.VersionName,
                 sibling.Size,
                 sibling.Sha256,
+                sibling.SigSha256,
                 null,
-                sibling.SigMd5,
                 sibling.MinSdk,
                 sibling.Abi,
                 PackageName: packageId), now, ct);
@@ -2526,14 +2582,18 @@ public sealed class AppEnricher(
         if (fetched is null)
         {
             // A 304 would keep pre-fix rows permission-less forever (see
-            // NeedsPermissionHeal): refetch the index once and re-analyze
-            // below. A failing refetch is not an upstream change, so stay
-            // up-to-date instead of failing the pass.
-            if (NeedsPermissionHeal(app, await PrimaryDownloadAsync(app, ct)))
+            // NeedsPermissionHeal), and legacy index-only rows would stay
+            // without a SHA-256 identity; refetch the index once and
+            // re-analyze below. The provider memoizes the forced fetch, so a
+            // rerun cannot loop on it. A failing refetch is not an upstream
+            // change, so stay up-to-date instead of failing the pass.
+            var primary = await PrimaryDownloadAsync(app, ct);
+            if (NeedsPermissionHeal(app, primary)
+                || (primary is not null && !primary.Analyzed && primary.SigSha256 is null))
             {
                 try
                 {
-                        fetched = await fdroid.GetPackagesAsync(repoBase, packageId, null, ct, force: true);
+                    fetched = await fdroid.GetPackagesAsync(repoBase, packageId, null, ct, force: true);
                 }
                 catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
                 {
@@ -2549,6 +2609,7 @@ public sealed class AppEnricher(
         }
 
         var (packages, indexEtag) = fetched.Value;
+        packages = await ApplyIndexV2SignersAsync(repoBase, packages, ct);
         var package = packages.FirstOrDefault();
         if (package is null)
         {
@@ -2585,6 +2646,7 @@ public sealed class AppEnricher(
             && app.PackageName is not null
             && app.IconHash is not null && IconFileExists(app.IconHash)
             && !NeedsPermissionHeal(app, current)
+            && !NeedsSignerBackfill(current, package)
             && siblingsRecorded)
         {
             app.EnrichEtag = indexEtag;
@@ -2612,10 +2674,14 @@ public sealed class AppEnricher(
         var versionCode = analyzed?.Badging.VersionCode ?? package.VersionCode;
         var versionName = analyzed?.Badging.VersionName ?? package.VersionName;
         var minSdk = analyzed?.Badging.MinSdk ?? package.MinSdk;
-        var sigSha256 = analyzed is null ? null : CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
+        // The v1 index <sig> is a legacy F-Droid fingerprint, not a cert
+        // digest, so it is never used for identity or client matching.
+        var sigSha256 = analyzed is null
+            ? package.SigSha256
+            : CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
         var sigMd5 = analyzed is null
-            ? package.SigMd5
-            : CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5;
+            ? null
+            : CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5));
 
         await UpsertDownloadAsync(app, new DownloadCandidate(
             kind,
@@ -2630,7 +2696,11 @@ public sealed class AppEnricher(
             sigMd5,
             minSdk,
             analyzed?.Badging.Abi ?? package.Abi,
-            PackageName: package.PackageName), now, ct);
+            TargetSdk: analyzed?.Badging.TargetSdk,
+            CompileSdk: analyzed?.Badging.CompileSdk,
+            Locales: analyzed?.Badging.Locales,
+            Inspection: analyzed?.Inspection,
+            PackageName: package.PackageName, Analyzed: analyzed is not null), now, ct);
         await RecomputePrimaryAsync(app, ct, package.PackageName);
 
         app.PackageName = package.PackageName;
@@ -2672,6 +2742,56 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
+    /// Patches every package with the signer SHA-256 from the repo
+    /// <c>index-v2.json</c> (the v1 index carries only the legacy <c>&lt;sig&gt;</c>
+    /// fingerprint, which is not a certificate digest). Matching is by the APK
+    /// file hash; packages the v2 index does not list stay untouched. Signer
+    /// trouble never fails an enrich, so any fetch error keeps the v1 data.
+    /// </summary>
+    private async Task<IReadOnlyList<FdroidPackageInfo>> ApplyIndexV2SignersAsync(
+        string repoBase, IReadOnlyList<FdroidPackageInfo> packages, CancellationToken ct)
+    {
+        if (packages.Count == 0)
+        {
+            return packages;
+        }
+
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>>? signers;
+        try
+        {
+            signers = await fdroid.GetSignersAsync(repoBase, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return packages;
+        }
+
+        if (signers is null || signers.Count == 0)
+        {
+            return packages;
+        }
+
+        List<FdroidPackageInfo>? patched = null;
+        for (var i = 0; i < packages.Count; i++)
+        {
+            var package = packages[i];
+            if (package.SigSha256 is not null
+                || NormalizeHash(package.Sha256) is not { } fileHash
+                || !signers.TryGetValue(package.PackageName, out var byFileHash)
+                || !byFileHash.TryGetValue(fileHash, out var certificates)
+                || CertFingerprint.Join(certificates) is not { } fingerprint)
+            {
+                continue;
+            }
+
+            patched ??= [.. packages];
+            patched[i] = package with { SigSha256 = fingerprint };
+        }
+
+        return patched ?? packages;
+    }
+
+    /// <summary>
     /// F-Droid candidate for forge-primary apps: when the same package is
     /// published on F-Droid, record its build next to the primary forge
     /// build. Only runs after a fresh primary enrich (never on
@@ -2695,7 +2815,7 @@ public sealed class AppEnricher(
                 return; // 304 with nothing cached: no new information.
             }
 
-            packages = fetched.Value.Packages;
+            packages = await ApplyIndexV2SignersAsync(FdroidRepos.FDroidBase, fetched.Value.Packages, ct);
             package = packages.FirstOrDefault();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2720,9 +2840,12 @@ public sealed class AppEnricher(
                 && d.Sha256 is not null);
         if (existing is not null)
         {
-            if (package.SigMd5 is not null)
+            // Backfill the SHA-256 identity from the v2 index when the first
+            // discovery predates it; the legacy v1 fingerprint is not a cert
+            // digest and is never written.
+            if (existing.SigSha256 is null && package.SigSha256 is not null)
             {
-                existing.SigMd5 = package.SigMd5;
+                existing.SigSha256 = package.SigSha256;
                 existing.ResolvedAt = now;
             }
 
@@ -2742,10 +2865,14 @@ public sealed class AppEnricher(
                 analyzed.FileSize,
                 analyzed.FileSha256,
                 CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256)),
-                CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)) ?? package.SigMd5,
+                CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)),
                 analyzed.Badging.MinSdk,
                 analyzed.Badging.Abi,
-                PackageName: package.PackageName)
+                TargetSdk: analyzed.Badging.TargetSdk,
+                CompileSdk: analyzed.Badging.CompileSdk,
+                Locales: analyzed.Badging.Locales,
+                Inspection: analyzed.Inspection,
+                PackageName: package.PackageName, Analyzed: true)
             : new DownloadCandidate(
                 SourceKind.FDroid,
                 package.PackageName,
@@ -2755,8 +2882,8 @@ public sealed class AppEnricher(
                 package.VersionName,
                 package.Size,
                 package.Sha256,
+                package.SigSha256,
                 null,
-                package.SigMd5,
                 package.MinSdk,
                 package.Abi,
                 PackageName: package.PackageName);
@@ -2832,13 +2959,22 @@ public sealed class AppEnricher(
         BadgingInfo Badging,
         string FileSha256,
         long FileSize,
-        IReadOnlyList<SignerCertificates> Signers) : IDisposable
+        IReadOnlyList<SignerCertificates> Signers,
+        ApkInspection Inspection) : IDisposable
     {
         public void Dispose()
         {
             try { File.Delete(ApkPath); } catch { /* best effort */ }
         }
     }
+
+    /// <summary>
+    /// Static signals derived from one analyzed APK: manifest-level Shizuku
+    /// facts plus Exodus tracker code-signature matches. Candidates carry
+    /// null when no analysis ran (index-only rows), so those never overwrite
+    /// what an earlier analysis recorded.
+    /// </summary>
+    private sealed record ApkInspection(ApkSignals Signals, IReadOnlyList<TrackerHit> Trackers);
 
     private sealed record ArtifactAnalysis(
         string ArtifactUrl,
@@ -2851,7 +2987,8 @@ public sealed class AppEnricher(
         string? SigSha256,
         string? SigMd5,
         DateTimeOffset? ReleasedAt,
-        ProcessedIcon? Icon);
+        ProcessedIcon? Icon,
+        ApkInspection Inspection);
 
     /// <summary>
     /// Outcome of downloading and analyzing one artifact. <c>Unchanged</c> is
@@ -2989,15 +3126,47 @@ public sealed class AppEnricher(
         var signers = await TryExtractSignersAsync(apkPath, ct);
         var sigSha256 = CertFingerprint.Join(signers.Select(s => s.Sha256));
         var sigMd5 = CertFingerprint.Join(signers.Select(s => s.Md5));
+        var signalsStarted = Stopwatch.GetTimestamp();
+        var inspection = await InspectApkAsync(apkPath, badging, ct);
         var iconStarted = Stopwatch.GetTimestamp();
         var icon = await ResolveIconAsync(badging, apkPath, ct);
         _runLog.Detail($"analyze {label} badging {Elapsed(badgingStarted)}ms, "
-            + $"signers {Elapsed(signerStarted)}ms, icon {Elapsed(iconStarted)}ms, "
-            + $"total {Elapsed(started)}ms");
+            + $"signers {Elapsed(signerStarted)}ms, signals {Elapsed(signalsStarted)}ms, "
+            + $"icon {Elapsed(iconStarted)}ms, total {Elapsed(started)}ms");
 
         return new ArtifactResult(new ArtifactAnalysis(
             artifactUrl, archiveEntry, lockSource, etag, badging, artifactSha256, artifactSize,
-            sigSha256, sigMd5, releasedAt, icon), false, null);
+            sigSha256, sigMd5, releasedAt, icon, inspection), false, null);
+    }
+
+    /// <summary>
+    /// Static APK inspection: declared Shizuku/Dhizuku permissions plus
+    /// Exodus tracker matches in the DEX code. Both are best-effort garnish;
+    /// a failed scan must not fail enrichment, and the DEX read only happens
+    /// when a tracker catalog is injected, so test runs skip it.
+    /// </summary>
+    private async Task<ApkInspection> InspectApkAsync(string apkPath, BadgingInfo badging, CancellationToken ct)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var signals = ShizukuSignalScanner.Scan(badging.Permissions);
+
+        IReadOnlyList<TrackerHit> hits = [];
+        if (trackers is not null)
+        {
+            try
+            {
+                var catalog = await trackers.GetAsync(ct);
+                hits = TrackerScanner.ScanApk(apkPath, catalog);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log?.LogDebug(ex, "Tracker scan failed for {ApkPath}.", apkPath);
+            }
+        }
+
+        _runLog.Detail($"inspect {Path.GetFileName(apkPath)} dhizuku={signals.DhizukuDeclared} "
+            + $"trackers={hits.Count} in {Elapsed(started)}ms");
+        return new ApkInspection(signals, hits);
     }
 
     /// <summary>
@@ -3502,7 +3671,8 @@ public sealed class AppEnricher(
                 badging,
                 fileSha256,
                 fileSize,
-                await TryExtractSignersAsync(tempApk, ct));
+                await TryExtractSignersAsync(tempApk, ct),
+                await InspectApkAsync(tempApk, badging, ct));
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

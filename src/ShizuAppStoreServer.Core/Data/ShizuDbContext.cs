@@ -1,5 +1,7 @@
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace ShizuAppStoreServer.Core.Data;
 
@@ -229,11 +231,32 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.SigSha256).HasColumnName("sig_sha256").HasMaxLength(512);
             e.Property(x => x.SigMd5).HasColumnName("sig_md5").HasMaxLength(512);
             e.Property(x => x.MinSdk).HasColumnName("min_sdk");
+            e.Property(x => x.TargetSdk).HasColumnName("target_sdk");
+            e.Property(x => x.CompileSdk).HasColumnName("compile_sdk");
+            // Locales share the Permissions encoding: newline-joined so the
+            // schema stays identical on Postgres and the SQLite test provider.
+            e.Property(x => x.Locales)
+                .HasColumnName("locales")
+                .HasConversion(
+                    v => string.Join('\n', v),
+                    v => v.Length == 0
+                        ? new List<string>()
+                        : v.Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList(),
+                    new ValueComparer<List<string>>(
+                        (a, b) => a!.SequenceEqual(b!),
+                        v => v.Aggregate(0, (hash, item) => HashCode.Combine(hash, item.GetHashCode())),
+                        v => v.ToList()))
+                .IsRequired();
             // F-Droid publishes <nativecode> as a comma-joined ABI list, so
             // this must fit several architectures, not just one.
             e.Property(x => x.Abi).HasColumnName("abi").HasMaxLength(128);
+            e.Property(x => x.DhizukuDeclared).HasColumnName("dhizuku_declared");
+            // Signal lists share the Locales encoding: newline-joined.
+            MapNewlineList(e, x => x.Trackers, "trackers");
+            MapNewlineList(e, x => x.TrackerSignatures, "tracker_signatures");
             e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
+            e.Property(x => x.Analyzed).HasColumnName("analyzed");
             e.Property(x => x.ResolvedAt).HasColumnName("resolved_at").IsRequired();
             // NULLS NOT DISTINCT so universal builds (abi null) still dedupe.
             // Package is part of the key: flavor builds of one app share a row
@@ -446,5 +469,30 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
                 UpdatedAt = new DateTimeOffset(2026, 9, 15, 0, 0, 0, TimeSpan.Zero),
             });
         });
+    }
+
+    /// <summary>
+    /// Newline-joined string list column, the encoding used for every list on
+    /// the catalog tables: readable in SQL and identical on Postgres and the
+    /// SQLite test provider. The comparer makes in-place mutations visible to
+    /// change tracking.
+    /// </summary>
+    private static void MapNewlineList(
+        EntityTypeBuilder<AppDownload> builder,
+        Expression<Func<AppDownload, List<string>>> property,
+        string column)
+    {
+        builder.Property(property)
+            .HasColumnName(column)
+            .HasConversion(
+                v => string.Join('\n', v),
+                v => v.Length == 0
+                    ? new List<string>()
+                    : v.Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList(),
+                new ValueComparer<List<string>>(
+                    (a, b) => a!.SequenceEqual(b!),
+                    v => v.Aggregate(0, (hash, item) => HashCode.Combine(hash, item.GetHashCode())),
+                    v => v.ToList()))
+            .IsRequired();
     }
 }

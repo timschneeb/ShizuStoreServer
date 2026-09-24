@@ -44,7 +44,45 @@ public sealed class AppDownload
     public string? SigSha256 { get; set; }
     public string? SigMd5 { get; set; }
 
+    /// <summary>
+    /// True once this row's recorded build was downloaded and inspected
+    /// (badging plus signer extraction). Index-only rows stay false until an
+    /// analysis runs, and the flag is never downgraded.
+    /// </summary>
+    public bool Analyzed { get; set; }
+
     public int? MinSdk { get; set; }
+
+    /// <summary>
+    /// Declared <c>targetSdkVersion</c> from badging; null until the build has
+    /// been analyzed.
+    /// </summary>
+    public int? TargetSdk { get; set; }
+
+    /// <summary>
+    /// Declared <c>compileSdkVersion</c> from the package line; null until the
+    /// build has been analyzed.
+    /// </summary>
+    public int? CompileSdk { get; set; }
+
+    /// <summary>
+    /// Resource locales from badging, empty until analyzed. The
+    /// <c>--_--</c> pseudo-locale is not a translation and is dropped.
+    /// </summary>
+    public List<string> Locales { get; set; } = [];
+
+    /// <summary>
+    /// True when the build declares a <c>com.rosan.dhizuku.permission.*</c>
+    /// permission. The Shizuku permission itself is not tracked: almost every
+    /// app in the catalog declares it, so it carries no signal.
+    /// </summary>
+    public bool DhizukuDeclared { get; set; }
+
+    /// <summary>Names of the Exodus trackers detected in the DEX code.</summary>
+    public List<string> Trackers { get; set; } = [];
+
+    /// <summary>Matched Exodus code signatures, one per tracker, for auditing.</summary>
+    public List<string> TrackerSignatures { get; set; } = [];
 
     /// <summary>
     /// Native ABI the build targets, parsed from the APK's <c>native-code</c>

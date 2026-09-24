@@ -128,6 +128,15 @@ ConfigureEnrichmentClients(builder.Services, enrichment);
 // scopes, so the index cache must outlive any one scope (thread-safe since M6).
 builder.Services.AddSingleton<FdroidIndexProvider>();
 builder.Services.AddSingleton<IzzyStatsProvider>();
+// Exodus tracker signatures for static code-signature detection. Singleton
+// so the fetched catalog (a few hundred KB) survives per-app scopes and is
+// refreshed at most once per interval; the DEX scan only runs when a catalog
+// is injected.
+builder.Services.AddHttpClient("exodus-trackers", client => client.Timeout = TimeSpan.FromSeconds(60));
+builder.Services.AddSingleton<ITrackerCatalog>(sp => new ExodusTrackerCatalog(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient("exodus-trackers"),
+    enrichment,
+    sp.GetRequiredService<IRunLog>()));
 builder.Services.AddHttpClient("apk-download", client =>
 {
     client.Timeout = enrichment.DownloadTimeout;
@@ -174,7 +183,8 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IzzyStatsProvider>(),
     sp.GetRequiredService<ILogger<AppEnricher>>(),
     sp.GetRequiredService<IRunLog>(),
-    sp.GetRequiredService<IRepoScreenshotResolver>()));
+    sp.GetRequiredService<IRepoScreenshotResolver>(),
+    sp.GetRequiredService<ITrackerCatalog>()));
 
 // Sync engine (M6): fast loop + nightly full re-check in this same binary
 // Workers resolve SyncService per pass; enrichment fans out over per-app scopes.
