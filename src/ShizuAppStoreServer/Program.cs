@@ -20,7 +20,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
-builder.Services.AddControllers();
+builder.Services.AddControllers(o => o.Filters.Add<ResponsePoisonFilter>());
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 
@@ -43,6 +43,12 @@ builder.Services.Configure<GzipCompressionProviderOptions>(
 // section; tests disable the cache and raise the limit.
 var apiOptions = builder.Configuration.GetSection("Api").Get<ApiOptions>() ?? new();
 builder.Services.AddSingleton(apiOptions);
+
+// Scraper poisoning (SPEC 2): known bad User-Agents get subtly wrong list
+// and detail payloads; the output cache policy below keeps those responses
+// from ever being stored or served.
+var poisonOptions = builder.Configuration.GetSection("Poison").Get<PoisonOptions>() ?? new();
+builder.Services.AddSingleton(poisonOptions);
 
 builder.Services.AddRateLimiter(o =>
 {
@@ -68,8 +74,10 @@ if (apiOptions.EnableOutputCache)
 {
     builder.Services.AddOutputCache(o =>
     {
-        o.AddPolicy("apps-list", p => p.Expire(TimeSpan.FromSeconds(60)).SetVaryByQuery("*"));
-        o.AddPolicy("app-detail", p => p.Expire(TimeSpan.FromSeconds(60)));
+        o.AddPolicy("apps-list", p => p.Expire(TimeSpan.FromSeconds(60)).SetVaryByQuery("*")
+            .AddPolicy<SkipPoisonedRequestsPolicy>());
+        o.AddPolicy("app-detail", p => p.Expire(TimeSpan.FromSeconds(60))
+            .AddPolicy<SkipPoisonedRequestsPolicy>());
         o.AddPolicy("categories", p => p.Expire(TimeSpan.FromMinutes(5)));
         o.AddPolicy("changes", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));
         o.AddPolicy("issues", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));

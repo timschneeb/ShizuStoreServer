@@ -464,7 +464,68 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
             (await client.PostAsync("/v1/apps/hidden/installs", null)).StatusCode);
 
         Assert.Equal(0, await factory.QueryAsync(db => db.AppInstallDays.AsNoTracking().CountAsync()));
+        Assert.Equal(0, await factory.QueryAsync(db => db.AppVersionInstallDays.AsNoTracking().CountAsync()));
     }
+
+    [Fact]
+    public async Task RecordInstallWritesVersionRowWithTypeAndCount()
+    {
+        await SeedAsync(SeedDirectory);
+        var client = factory.NewClient();
+
+        var first = await client.PostAsync("/v1/apps/micup/installs",
+            JsonContent.Create(new { versionCode = 42, installType = "FRESH" }));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        await client.PostAsync("/v1/apps/micup/installs",
+            JsonContent.Create(new { versionCode = 42, installType = "fresh" }));
+
+        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+        var micup = await factory.QueryAsync(db => db.Apps.AsNoTracking().SingleAsync(a => a.Slug == "micup"));
+        var row = Assert.Single(await factory.QueryAsync(db => db.AppVersionInstallDays.AsNoTracking().ToListAsync()));
+        Assert.Equal(micup.Id, row.AppId);
+        Assert.Equal(42, row.VersionCode);
+        Assert.Equal("fresh", row.InstallType);
+        Assert.Equal(today, row.Day);
+        Assert.Equal(2, row.InstallCount);
+    }
+
+    [Fact]
+    public async Task RecordInstallWithoutBodyWritesUnknownZeroRow()
+    {
+        await SeedAsync(SeedDirectory);
+        var client = factory.NewClient();
+
+        await client.PostAsync("/v1/apps/micup/installs", null);
+
+        var row = Assert.Single(await factory.QueryAsync(db => db.AppVersionInstallDays.AsNoTracking().ToListAsync()));
+        Assert.Equal(0, row.VersionCode);
+        Assert.Equal("unknown", row.InstallType);
+        Assert.Equal(1, row.InstallCount);
+    }
+
+    [Fact]
+    public async Task RecordInstallKeepsFreshAndUpdateSeparate()
+    {
+        await SeedAsync(SeedDirectory);
+        var client = factory.NewClient();
+
+        await client.PostAsync("/v1/apps/micup/installs",
+            JsonContent.Create(new { versionCode = 7, installType = "fresh" }));
+        await client.PostAsync("/v1/apps/micup/installs",
+            JsonContent.Create(new { versionCode = 8, installType = "update" }));
+        await client.PostAsync("/v1/apps/micup/installs",
+            JsonContent.Create(new { versionCode = 9, installType = "reinstall" }));
+        await client.PostAsync("/v1/apps/micup/installs",
+            JsonContent.Create(new { versionCode = -1, installType = "update" }));
+
+        var rows = await factory.QueryAsync(db => db.AppVersionInstallDays.AsNoTracking()
+            .OrderBy(r => r.VersionCode).ToListAsync());
+        Assert.Equal(4, rows.Count);
+        Assert.All(rows, r => Assert.Equal(1, r.InstallCount));
+        Assert.Equal([0L, 7L, 8L, 9L], rows.Select(r => r.VersionCode));
+        Assert.Equal(["update", "fresh", "update", "unknown"], rows.Select(r => r.InstallType));
+    }
+
 
     [Fact]
     public async Task DetailNotFoundAndExcludedHidden()

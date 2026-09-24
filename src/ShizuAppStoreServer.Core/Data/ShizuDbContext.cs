@@ -19,6 +19,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<ClientUserAgent> ClientUserAgents => Set<ClientUserAgent>();
     public DbSet<ClientUserAgentDay> ClientUserAgentDays => Set<ClientUserAgentDay>();
     public DbSet<AppInstallDay> AppInstallDays => Set<AppInstallDay>();
+    public DbSet<AppVersionInstallDay> AppVersionInstallDays => Set<AppVersionInstallDay>();
     public DbSet<RequestLog> RequestLogs => Set<RequestLog>();
 
     public override int SaveChanges()
@@ -372,6 +373,20 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.ToTable("app_install_days");
             e.HasKey(x => new { x.AppId, x.Day });
             e.Property(x => x.AppId).HasColumnName("app_id");
+            e.Property(x => x.Day).HasColumnName("day").IsRequired();
+            e.Property(x => x.InstallCount).HasColumnName("install_count");
+            e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<AppVersionInstallDay>(e =>
+        {
+            e.ToTable("app_version_install_days");
+            e.HasKey(x => new { x.AppId, x.VersionCode, x.InstallType, x.Day });
+            e.Property(x => x.AppId).HasColumnName("app_id");
+            e.Property(x => x.VersionCode).HasColumnName("version_code");
+            e.Property(x => x.InstallType).HasColumnName("install_type")
+                .HasMaxLength(AppVersionInstallDay.MaxInstallTypeLength).IsRequired();
             e.Property(x => x.Day).HasColumnName("day").IsRequired();
             e.Property(x => x.InstallCount).HasColumnName("install_count");
             e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId)

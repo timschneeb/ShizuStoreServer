@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.AspNetCore.RateLimiting;
@@ -212,14 +213,19 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
     /// added/updated feed does not churn; the move is visible only through
     /// <c>installsUpdated</c> in <c>/v1/changes</c>).
     /// A second write upserts the per-UTC-day row in <c>app_install_days</c>,
-    /// both in one transaction.
-    /// <c>excluded</c> rows read as 404.
+    /// and a third the per-version/type row in <c>app_version_install_days</c>,
+    /// all in one transaction.
+    /// The JSON body is optional: <c>{ "versionCode": 123, "installType":
+    /// "fresh" }</c>; absent, malformed or unknown values fall back to
+    /// 0/unknown so older clients keep working. <c>excluded</c> rows read as 404.
     /// </summary>
     [HttpPost("{slug}/installs")]
     [ProducesResponseType<InstallRecordedDto>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<InstallRecordedDto>> RecordInstall(string slug, CancellationToken ct = default)
     {
+        var (versionCode, installType) = await ReadInstallReportAsync(ct);
+
         // ExecuteUpdate is expression-based, so the timestamp is captured
         // into a local first; both columns land in one atomic UPDATE.
         var now = DateTimeOffset.UtcNow;
@@ -251,10 +257,57 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
             DO UPDATE SET install_count = app_install_days.install_count + 1
             """, ct);
 
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO app_version_install_days (app_id, version_code, install_type, day, install_count)
+            VALUES ({app.Id}, {versionCode}, {installType}, {day}, 1)
+            ON CONFLICT (app_id, version_code, install_type, day)
+            DO UPDATE SET install_count = app_version_install_days.install_count + 1
+            """, ct);
+
         await tx.CommitAsync(ct);
 
         return Ok(new InstallRecordedDto(slug, app.InstallCount));
     }
+
+    /// <summary>
+    /// Optional JSON body of an install report. Anything unparseable or out of
+    /// range degrades to 0/unknown instead of failing the install count.
+    /// </summary>
+    private async Task<(long VersionCode, string InstallType)> ReadInstallReportAsync(CancellationToken ct)
+    {
+        using var body = new MemoryStream();
+        await Request.Body.CopyToAsync(body, ct);
+
+        long versionCode = 0;
+        string? installType = null;
+        try
+        {
+            using var json = JsonDocument.Parse(body.ToArray());
+            if (json.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                if (json.RootElement.TryGetProperty("versionCode", out var versionProp)
+                    && versionProp.ValueKind == JsonValueKind.Number
+                    && versionProp.TryGetInt64(out var parsed)
+                    && parsed > 0)
+                {
+                    versionCode = parsed;
+                }
+
+                if (json.RootElement.TryGetProperty("installType", out var typeProp)
+                    && typeProp.ValueKind == JsonValueKind.String)
+                {
+                    installType = typeProp.GetString();
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // An empty or non-JSON body is a valid older-client report.
+        }
+
+        return (versionCode, AppVersionInstallDay.NormalizeInstallType(installType));
+    }
+
 
     /// <summary>
     /// Category ids for <paramref name="slug"/> plus all descendants.
