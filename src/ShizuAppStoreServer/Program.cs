@@ -105,6 +105,7 @@ builder.Services.AddSingleton(adminOptions);
 var enrichment = builder.Configuration.GetSection("Enrichment").Get<EnrichmentOptions>() ?? new();
 enrichment.GitHubToken ??= Environment.GetEnvironmentVariable("SHIZU_GITHUB_TOKEN");
 enrichment.GitLabToken ??= Environment.GetEnvironmentVariable("SHIZU_GITLAB_TOKEN");
+enrichment.UsageSummaryApiKey ??= Environment.GetEnvironmentVariable("SHIZU_USAGE_AI_KEY");
 if (!string.IsNullOrWhiteSpace(enrichment.FdroidRepoBase))
 {
     // f-droid.org throttles datacenter IPs to a few hundred KB/s, which
@@ -168,6 +169,14 @@ builder.Services.AddSingleton<IGitRunner>(_ => new GitProcessRunner(enrichment.G
 builder.Services.AddSingleton<IRepoScreenshotResolver>(sp => new RepoScreenshotResolver(
     sp.GetRequiredService<IGitRunner>(), enrichment,
     sp.GetRequiredService<ILogger<RepoScreenshotResolver>>()));
+// Shizuku usage intelligence: a bounded source-tree scan per app plus an
+// optional OpenAI-compatible summarizer. Without a base URL and model the
+// generator stays disabled and the deterministic template ships instead.
+builder.Services.AddScoped<ISourceUsageClient, SourceUsageClient>();
+builder.Services.AddHttpClient<OpenAiUsageSummaryGenerator>(
+    client => client.Timeout = enrichment.UsageSummaryTimeout);
+builder.Services.AddSingleton<IUsageSummaryGenerator>(
+    sp => sp.GetRequiredService<OpenAiUsageSummaryGenerator>());
 builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IGitHubReleaseClient>(),
     sp.GetRequiredService<IGitLabReleaseClient>(),
@@ -184,7 +193,9 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<ILogger<AppEnricher>>(),
     sp.GetRequiredService<IRunLog>(),
     sp.GetRequiredService<IRepoScreenshotResolver>(),
-    sp.GetRequiredService<ITrackerCatalog>()));
+    sp.GetRequiredService<ITrackerCatalog>(),
+    sp.GetRequiredService<ISourceUsageClient>(),
+    sp.GetRequiredService<IUsageSummaryGenerator>()));
 
 // Sync engine (M6): fast loop + nightly full re-check in this same binary
 // Workers resolve SyncService per pass; enrichment fans out over per-app scopes.

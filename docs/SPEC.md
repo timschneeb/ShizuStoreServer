@@ -198,9 +198,13 @@ bundle` is rebuilt per deploy, never committed.
   `package_name` (the package this build installs; differs per flavor),
   `apk_url`, `archive_entry`, `version_code`, `version_name`,
   `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `analyzed`, `min_sdk`,
-  `target_sdk`, `compile_sdk`, `locales`, `dhizuku_declared`, `trackers`,
-  `tracker_signatures`, `tracker_tags`, `inspected`, `abi`, `sig_key`,
-  `is_primary`, `resolved_at`.
+  `target_sdk`, `compile_sdk`, `locales`, `abis`, `localized_labels`,
+  `signer_dn`, `signer_scheme`, `signer_key_algorithm`, `dhizuku_declared`,
+  `trackers`, `tracker_signatures`, `tracker_tags`, `managers`, `api_form`,
+  `capabilities`, `usage_optional`, `usage_source_scanned`, `usage_version`,
+  `usage_evidence`, `usage_summary`, `usage_summary_model`,
+  `usage_summary_hash`, `usage_summary_version`, `inspected`, `abi`,
+  `sig_key`, `analysis_version`, `is_primary`, `resolved_at`.
   - `sig_key` = lowercased first space-token of `sig_sha256`, else of
     `sig_md5`, else `url:<apk_url>`; `abi` = the analyzed APK's
     `native-code` ABI (null for fat/universal builds, or the F-Droid
@@ -221,7 +225,25 @@ bundle` is rebuilt per deploy, never committed.
     heal.
   - `target_sdk`/`compile_sdk`/`locales` come from badging on analyzed
     rows only; `locales` is newline-joined (the `--_--` pseudo-locale is
-    dropped) and stays empty on index-only rows.
+    dropped) and stays empty on index-only rows. `abis` is the analyzed
+    APK's full `native-code` ABI list (newline-joined; empty for
+    fat/universal builds and index-only rows) while `abi` (above) stays
+    the single-value uniqueness key.
+  - `localized_labels` = the APK's `application-label-<locale>` lines as
+    newline-joined `locale=label` entries (first entry per locale wins,
+    newlines in labels flattened to spaces, analyzed rows only). The
+    default `application-label` still fills the app's displayed name; the
+    map lets clients switch labels per device locale.
+  - `signer_dn`, `signer_scheme` and `signer_key_algorithm` describe the
+    analyzed signer(s): newline-joined distinct certificate DNs, the
+    verified signature schemes (`v1`..`v4`, `+`-joined, e.g. `v2+v3`,
+    null when unverified), and newline-joined distinct key algorithms
+    with size (e.g. `RSA 2048`). Signer rotation records every distinct
+    DN. Empty on index-only rows.
+  - `analysis_version` = the extraction level of the row
+    (`AppEnricher.CurrentAnalysisVersion`); analyzed rows below the
+    current version re-analyze once so new fields backfill without
+    re-downloading index-only rows.
   - Analysis signals (analyzed rows only, empty elsewhere):
     `dhizuku_declared` = the build declares a
     `com.rosan.dhizuku.permission.*` permission; `trackers` = names and
@@ -238,6 +260,30 @@ bundle` is rebuilt per deploy, never committed.
     existed are false, so the next pass re-analyzes them once to
     backfill the signals; index-only rows are never re-downloaded for
     this.
+  - Shizuku usage intelligence (analyzed rows only, empty elsewhere):
+    `managers` = supported manager families (`shizuku`, `dhizuku`, `sui`,
+    `root`) from declared permissions, manifest components and the DEX;
+    `api_form` = the strongest observed integration (`user_service` for
+    `bindUserService`/`UserServiceArgs`, `new_process` for
+    `Shizuku.newProcess`, `permission` for the request/check flow);
+    `capabilities` = the shell command families the app can drive
+    (`install`, `uninstall`, `freeze`, `appops`, `system_settings`,
+    `process`, `diagnostics`, `reboot`, `wireless_adb`, `compile`);
+    `usage_optional` = a fallback path exists (for example
+    `PackageInstaller` or `ACTION_MANAGE_UNKNOWN_APP_SOURCES`) next to
+    Shizuku usage, so Shizuku is not strictly required. Every entry in
+    `usage_evidence` is `kind|value|source|confidence` (`kind` =
+    `permission|component|marker|command|manager|fallback`, `source` =
+    `apk|source`, `confidence` = `strong|weak`) and also lands in the
+    `app_signals` table. `usage_source_scanned` = the bounded forge
+    source scan ran (a tree fetch that failed leaves it false so the next
+    pass retries); `usage_version` = the classification level
+    (`AppEnricher.CurrentUsageVersion`), rows below it re-derive once.
+    `usage_summary` = a deterministic template, replaced by an
+    OpenAI-compatible model only when one is configured and the model's
+    claims cite evidence ids (model id and evidence hash stored in
+    `usage_summary_model`/`usage_summary_hash`,
+    `usage_summary_version` = `AppEnricher.CurrentUsageSummaryVersion`).
   - Upsert: same `(package_name, sig_key, abi)` updates in place only
     when the new `version_code` is higher; on an equal `version_code`
     the preferred source's URL is kept; lower versions are ignored. A
@@ -256,6 +302,12 @@ bundle` is rebuilt per deploy, never committed.
     app (partial unique index on `app_id` where `is_primary`); a row set
     without one is rebuilt from the stored rows on the next pass without
     downloading anything.
+- **app_signals** - (`app_id` FK cascade, `kind`, `value`, `source`,
+  `confidence`, `detected_at`); one row per evidence item behind an app's
+  Shizuku usage classification, rebuilt from the primary download's
+  `usage_evidence` on every usage pass and capped at 64 rows per app.
+  Serves the detail `signals[]` list; summaries carry only the derived
+  `managers[]` filter.
 - **app_versions** - (`app_id`, `version_code`, `version_name`,
   `apk_url`, `detected_at`); a row is appended only when the
   `version_code` is unseen for the app (append-only history). The
@@ -559,9 +611,12 @@ therefore treats Izzy as forge-like.
 ### 5.1 APK analysis (forge + changed F-Droid builds)
 
 Temp download → `aapt2 dump badging` (package, versionCode(long),
-versionName, `minSdkVersion`/`sdkVersion`, best-density
+versionName, `minSdkVersion`/`sdkVersion`/`targetSdkVersion`, declared
+locales and their `application-label-<locale>` strings, every
+`native-code` ABI, best-density
 `application-icon` lines) → file SHA-256/size → `apksigner verify
---print-certs` → icon chain, XML first at every level (a real vector
+--print-certs` (digests, certificate DN, key algorithm and size, the
+verified signature schemes) → icon chain, XML first at every level (a real vector
 render stays sharp while a stale PNG would fossilize): manifest
 `android:icon` XML staged for Paparazzi, then the manifest raster
 decoded in-house, then a badging XML path, then badging rasters
@@ -1023,7 +1078,16 @@ the default is main-only, so closed entries stay out of every list,
 count and delta unless a client opts in. Summary/list DTOs
 source `versionCode`/`versionName`/`minSdk`/`size`/`sigSha256`/`sigMd5`
 from the primary download (`size` is the primary APK's `size_bytes`, null
-when unknown).
+when unknown). Badging-derived `targetSdk`/`compileSdk`/`localeCount`/
+`abis[]` and the analysis signals (`dhizukuDeclared`, `trackers[]`,
+`trackerTags[]`, `managers[]`) ride on summaries and detail; summaries carry
+only the `localizedLabels` entries whose label differs from the display name
+so unchanged strings do not inflate list payloads; detail adds
+full `locales[]`, the Shizuku usage fields (`apiForm`, `capabilities[]`,
+`usageOptional`, `usageSummary`) with the `signals[]` evidence rows, and,
+per `downloads[]` entry, the full localized label map and
+signer details (`localizedLabels`, `signerDn`, `signerScheme`,
+`signerKeyAlgorithm`, §3/§5.1).
 
 `name` is the app's `display_name` when enrichment has learned it (the
 analyzed APK's label, §5.2) and the awesome-list name otherwise; variant
@@ -1075,7 +1139,7 @@ rather than persisting them.
 | Endpoint | Behavior |
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. Poisoned User-Agents get doctored rows and bypass the cache (§2). |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. Poisoned User-Agents get a random other row's doctored downloads/lists, never a 304, and bypass the cache (§2). |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `managers[]`, `apiForm`, `capabilities[]`, `usageOptional`, `usageSummary`, `signals[]`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. Poisoned User-Agents get a random other row's doctored downloads/lists, never a 304, and bypass the cache (§2). |
 | `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
@@ -1139,6 +1203,14 @@ all environments; Scalar UI is development-only.
 | `Enrichment:DownloadTimeout` | `10min` | APK download HTTP timeout |
 | `Enrichment:RunLogPath` | `null` | Append-only per-pass human-readable log (one line per app, timestamped slow-action details, plus the issues snapshot, §7.3); null disables it |
 | `Enrichment:GitHubToken` / `GitLabToken` | `null` (+ `SHIZU_GITHUB_TOKEN` / `SHIZU_GITLAB_TOKEN` env fallback) | Release-API auth/rate limits |
+| `Enrichment:SourceUsageTimeout` | `90s` | Budget for the bounded Shizuku source scan per app |
+| `Enrichment:SourceUsageMaxFiles` | `24` | Source files fetched per repo scan (manifest and Shizuku-hinted paths first) |
+| `Enrichment:SourceUsageMaxFileBytes` | `64KB` | Skip source entries with a larger declared size |
+| `Enrichment:UsageSummaryBaseUrl` | `null` | OpenAI-compatible API base URL; blank keeps AI summaries off |
+| `Enrichment:UsageSummaryModel` | `null` | Chat model id; blank keeps AI summaries off |
+| `SHIZU_USAGE_AI_KEY` | `null` | Bearer key for the summarizer (env only, like the forge tokens) |
+| `Enrichment:UsageSummaryMaxPerDay` | `200` | AI summary calls per UTC day; the deterministic template serves the rest |
+| `Enrichment:UsageSummaryTimeout` | `60s` | Summarizer HTTP timeout |
 | `Sync:ListPath` | `/opt/shizuappstore/list` | Local list clone |
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |
 | `Sync:NightlyTimeUtc` | `03:00` | Full re-check time (UTC) |

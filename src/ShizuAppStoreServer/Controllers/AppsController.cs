@@ -189,6 +189,7 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
             .Include(a => a.Category).ThenInclude(c => c!.Parent)
             .Include(a => a.Parent)
             .Include(a => a.Downloads)
+            .Include(a => a.Signals)
             .FirstOrDefaultAsync(a => a.Slug == slug && a.Availability != Availability.Excluded, ct);
 
         if (app is null)

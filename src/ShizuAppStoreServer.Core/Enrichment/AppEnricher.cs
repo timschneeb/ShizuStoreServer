@@ -89,7 +89,9 @@ public sealed class AppEnricher(
     ILogger<AppEnricher>? log = null,
     IRunLog? runLog = null,
     IRepoScreenshotResolver? repoScreenshots = null,
-    ITrackerCatalog? trackers = null)
+    ITrackerCatalog? trackers = null,
+    ISourceUsageClient? sourceUsage = null,
+    IUsageSummaryGenerator? usageSummary = null)
 {
     // Runtime progress lines land in the enrichment run log; without one
     // configured the no-op instance keeps tests and library use silent.
@@ -119,6 +121,10 @@ public sealed class AppEnricher(
     // Release notes and F-Droid long descriptions are unbounded too; the
     // changelog screen only needs a sane excerpt.
     private const int MaxChangelogChars = 100_000;
+
+    // Evidence rows are display garnish; a pathological APK cannot make the
+    // rebuild unbounded.
+    private const int MaxAppSignals = 64;
 
     // A row that has never captured release notes fetches unconditionally
     // once, so rows enriched before this field existed heal; afterwards the
@@ -213,6 +219,7 @@ public sealed class AppEnricher(
         // from the stored rows before anything else.
         await HealMissingPrimaryAsync(app, ct);
         await HealTrackerTagsAsync(app, ct);
+        await HealUsageAsync(app, now, ct);
 
         if (!force
             && app.LastCheckedAt is { } checkedAt
@@ -230,6 +237,10 @@ public sealed class AppEnricher(
         {
             var result = await DispatchAsync(app, now, ct);
             await ApplyScreenshotsAsync(app, now, ct);
+            if (result.Outcome is EnrichOutcome.Enriched or EnrichOutcome.UpToDate)
+            {
+                await ApplyUsageAsync(app, now, ct);
+            }
 
             // External-only Play apps never get an APK; give them the real
             // listing icon instead of a generated avatar and stop counting
@@ -678,7 +689,7 @@ public sealed class AppEnricher(
                 // below. A failing refetch is not an upstream change, so stay
                 // up-to-date instead of failing the pass.
                 var current = await PrimaryDownloadAsync(app, ct);
-                if (NeedsPermissionHeal(app, current) || NeedsSignalHeal(current))
+                if (NeedsPermissionHeal(app, current) || NeedsSignalHeal(current) || NeedsAnalysisHeal(current))
                 {
                     try
                     {
@@ -891,7 +902,7 @@ public sealed class AppEnricher(
                 // below. A failing refetch is not an upstream change, so stay
                 // up-to-date instead of failing the pass.
                 var current = await PrimaryDownloadAsync(app, ct);
-                if (NeedsPermissionHeal(app, current) || NeedsSignalHeal(current))
+                if (NeedsPermissionHeal(app, current) || NeedsSignalHeal(current) || NeedsAnalysisHeal(current))
                 {
                     try
                     {
@@ -1008,6 +1019,7 @@ public sealed class AppEnricher(
             && IconFileExists(row.IconHash)
             && !NeedsPermissionHeal(row, download)
             && !NeedsSignalHeal(download)
+            && !NeedsAnalysisHeal(download)
             && !ReleasedNewerThan(releasedAt, row);
 
         void Stamp(App row)
@@ -1254,6 +1266,12 @@ public sealed class AppEnricher(
                 TargetSdk: analysis.Badging.TargetSdk,
                 CompileSdk: analysis.Badging.CompileSdk,
                 Locales: analysis.Badging.Locales,
+                Abis: analysis.Badging.Abis,
+                LocalizedLabels: LocalizedLabelEntries(analysis.Badging.LocalizedLabels),
+                SignerDn: analysis.Signers.Dn,
+                SignerScheme: analysis.Signers.Scheme,
+                SignerKeyAlgorithm: analysis.Signers.KeyAlgorithm,
+                AnalysisVersion: CurrentAnalysisVersion,
                 Inspection: analysis.Inspection,
                 PackageName: analysis.Badging.PackageName, Analyzed: true), now, ct);
         }
@@ -2052,6 +2070,25 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
+    /// Extraction generation of the current binary. Bump it whenever the
+    /// analysis gains a persisted field: rows older than this are re-analyzed
+    /// once so the new field backfills (see <see cref="NeedsAnalysisHeal"/>).
+    /// </summary>
+    public const int CurrentAnalysisVersion = 1;
+
+    /// <summary>
+    /// Pre-versioning rows recorded a fully analyzed build but predate one or
+    /// more current extraction fields (full ABI set, localized labels, signer
+    /// details); the same-asset short-circuits would keep them empty forever,
+    /// so re-analyze once. Index-only rows never ran an analysis and stay
+    /// untouched.
+    /// </summary>
+    private static bool NeedsAnalysisHeal(AppDownload? primary) =>
+        primary is not null
+        && primary.Analyzed
+        && primary.AnalysisVersion < CurrentAnalysisVersion;
+
+    /// <summary>
     /// Pre-fix rows recorded a fully analyzed build but never persisted its
     /// permissions (the F-Droid path never wrote them); the same-asset
     /// short-circuits would keep them blank forever, so re-analyze once. Only
@@ -2087,6 +2124,37 @@ public sealed class AppEnricher(
         primary is not null
         && primary.Analyzed
         && !primary.Inspected;
+
+    /// <summary>
+    /// Classification generation of the Shizuku usage pass. Bump it whenever
+    /// the scanner markers or the stored shape change: rows older than this
+    /// are re-resolved once so the new fields backfill.
+    /// </summary>
+    public const int CurrentUsageVersion = 1;
+
+    /// <summary>
+    /// Prompt and validation generation of the usage summary. Bump it when the
+    /// prompt contract changes so cached summaries regenerate.
+    /// </summary>
+    public const int CurrentUsageSummaryVersion = 1;
+
+    /// <summary>
+    /// Rows analyzed before the usage pass ran have no classification yet; the
+    /// same-asset short-circuits would keep them empty forever, so resolve
+    /// them once. Index-only rows have no APK evidence but can still be
+    /// classified from the source scan.
+    /// </summary>
+    private static bool NeedsUsageHeal(AppDownload? primary) =>
+        primary is not null
+        && primary.UsageVersion < CurrentUsageVersion;
+
+    /// <summary>
+    /// True when the usage classification is stale or the source scan never
+    /// completed; transient source fetch failures retry on the next pass.
+    /// </summary>
+    private static bool NeedsUsageResolve(AppDownload? primary) =>
+        primary is not null
+        && (primary.UsageVersion < CurrentUsageVersion || !primary.UsageSourceScanned);
 
     /// <summary>
     /// The top-level GitLab namespace (group or user) is a stable developer
@@ -2224,6 +2292,12 @@ public sealed class AppEnricher(
         int? TargetSdk = null,
         int? CompileSdk = null,
         IReadOnlyList<string>? Locales = null,
+        IReadOnlyList<string>? Abis = null,
+        IReadOnlyList<string>? LocalizedLabels = null,
+        string? SignerDn = null,
+        string? SignerScheme = null,
+        string? SignerKeyAlgorithm = null,
+        int AnalysisVersion = 0,
         ApkInspection? Inspection = null);
 
     /// <summary>
@@ -2239,6 +2313,13 @@ public sealed class AppEnricher(
 
     private static string? FirstFingerprint(string? value) =>
         value?.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.ToLowerInvariant();
+
+    /// <summary>
+    /// Encodes localized labels as <c>locale=label</c> entries for the
+    /// newline-joined column, preserving dictionary order.
+    /// </summary>
+    private static List<string> LocalizedLabelEntries(IReadOnlyDictionary<string, string> labels) =>
+        labels.Select(kv => $"{kv.Key}={kv.Value}").ToList();
 
     /// <summary>
     /// Compares two artifact checksums, tolerating a <c>algo:</c> prefix and
@@ -2371,6 +2452,12 @@ public sealed class AppEnricher(
         row.VersionCode = candidate.VersionCode;
         row.VersionName = candidate.VersionName;
         row.SizeBytes = candidate.SizeBytes;
+        // A new artifact invalidates the stored usage classification: the
+        // evidence rows are rebuilt and the summary regenerated by the usage
+        // pass once this update is saved.
+        var apkChanged = candidate.Sha256 is not null
+            && row.Sha256 is not null
+            && !HashMatches(row.Sha256, candidate.Sha256);
         row.Sha256 = candidate.Sha256;
         // Index-only candidates carry no fingerprints; never clear what a
         // previous analysis established.
@@ -2389,6 +2476,38 @@ public sealed class AppEnricher(
             row.Locales = candidate.Locales.ToList();
         }
 
+        if (candidate.Abis is { Count: > 0 })
+        {
+            row.Abis = candidate.Abis.ToList();
+        }
+
+        if (candidate.LocalizedLabels is { Count: > 0 })
+        {
+            row.LocalizedLabels = candidate.LocalizedLabels.ToList();
+        }
+
+        // Signer detail and the extraction generation only come from a real
+        // analysis; index-only updates keep the last recorded values.
+        row.SignerDn = candidate.SignerDn ?? row.SignerDn;
+        row.SignerScheme = candidate.SignerScheme ?? row.SignerScheme;
+        row.SignerKeyAlgorithm = candidate.SignerKeyAlgorithm ?? row.SignerKeyAlgorithm;
+        row.AnalysisVersion = Math.Max(row.AnalysisVersion, candidate.AnalysisVersion);
+
+        if (apkChanged)
+        {
+            row.UsageVersion = 0;
+            row.UsageSourceScanned = false;
+            row.Managers = [];
+            row.ApiForm = null;
+            row.Capabilities = [];
+            row.UsageOptional = false;
+            row.UsageEvidence = [];
+            row.UsageSummary = null;
+            row.UsageSummaryModel = null;
+            row.UsageSummaryHash = null;
+            row.UsageSummaryVersion = 0;
+        }
+
         // Signals come from a real inspection only; an index-only update
         // keeps whatever the last analysis recorded. The inspected flag marks
         // that a signal scan ran and is never downgraded.
@@ -2403,6 +2522,18 @@ public sealed class AppEnricher(
             row.TrackerTags = candidate.Inspection.Trackers
                 .SelectMany(t => t.Tags.Select(tag => $"{t.Name}:{tag}"))
                 .Distinct(StringComparer.Ordinal).ToList();
+
+            // The APK evidence feeds the usage pass, which owns the final
+            // classification; a stored generation reset makes it re-derive.
+            if (!candidate.Inspection.Usage.IsEmpty)
+            {
+                row.Managers = candidate.Inspection.Usage.Managers.ToList();
+                row.ApiForm = candidate.Inspection.Usage.ApiForm;
+                row.Capabilities = candidate.Inspection.Usage.Capabilities.ToList();
+                row.UsageOptional = candidate.Inspection.Usage.Optional;
+                row.UsageEvidence = ShizukuUsageScanner.Encode(candidate.Inspection.Usage.Evidence);
+                row.UsageVersion = 0;
+            }
         }
 
         row.Abi = candidate.Abi;
@@ -2540,6 +2671,158 @@ public sealed class AppEnricher(
 
         primary.TrackerTags = tags;
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Rows that predate the usage pass carry no classification. The APK
+    /// evidence is already stored on the row, so the pass runs without a new
+    /// analysis; the source repo is only read while the scan has not
+    /// completed. Saves itself, like the other heals.
+    /// </summary>
+    private async Task HealUsageAsync(App app, DateTimeOffset now, CancellationToken ct)
+    {
+        var primary = await PrimaryDownloadAsync(app, ct);
+        if (!NeedsUsageHeal(primary))
+        {
+            return;
+        }
+
+        await ResolveUsageAsync(app, primary!, now, ct);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Runs the usage pass after a completed dispatch. Skipped while the row
+    /// is current and its source scan completed; a fresh APK resets the
+    /// generation in <see cref="UpsertDownloadAsync"/> so it re-derives.
+    /// </summary>
+    private async Task ApplyUsageAsync(App app, DateTimeOffset now, CancellationToken ct)
+    {
+        var primary = await PrimaryDownloadAsync(app, ct);
+        if (!NeedsUsageResolve(primary))
+        {
+            return;
+        }
+
+        await ResolveUsageAsync(app, primary!, now, ct);
+    }
+
+    /// <summary>
+    /// Merges the stored APK evidence with a bounded source scan, writes the
+    /// classification columns, rebuilds the evidence rows and refreshes the
+    /// summary. Never throws: a failed source scan leaves the APK evidence in
+    /// place and retries on a later pass.
+    /// </summary>
+    private async Task ResolveUsageAsync(App app, AppDownload primary, DateTimeOffset now, CancellationToken ct)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var existing = ShizukuUsageScanner.FromEvidence(primary.UsageEvidence);
+        var merged = existing;
+        var scanned = primary.UsageSourceScanned || sourceUsage is null;
+        if (sourceUsage is not null && !primary.UsageSourceScanned)
+        {
+            try
+            {
+                var result = await sourceUsage.ScanAsync(app, ct);
+                scanned = result.Scanned;
+                merged = ShizukuUsageScanner.Merge(existing, result.Usage);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                scanned = false;
+                log?.LogDebug(ex, "Source usage scan failed for {Slug}.", app.Slug);
+            }
+        }
+
+        primary.Managers = merged.Managers.ToList();
+        primary.ApiForm = merged.ApiForm;
+        primary.Capabilities = merged.Capabilities.ToList();
+        primary.UsageOptional = merged.Optional;
+        primary.UsageEvidence = ShizukuUsageScanner.Encode(merged.Evidence);
+        primary.UsageVersion = CurrentUsageVersion;
+        primary.UsageSourceScanned = primary.UsageSourceScanned || scanned;
+
+        RebuildSignals(app, merged, now);
+        await RefreshUsageSummaryAsync(app, primary, merged, ct);
+
+        _runLog.Detail($"usage {app.Slug} managers={merged.Managers.Count} "
+            + $"caps={merged.Capabilities.Count} evidence={merged.Evidence.Count} "
+            + $"source={(scanned ? "scanned" : "pending")} in {Elapsed(started)}ms");
+    }
+
+    /// <summary>
+    /// The evidence rows mirror the stored classification for the detail API;
+    /// they are rebuilt from scratch so a merge cannot leave stale rows.
+    /// </summary>
+    private void RebuildSignals(App app, ShizukuUsage usage, DateTimeOffset now)
+    {
+        if (app.Id != 0)
+        {
+            db.AppSignals.RemoveRange(db.AppSignals.Where(s => s.AppId == app.Id));
+        }
+
+        foreach (var evidence in usage.Evidence.Take(MaxAppSignals))
+        {
+            db.AppSignals.Add(new AppSignal
+            {
+                App = app,
+                Kind = evidence.Kind,
+                Value = evidence.Value,
+                Source = evidence.Source,
+                Confidence = evidence.Confidence,
+                DetectedAt = now,
+            });
+        }
+    }
+
+    /// <summary>
+    /// Refreshes the human-readable summary from the deterministic bundle.
+    /// The AI generator is best-effort: it only runs with strong evidence,
+    /// and any failure falls back to the template so the field is never
+    /// empty for a classified app. The cache key is the bundle hash plus the
+    /// prompt generation.
+    /// </summary>
+    private async Task RefreshUsageSummaryAsync(App app, AppDownload primary, ShizukuUsage usage, CancellationToken ct)
+    {
+        if (usage.IsEmpty)
+        {
+            primary.UsageSummary = null;
+            primary.UsageSummaryModel = null;
+            primary.UsageSummaryHash = null;
+            primary.UsageSummaryVersion = CurrentUsageSummaryVersion;
+            return;
+        }
+
+        var bundle = new UsageSummaryBundle(
+            primary.PackageName ?? app.PackageName ?? app.Slug,
+            primary.VersionName,
+            primary.VersionCode,
+            primary.Sha256,
+            usage.Managers,
+            usage.ApiForm,
+            usage.Capabilities,
+            usage.Optional,
+            usage.Evidence);
+        var hash = bundle.Hash();
+        var stale = primary.UsageSummary is null
+            || primary.UsageSummaryVersion < CurrentUsageSummaryVersion
+            || primary.UsageSummaryHash != hash;
+        if (!stale)
+        {
+            return;
+        }
+
+        UsageSummaryResult? generated = null;
+        if (usageSummary is { Enabled: true } && usage.Evidence.Any(e => e.IsStrong))
+        {
+            generated = await usageSummary.GenerateAsync(bundle, ct);
+        }
+
+        var fallback = UsageSummaryTemplate.Build(bundle);
+        primary.UsageSummary = generated?.Text ?? fallback.Text;
+        primary.UsageSummaryModel = generated?.Model ?? fallback.Model;
+        primary.UsageSummaryHash = hash;
+        primary.UsageSummaryVersion = CurrentUsageSummaryVersion;
     }
 
     private static AppDownload PreferDownload(AppDownload a, AppDownload b)
@@ -2726,6 +3009,7 @@ public sealed class AppEnricher(
             var primary = await PrimaryDownloadAsync(app, ct);
             if (NeedsPermissionHeal(app, primary)
                 || NeedsSignalHeal(primary)
+                || NeedsAnalysisHeal(primary)
                 || (primary is not null && !primary.Analyzed && primary.SigSha256 is null))
             {
                 try
@@ -2784,6 +3068,7 @@ public sealed class AppEnricher(
             && !NeedsPermissionHeal(app, current)
             && !NeedsSignerBackfill(current, package)
             && !NeedsSignalHeal(current)
+            && !NeedsAnalysisHeal(current)
             && siblingsRecorded)
         {
             app.EnrichEtag = indexEtag;
@@ -2815,10 +3100,10 @@ public sealed class AppEnricher(
         // analyzed APK wins because it reflects the actual file.
         var sigSha256 = analyzed is null
             ? package.SigSha256
-            : CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
+            : CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Sha256));
         var sigMd5 = analyzed is null
             ? null
-            : CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5));
+            : CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Md5));
 
         await UpsertDownloadAsync(app, new DownloadCandidate(
             kind,
@@ -2836,6 +3121,12 @@ public sealed class AppEnricher(
             TargetSdk: analyzed?.Badging.TargetSdk,
             CompileSdk: analyzed?.Badging.CompileSdk,
             Locales: analyzed?.Badging.Locales,
+            Abis: analyzed?.Badging.Abis,
+            LocalizedLabels: analyzed is null ? null : LocalizedLabelEntries(analyzed.Badging.LocalizedLabels),
+            SignerDn: analyzed?.Signers.Dn,
+            SignerScheme: analyzed?.Signers.Scheme,
+            SignerKeyAlgorithm: analyzed?.Signers.KeyAlgorithm,
+            AnalysisVersion: analyzed is null ? 0 : CurrentAnalysisVersion,
             Inspection: analyzed?.Inspection,
             PackageName: package.PackageName, Analyzed: analyzed is not null), now, ct);
         await RecomputePrimaryAsync(app, ct, package.PackageName);
@@ -2950,13 +3241,19 @@ public sealed class AppEnricher(
                 analyzed.Badging.VersionName,
                 analyzed.FileSize,
                 analyzed.FileSha256,
-                CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256)),
-                CertFingerprint.Join(analyzed.Signers.Select(s => s.Md5)),
+                CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Sha256)),
+                CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Md5)),
                 analyzed.Badging.MinSdk,
                 analyzed.Badging.Abi,
                 TargetSdk: analyzed.Badging.TargetSdk,
                 CompileSdk: analyzed.Badging.CompileSdk,
                 Locales: analyzed.Badging.Locales,
+                Abis: analyzed.Badging.Abis,
+                LocalizedLabels: LocalizedLabelEntries(analyzed.Badging.LocalizedLabels),
+                SignerDn: analyzed.Signers.Dn,
+                SignerScheme: analyzed.Signers.Scheme,
+                SignerKeyAlgorithm: analyzed.Signers.KeyAlgorithm,
+                AnalysisVersion: CurrentAnalysisVersion,
                 Inspection: analyzed.Inspection,
                 PackageName: package.PackageName, Analyzed: true)
             : new DownloadCandidate(
@@ -3045,7 +3342,7 @@ public sealed class AppEnricher(
         BadgingInfo Badging,
         string FileSha256,
         long FileSize,
-        IReadOnlyList<SignerCertificates> Signers,
+        ApkSignerInfo Signers,
         ApkInspection Inspection) : IDisposable
     {
         public void Dispose()
@@ -3060,7 +3357,7 @@ public sealed class AppEnricher(
     /// null when no analysis ran (index-only rows), so those never overwrite
     /// what an earlier analysis recorded.
     /// </summary>
-    private sealed record ApkInspection(ApkSignals Signals, IReadOnlyList<TrackerHit> Trackers);
+    private sealed record ApkInspection(ApkSignals Signals, IReadOnlyList<TrackerHit> Trackers, ShizukuUsage Usage);
 
     private sealed record ArtifactAnalysis(
         string ArtifactUrl,
@@ -3074,7 +3371,8 @@ public sealed class AppEnricher(
         string? SigMd5,
         DateTimeOffset? ReleasedAt,
         ProcessedIcon? Icon,
-        ApkInspection Inspection);
+        ApkInspection Inspection,
+        ApkSignerInfo Signers);
 
     /// <summary>
     /// Outcome of downloading and analyzing one artifact. <c>Unchanged</c> is
@@ -3210,8 +3508,8 @@ public sealed class AppEnricher(
 
         var signerStarted = Stopwatch.GetTimestamp();
         var signers = await TryExtractSignersAsync(apkPath, ct);
-        var sigSha256 = CertFingerprint.Join(signers.Select(s => s.Sha256));
-        var sigMd5 = CertFingerprint.Join(signers.Select(s => s.Md5));
+        var sigSha256 = CertFingerprint.Join(signers.Signers.Select(s => s.Sha256));
+        var sigMd5 = CertFingerprint.Join(signers.Signers.Select(s => s.Md5));
         var signalsStarted = Stopwatch.GetTimestamp();
         var inspection = await InspectApkAsync(apkPath, badging, ct);
         var iconStarted = Stopwatch.GetTimestamp();
@@ -3222,7 +3520,7 @@ public sealed class AppEnricher(
 
         return new ArtifactResult(new ArtifactAnalysis(
             artifactUrl, archiveEntry, lockSource, etag, badging, artifactSha256, artifactSize,
-            sigSha256, sigMd5, releasedAt, icon, inspection), false, null);
+            sigSha256, sigMd5, releasedAt, icon, inspection, signers), false, null);
     }
 
     /// <summary>
@@ -3235,6 +3533,10 @@ public sealed class AppEnricher(
     {
         var started = Stopwatch.GetTimestamp();
         var signals = ShizukuSignalScanner.Scan(badging.Permissions);
+        var dexText = TrackerScanner.ReadDexText(apkPath);
+        var usage = ShizukuUsageScanner.Merge(
+            ShizukuUsageScanner.ScanPermissions(badging.Permissions, "apk"),
+            ShizukuUsageScanner.ScanDexText(dexText));
 
         IReadOnlyList<TrackerHit> hits = [];
         if (trackers is not null)
@@ -3242,7 +3544,7 @@ public sealed class AppEnricher(
             try
             {
                 var catalog = await trackers.GetAsync(ct);
-                hits = TrackerScanner.ScanApk(apkPath, catalog);
+                hits = TrackerScanner.ScanText(dexText, catalog);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3251,8 +3553,9 @@ public sealed class AppEnricher(
         }
 
         _runLog.Detail($"inspect {Path.GetFileName(apkPath)} dhizuku={signals.DhizukuDeclared} "
-            + $"trackers={hits.Count} in {Elapsed(started)}ms");
-        return new ApkInspection(signals, hits);
+            + $"trackers={hits.Count} managers={usage.Managers.Count} caps={usage.Capabilities.Count} "
+            + $"in {Elapsed(started)}ms");
+        return new ApkInspection(signals, hits, usage);
     }
 
     /// <summary>
@@ -3314,6 +3617,7 @@ public sealed class AppEnricher(
             && app.IconHash is not null
             && IconFileExists(app.IconHash)
             && !NeedsPermissionHeal(app, row)
+            && !NeedsAnalysisHeal(row)
                 ? row.Sha256
                 : null;
     }
@@ -3776,10 +4080,10 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
-    /// Best-effort signer fingerprints (empty when apksigner is missing, Java
-    /// is absent, or the APK is unsigned). Never fails enrichment.
+    /// Best-effort signer facts (none when apksigner is missing, Java is
+    /// absent, or the APK is unsigned). Never fails enrichment.
     /// </summary>
-    private async Task<IReadOnlyList<SignerCertificates>> TryExtractSignersAsync(string apkPath, CancellationToken ct)
+    private async Task<ApkSignerInfo> TryExtractSignersAsync(string apkPath, CancellationToken ct)
     {
         try
         {
@@ -3787,7 +4091,7 @@ public sealed class AppEnricher(
         }
         catch (Exception ex) when (ex is ApkSignerException or ApkSignerParseException)
         {
-            return [];
+            return ApkSignerInfo.None;
         }
     }
 

@@ -11,6 +11,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<App> Apps => Set<App>();
     public DbSet<AppVersion> AppVersions => Set<AppVersion>();
     public DbSet<AppDownload> Downloads => Set<AppDownload>();
+    public DbSet<AppSignal> AppSignals => Set<AppSignal>();
     public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
     public DbSet<SyncIssue> SyncIssues => Set<SyncIssue>();
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
@@ -255,6 +256,28 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             MapNewlineList(e, x => x.Trackers, "trackers");
             MapNewlineList(e, x => x.TrackerSignatures, "tracker_signatures");
             MapNewlineList(e, x => x.TrackerTags, "tracker_tags");
+            MapNewlineList(e, x => x.Abis, "abis");
+            // Localized labels are "locale=label" entries: the first '='
+            // separates, so a label containing '=' survives intact.
+            MapNewlineList(e, x => x.LocalizedLabels, "localized_labels");
+            e.Property(x => x.SignerDn).HasColumnName("signer_dn");
+            e.Property(x => x.SignerScheme).HasColumnName("signer_scheme").HasMaxLength(64);
+            e.Property(x => x.SignerKeyAlgorithm).HasColumnName("signer_key_algorithm").HasMaxLength(64);
+            e.Property(x => x.AnalysisVersion).HasColumnName("analysis_version");
+            // Shizuku usage classification: fixed columns for filtering and
+            // evidence strings for the details card.
+            MapNewlineList(e, x => x.Managers, "managers");
+            e.Property(x => x.ApiForm).HasColumnName("api_form").HasMaxLength(32);
+            MapNewlineList(e, x => x.Capabilities, "capabilities");
+            e.Property(x => x.UsageOptional).HasColumnName("usage_optional");
+            e.Property(x => x.UsageSourceScanned).HasColumnName("usage_source_scanned");
+            e.Property(x => x.UsageVersion).HasColumnName("usage_version");
+            // "kind|value|source|confidence" entries.
+            MapNewlineList(e, x => x.UsageEvidence, "usage_evidence");
+            e.Property(x => x.UsageSummary).HasColumnName("usage_summary");
+            e.Property(x => x.UsageSummaryModel).HasColumnName("usage_summary_model").HasMaxLength(64);
+            e.Property(x => x.UsageSummaryHash).HasColumnName("usage_summary_hash").HasMaxLength(64);
+            e.Property(x => x.UsageSummaryVersion).HasColumnName("usage_summary_version");
             e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
             e.Property(x => x.Analyzed).HasColumnName("analyzed");
@@ -266,6 +289,21 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.HasIndex(x => new { x.AppId, x.PackageName, x.SigKey, x.Abi }).IsUnique().AreNullsDistinct(false);
             // At most one primary candidate per app; recomputed on every upsert.
             e.HasIndex(x => x.AppId).IsUnique().HasFilter("is_primary");
+        });
+
+        b.Entity<AppSignal>(e =>
+        {
+            e.ToTable("app_signals");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.AppId).HasColumnName("app_id");
+            e.HasOne(x => x.App).WithMany(x => x.Signals).HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Kind).HasColumnName("kind").HasMaxLength(32).IsRequired();
+            e.Property(x => x.Value).HasColumnName("value").HasMaxLength(256).IsRequired();
+            e.Property(x => x.Source).HasColumnName("source").HasMaxLength(16).IsRequired();
+            e.Property(x => x.Confidence).HasColumnName("confidence").HasMaxLength(16).IsRequired();
+            e.Property(x => x.DetectedAt).HasColumnName("detected_at").IsRequired();
+            e.HasIndex(x => x.AppId);
         });
 
         b.Entity<AppVersion>(e =>

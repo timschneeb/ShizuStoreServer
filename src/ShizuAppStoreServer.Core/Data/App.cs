@@ -214,4 +214,7 @@ public sealed class App
 
     /// <summary>Installable build candidates: one row per signing identity.</summary>
     public List<AppDownload> Downloads { get; } = [];
+
+    /// <summary>Evidence rows behind the Shizuku usage classification.</summary>
+    public List<AppSignal> Signals { get; } = [];
 }

@@ -82,17 +82,35 @@ factor is the app.
 
 - package name, version code, version name
 - minimum SDK, target SDK, compile SDK and the declared locale list
-- application label
+- application label and every `application-label-<locale>` string
 - requested permissions
-- native ABI code
+- native ABI code (the primary ABI and the full native-code list)
 - required features, used to detect TV and Wear builds
-- signing certificate
+- signing certificate, its DN, key algorithm and size, and the verified
+  signature schemes (v1..v4)
 - the declared Dhizuku permission, if any
+- Shizuku usage: manager support (Shizuku, Dhizuku, Sui, root), the integration
+  form (modern user service, legacy new process, permission flow), capability
+  hints from shell command strings (install, uninstall, freeze, AppOps, system
+  and power settings, process control, diagnostics, reboot, wireless ADB
+  pairing, app compilation) and fallback markers that suggest Shizuku is
+  optional
+- a bounded source scan of the app's forge repository (repository tree plus
+  selected manifest, Kotlin/Java/AIDL, Gradle and ProGuard files; never a
+  clone), merged with the APK markers
 - Exodus tracker code signatures matched in the DEX, with each tracker's
   category tags
 
 The application label becomes the display name for the store entry. 
 The awesome-shizuku list name is only used when no APK label is known.
+When an APK ships localized application labels, clients swap the
+displayed name per device locale in lists and details; the default label
+stays the fallback. List payloads carry only the labels that differ from
+the display name, so unchanged strings do not inflate the catalog.
+
+Signature details are display-only: selection still matches fingerprint
+sets, and the DN, key algorithm and schemes let clients show what signed
+the build (including rotations, where every distinct DN is kept).
 
 Tracker detection matches only the Exodus code signatures (class-name
 prefixes in the DEX string pool); the server performs no network analysis, so
@@ -102,6 +120,16 @@ Advertisement, ...), so clients can show which kind of tracking a tracker
 does. The Dhizuku flag means the build declares a
 `com.rosan.dhizuku.permission.*` permission; the Shizuku permission is not
 tracked because nearly every app declares it.
+
+Shizuku capability hints describe what an app can do with a granted manager,
+never what it does: a shell command string proves the app is able to run that
+operation, not that it ever runs it. The server ships a deterministic summary
+built from the detected markers. When an OpenAI-compatible endpoint is
+configured, a model may replace that summary, but only with claims that cite
+evidence ids which are validated against the evidence bundle; otherwise the
+template text stands. The source scan is bounded (a few files per app, no
+clone) and best-effort: a failed tree fetch leaves the row pending so a later
+pass retries, and APK markers alone still produce a classification.
 
 ### Icons
 

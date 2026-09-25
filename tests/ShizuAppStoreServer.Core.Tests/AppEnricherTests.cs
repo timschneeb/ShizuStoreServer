@@ -245,6 +245,30 @@ public sealed class AppEnricherTests : IDisposable
         return _db.Apps.Include(a => a.Versions).Single(a => a.Slug == slug);
     }
 
+    private sealed class FakeSourceUsage(SourceUsageResult result) : ISourceUsageClient
+    {
+        public int Calls { get; private set; }
+
+        public Task<SourceUsageResult> ScanAsync(App app, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class FakeUsageSummary(UsageSummaryResult? result, bool enabled = true) : IUsageSummaryGenerator
+    {
+        public int Calls { get; private set; }
+
+        public bool Enabled { get; } = enabled;
+
+        public Task<UsageSummaryResult?> GenerateAsync(UsageSummaryBundle bundle, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(result);
+        }
+    }
+
     // Most tests only need an empty repo index so package and screenshot
     // lookups stay a fast no-op.
     private static readonly string EmptyIndexV2Json = """{"packages":{}}""";
@@ -261,7 +285,9 @@ public sealed class AppEnricherTests : IDisposable
         IPlayStoreClient? play = null,
         IzzyStatsProvider? izzyStats = null,
         IRepoScreenshotResolver? repoScreenshots = null,
-        ITrackerCatalog? trackers = null) =>
+        ITrackerCatalog? trackers = null,
+        ISourceUsageClient? sourceUsage = null,
+        IUsageSummaryGenerator? usageSummary = null) =>
         new(new GitHubReleaseClient(new HttpClient(github), "tok"),
             new GitLabReleaseClient(new HttpClient(gitlab ?? new StubHandler(_ =>
                 throw new InvalidOperationException("must not call GitLab")))),
@@ -274,7 +300,8 @@ public sealed class AppEnricherTests : IDisposable
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
             launcherIcons ?? new LauncherIconService(),
             new HttpClient(downloads), _options, _db, gitcode, play, izzyStats,
-            repoScreenshots: repoScreenshots, trackers: trackers);
+            repoScreenshots: repoScreenshots, trackers: trackers,
+            sourceUsage: sourceUsage, usageSummary: usageSummary);
 
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
@@ -753,6 +780,206 @@ public sealed class AppEnricherTests : IDisposable
         var (second, _, downloads2) = FdroidHappyPath();
         Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(0, downloads2.Calls);
+    }
+
+    [Fact]
+    public async Task EnrichmentPersistsApkUsageEvidenceAndTemplateSummary()
+    {
+        // A Shizuku class descriptor plus the modern user-service call: enough
+        // for the scanner to classify the app without a source scan.
+        var dex = "Lrikka/shizuku/Shizuku; bindUserService"u8.ToArray();
+        var zip = TestAssets.BuildApk(
+            ("classes.dex", dex),
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2);
+        var app = NewApp("usageapp", "UsageApp", "https://github.com/example/usageapp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var primary = Primary(app);
+        Assert.Equal(["shizuku"], primary.Managers);
+        Assert.Equal("user_service", primary.ApiForm);
+        Assert.Contains(primary.UsageEvidence, e => e.Contains("|apk|") && e.Contains("bindUserService"));
+        Assert.Equal(1, primary.UsageVersion);
+        Assert.True(primary.UsageSourceScanned);
+        Assert.False(primary.UsageOptional);
+        // No generator is configured, so the deterministic template ships.
+        Assert.NotNull(primary.UsageSummary);
+        Assert.Equal(UsageSummaryTemplate.ModelId, primary.UsageSummaryModel);
+        Assert.Contains("Shizuku", primary.UsageSummary);
+        // Evidence rows back the detail endpoint.
+        Assert.Contains(_db.AppSignals.Local,
+            s => s.Kind == "marker" && s.Value.Contains("bindUserService"));
+    }
+
+    [Fact]
+    public async Task AppsWithoutShizukuUsageKeepAnEmptySummary()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("nousage", "NoUsage", "https://github.com/example/nousage");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var primary = Primary(app);
+        Assert.Empty(primary.Managers);
+        Assert.Empty(primary.Capabilities);
+        Assert.Equal(1, primary.UsageVersion);
+        Assert.True(primary.UsageSourceScanned);
+        Assert.Null(primary.UsageSummary);
+    }
+
+    [Fact]
+    public async Task UsageHealScansSourcesForRowsAnalyzedBeforeTheFeature()
+    {
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not fetch releases"));
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var sourceUsage = new FakeSourceUsage(new SourceUsageResult(
+            ShizukuUsageScanner.ScanPermissions(["moe.shizuku.manager.permission.API_V23"], "source"),
+            true));
+        var enricher = BuildEnricher(github, downloads, aapt2, sourceUsage: sourceUsage);
+        var app = NewApp("usageheal", "UsageHeal", "https://github.com/example/usageheal");
+        var primary = AddDownload(app, SourceKind.GitHub, "https://cdn.example/usageheal.apk",
+            versionCode: 42, sha256: new string('a', 64));
+        primary.Analyzed = true;
+        await _db.SaveChangesAsync();
+        app.LastCheckedAt = T0;
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        // Inside the recheck window, but the pre-feature row still heals once.
+        Assert.Equal(EnrichOutcome.SkippedFresh, result.Outcome);
+        Assert.Equal(1, sourceUsage.Calls);
+        Assert.Equal(["shizuku"], primary.Managers);
+        Assert.Equal(1, primary.UsageVersion);
+        Assert.True(primary.UsageSourceScanned);
+        Assert.Equal(0, github.Calls + downloads.Calls);
+    }
+
+    [Fact]
+    public async Task SourceUsageMergesWithApkEvidence()
+    {
+        var dex = "com.topjohnwu.superuser.Shell"u8.ToArray();
+        var zip = TestAssets.BuildApk(
+            ("classes.dex", dex),
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var sourceUsage = new FakeSourceUsage(new SourceUsageResult(
+            ShizukuUsageScanner.ScanFiles([("Main.kt", "rikka.shizuku.Shizuku.bindUserService(args)")]),
+            true));
+        var enricher = BuildEnricher(github, downloads, aapt2, sourceUsage: sourceUsage);
+        var app = NewApp("usagemerge", "UsageMerge", "https://github.com/example/usagemerge");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, sourceUsage.Calls);
+        var primary = Primary(app);
+        // DEX says root, the source says Shizuku; both must survive the merge.
+        Assert.Equal(["shizuku", "root"], primary.Managers);
+        Assert.Equal("user_service", primary.ApiForm);
+        Assert.Contains(primary.UsageEvidence, e => e.Contains("|source|"));
+        Assert.Contains(primary.UsageEvidence, e => e.Contains("|apk|"));
+    }
+
+    [Fact]
+    public async Task NewArtifactHashResetsStoredUsage()
+    {
+        var (first, _, _, _, _) = HappyPath();
+        var app = NewApp("usagereset", "UsageReset", "https://github.com/example/usagereset");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(1, Primary(app).UsageVersion);
+
+        // Simulate an older classification that must not leak across APK updates.
+        var stale = Primary(app);
+        stale.Managers = ["dhizuku"];
+        stale.UsageSummary = "Old summary";
+        stale.UsageSummaryModel = "old-model";
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        // A different icon changes the artifact hash, so the row is a new APK.
+        // The asset URL embeds the tag on GitHub, so it must change too, and a
+        // fresh release ETag is needed else the forge pass reports UpToDate.
+        var (second, _, _, _, _) = HappyPath(
+            tag: "v1.1", versionCode: "43", iconColor: Color.Red,
+            etag: "\"rel-etag-2\"", assetUrl: "https://cdn.example/app-1.1.apk");
+        Assert.Equal(EnrichOutcome.Enriched, (await second.EnrichAsync(app, T0)).Outcome);
+
+        var updated = Primary(app);
+        Assert.Empty(updated.Managers);
+        Assert.Null(updated.UsageSummary);
+        Assert.Null(updated.UsageSummaryModel);
+        Assert.Equal(1, updated.UsageVersion);
+    }
+
+    [Fact]
+    public async Task UsageSummaryUsesTheGeneratorWhenItReturnsGroundedText()
+    {
+        var dex = "Lrikka/shizuku/Shizuku; bindUserService"u8.ToArray();
+        var zip = TestAssets.BuildApk(
+            ("classes.dex", dex),
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var generator = new FakeUsageSummary(new UsageSummaryResult("Can install apps.", "fake-model"));
+        var enricher = BuildEnricher(github, downloads, aapt2, usageSummary: generator);
+        var app = NewApp("usagegen", "UsageGen", "https://github.com/example/usagegen");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, generator.Calls);
+        var primary = Primary(app);
+        Assert.Equal("Can install apps.", primary.UsageSummary);
+        Assert.Equal("fake-model", primary.UsageSummaryModel);
+    }
+
+    [Fact]
+    public async Task UsageSummaryFallsBackToTemplateWhenGeneratorReturnsNothing()
+    {
+        var dex = "Lrikka/shizuku/Shizuku; bindUserService"u8.ToArray();
+        var zip = TestAssets.BuildApk(
+            ("classes.dex", dex),
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var generator = new FakeUsageSummary(result: null, enabled: true);
+        var enricher = BuildEnricher(github, downloads, aapt2, usageSummary: generator);
+        var app = NewApp("usagefallback", "UsageFallback", "https://github.com/example/usagefallback");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, generator.Calls);
+        var primary = Primary(app);
+        Assert.NotNull(primary.UsageSummary);
+        Assert.Equal(UsageSummaryTemplate.ModelId, primary.UsageSummaryModel);
     }
 
     [Fact]

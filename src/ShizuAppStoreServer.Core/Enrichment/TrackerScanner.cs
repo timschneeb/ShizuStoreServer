@@ -27,13 +27,16 @@ public static class TrackerScanner
     /// that cannot be opened scans as no hits (callers treat the tracker list
     /// as a garnish signal).
     /// </summary>
-    public static IReadOnlyList<TrackerHit> ScanApk(string apkPath, IReadOnlyList<TrackerSignature> catalog)
-    {
-        if (catalog.Count == 0)
-        {
-            return [];
-        }
+    public static IReadOnlyList<TrackerHit> ScanApk(string apkPath, IReadOnlyList<TrackerSignature> catalog) =>
+        catalog.Count == 0 ? [] : ScanText(ReadDexText(apkPath), catalog);
 
+    /// <summary>
+    /// Decoded <c>classes*.dex</c> text slices of the APK. Best-effort: an APK
+    /// that cannot be opened yields no slices. Shared with the Shizuku usage
+    /// scanner, which needs the same string pools.
+    /// </summary>
+    public static IReadOnlyList<string> ReadDexText(string apkPath)
+    {
         try
         {
             using var archive = ZipFile.OpenRead(apkPath);
@@ -48,7 +51,7 @@ public static class TrackerScanner
                 (text ??= []).Add(Decode(entry));
             }
 
-            return text is null ? [] : ScanText(text, catalog);
+            return text ?? [];
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
         {

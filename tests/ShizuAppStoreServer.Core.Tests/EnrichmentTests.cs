@@ -133,6 +133,24 @@ public sealed class BadgingParserTests
     }
 
     [Fact]
+    public void KeepsEveryNativeAbiAlongsideTheSingleValueIdentity()
+    {
+        var info = BadgingParser.Parse(
+            "package: name='com.x' versionCode='1'\nnative-code: 'arm64-v8a' 'armeabi-v7a'\n");
+
+        Assert.Null(info.Abi);
+        Assert.Equal(["arm64-v8a", "armeabi-v7a"], info.Abis);
+        Assert.Equal(["arm64-v8a"], BadgingParser.Parse(
+            "package: name='com.x' versionCode='1'\nnative-code: 'arm64-v8a'\n").Abis);
+    }
+
+    [Fact]
+    public void NoNativeCodeMeansNoAbis()
+    {
+        Assert.Empty(BadgingParser.Parse("package: name='com.x' versionCode='1'\n").Abis);
+    }
+
+    [Fact]
     public void ParsesApplicationLabel()
     {
         var info = BadgingParser.Parse(TestAssets.CannedBadging());
@@ -166,6 +184,46 @@ public sealed class BadgingParserTests
     [Fact]
     public void ApplicationLabelIsNullWhenMissing() =>
         Assert.Null(BadgingParser.Parse("package: name='com.x' versionCode='1'\n").ApplicationLabel);
+
+    [Fact]
+    public void ParsesLocalizedLabelsByQualifier()
+    {
+        const string output = """
+            package: name='com.x' versionCode='1'
+            application-label:'Plain Name'
+            application-label-de:'Lokalisierter Name'
+            application-label-en:'English Name'
+            application-label-b+zh+Hans:'Zhong Wen'
+            application-label-de:'Duplicate Loses'
+            """;
+
+        var info = BadgingParser.Parse(output);
+
+        Assert.Equal("Plain Name", info.ApplicationLabel);
+        Assert.Equal("Lokalisierter Name", info.LocalizedLabels["de"]);
+        Assert.Equal("English Name", info.LocalizedLabels["en"]);
+        Assert.Equal("Zhong Wen", info.LocalizedLabels["b+zh+Hans"]);
+        Assert.Equal(3, info.LocalizedLabels.Count);
+    }
+
+    [Fact]
+    public void LocalizedLabelsEmptyWithoutLocalizedLines()
+    {
+        var info = BadgingParser.Parse(TestAssets.CannedBadging());
+
+        Assert.Empty(info.LocalizedLabels);
+    }
+
+    [Fact]
+    public void LocalizedLabelFallbackStillFillsApplicationLabel()
+    {
+        const string output = """
+            package: name='com.x' versionCode='1'
+            application-label-en:'English Name'
+            """;
+
+        Assert.Equal("English Name", BadgingParser.Parse(output).ApplicationLabel);
+    }
 
     [Fact]
     public void ParsesRequiredFeaturesAndIgnoresNotRequired()

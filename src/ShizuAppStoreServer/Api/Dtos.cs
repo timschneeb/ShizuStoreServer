@@ -37,6 +37,9 @@ public sealed record AppSummaryDto(
     int? TargetSdk = null,
     int? CompileSdk = null,
     int? LocaleCount = null,
+    IReadOnlyList<string>? Abis = null,
+    IReadOnlyDictionary<string, string>? LocalizedLabels = null,
+    IReadOnlyList<string>? Managers = null,
     bool DhizukuDeclared = false,
     IReadOnlyList<string>? Trackers = null,
     IReadOnlyList<TrackerTagDto>? TrackerTags = null);
@@ -66,6 +69,11 @@ public sealed record DownloadDto(
     int? TargetSdk = null,
     int? CompileSdk = null,
     IReadOnlyList<string>? Locales = null,
+    IReadOnlyList<string>? Abis = null,
+    IReadOnlyDictionary<string, string>? LocalizedLabels = null,
+    string? SignerDn = null,
+    string? SignerScheme = null,
+    string? SignerKeyAlgorithm = null,
     bool DhizukuDeclared = false,
     IReadOnlyList<string>? Trackers = null,
     IReadOnlyList<TrackerTagDto>? TrackerTags = null);
@@ -123,6 +131,13 @@ public sealed record AppDetailDto(
     int? CompileSdk = null,
     int? LocaleCount = null,
     IReadOnlyList<string>? Locales = null,
+    IReadOnlyList<string>? Abis = null,
+    IReadOnlyList<string>? Managers = null,
+    string? ApiForm = null,
+    IReadOnlyList<string>? Capabilities = null,
+    bool UsageOptional = false,
+    string? UsageSummary = null,
+    IReadOnlyList<AppSignalDto>? Signals = null,
     bool DhizukuDeclared = false,
     IReadOnlyList<string>? Trackers = null,
     IReadOnlyList<TrackerTagDto>? TrackerTags = null);
@@ -131,6 +146,13 @@ public sealed record CategoryPathDto(string Slug, string Name);
 
 /// <summary>One detected Exodus tracker with its category tags.</summary>
 public sealed record TrackerTagDto(string Name, IReadOnlyList<string> Tags);
+
+/// <summary>
+/// One evidence row behind the Shizuku usage classification. <c>Kind</c> is
+/// permission/component/marker/command/manager/fallback, <c>Source</c> is
+/// apk/source and <c>Confidence</c> is strong/weak.
+/// </summary>
+public sealed record AppSignalDto(string Kind, string Value, string Confidence);
 
 public sealed record CategoryNodeDto(
     string Slug,

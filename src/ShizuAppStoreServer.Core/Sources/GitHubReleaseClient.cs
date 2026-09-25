@@ -56,6 +56,22 @@ public interface IGitHubReleaseClient : IAppSource
     /// </summary>
     Task<IReadOnlyList<SourceRelease>> GetAllReleasesAsync(SourceTarget target, CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<SourceRelease>>([]);
+
+    /// <summary>
+    /// Recursive blob listing of the default branch via
+    /// <c>GET /repos/{owner}/{repo}/git/trees/HEAD?recursive=1</c>. Null on any
+    /// failure. Default impl keeps test doubles simple.
+    /// </summary>
+    Task<RepoTree?> GetRepoTreeAsync(string owner, string repo, CancellationToken ct = default) =>
+        Task.FromResult<RepoTree?>(null);
+
+    /// <summary>
+    /// Raw content of one blob by its tree SHA via
+    /// <c>GET /repos/{owner}/{repo}/git/blobs/{sha}</c>. Null on any failure.
+    /// Default impl keeps test doubles simple.
+    /// </summary>
+    Task<string?> GetRawBlobAsync(string owner, string repo, string blobSha, CancellationToken ct = default) =>
+        Task.FromResult<string?>(null);
 }
 
 /// <summary>
@@ -285,6 +301,95 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
 
     public Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
         ReadmeLink.FetchAsync(_http, url, ct);
+
+    public async Task<RepoTree?> GetRepoTreeAsync(string owner, string repo, CancellationToken ct = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            using var document = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct), default, ct);
+            if (!document.RootElement.TryGetProperty("tree", out var tree)
+                || tree.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            var entries = new List<RepoTreeEntry>();
+            foreach (var item in tree.EnumerateArray())
+            {
+                if (ReadString(item, "type") != "blob" || ReadString(item, "path") is not { Length: > 0 } path)
+                {
+                    continue;
+                }
+
+                entries.Add(new RepoTreeEntry(
+                    path,
+                    ReadString(item, "sha"),
+                    item.TryGetProperty("size", out var size) && size.ValueKind == JsonValueKind.Number
+                        ? size.GetInt64()
+                        : null));
+            }
+
+            var truncated = document.RootElement.TryGetProperty("truncated", out var flag)
+                && flag.ValueKind == JsonValueKind.True;
+            return new RepoTree(entries, truncated);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or JsonException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
+
+    public async Task<string?> GetRawBlobAsync(string owner, string repo, string blobSha, CancellationToken ct = default)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"https://api.github.com/repos/{owner}/{repo}/git/blobs/{blobSha}");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+            request.Headers.Accept.Clear();
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.raw"));
+
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return await response.Content.ReadAsStringAsync(ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
 
     /// <summary>
     /// GitHub reports an asset checksum as <c>sha256:&lt;hex&gt;</c> (null for

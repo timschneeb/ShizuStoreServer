@@ -50,6 +50,9 @@ public static class AppMapper
             primary?.TargetSdk,
             primary?.CompileSdk,
             primary?.Locales.Count,
+            primary?.Abis ?? [],
+            SummaryLabels(primary?.LocalizedLabels, a.ApkLabel ?? DisplayName(a)),
+            primary?.Managers ?? [],
             primary?.DhizukuDeclared ?? false,
             primary?.Trackers ?? [],
             TagGroups(primary?.TrackerTags));
@@ -115,6 +118,13 @@ public static class AppMapper
             primary?.CompileSdk,
             primary?.Locales.Count,
             primary?.Locales ?? [],
+            primary?.Abis ?? [],
+            primary?.Managers ?? [],
+            primary?.ApiForm,
+            primary?.Capabilities ?? [],
+            primary?.UsageOptional ?? false,
+            primary?.UsageSummary,
+            Signals(a.Signals),
             primary?.DhizukuDeclared ?? false,
             primary?.Trackers ?? [],
             TagGroups(primary?.TrackerTags));
@@ -187,9 +197,81 @@ public static class AppMapper
         d.TargetSdk,
         d.CompileSdk,
         d.Locales,
+        d.Abis,
+        LocalizedLabelMap(d.LocalizedLabels),
+        d.SignerDn,
+        d.SignerScheme,
+        d.SignerKeyAlgorithm,
         d.DhizukuDeclared,
         d.Trackers,
         TagGroups(d.TrackerTags));
+
+    /// <summary>
+    /// Detail-only evidence rows, ordered as stored. Empty kinds or values are
+    /// skipped so a corrupt row never reaches clients as a blank claim.
+    /// </summary>
+    private static IReadOnlyList<AppSignalDto> Signals(IReadOnlyList<AppSignal> signals)
+    {
+        if (signals.Count == 0)
+        {
+            return [];
+        }
+
+        var mapped = new List<AppSignalDto>(signals.Count);
+        foreach (var signal in signals)
+        {
+            if (string.IsNullOrWhiteSpace(signal.Kind) || string.IsNullOrWhiteSpace(signal.Value))
+            {
+                continue;
+            }
+
+            mapped.Add(new AppSignalDto(signal.Kind, signal.Value, signal.Confidence));
+        }
+
+        return mapped;
+    }
+
+    /// <summary>
+    /// Summary-safe label map: only locales whose label differs from the APK's
+    /// default label, the name a device without a matching locale would show.
+    /// Variant entries carry a suffixed display name, so comparing against the
+    /// display name would leak every unchanged label into list payloads.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> SummaryLabels(IReadOnlyList<string>? entries, string defaultLabel)
+    {
+        var labels = LocalizedLabelMap(entries ?? []);
+        var differing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (locale, label) in labels)
+        {
+            if (label.Length > 0 && !string.Equals(label, defaultLabel, StringComparison.Ordinal))
+            {
+                differing[locale] = label;
+            }
+        }
+
+        return differing;
+    }
+
+    /// <summary>
+    /// Decodes the stored <c>locale=label</c> entries; a malformed entry
+    /// (no separator) is skipped rather than exposed as a keyless label.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> LocalizedLabelMap(IReadOnlyList<string> entries)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries)
+        {
+            var separator = entry.IndexOf('=');
+            if (separator <= 0 || separator == entry.Length - 1)
+            {
+                continue;
+            }
+
+            map.TryAdd(entry[..separator], entry[(separator + 1)..]);
+        }
+
+        return map;
+    }
 
     /// <summary>Root→leaf <c>(slug, name)</c> chain for a category (max depth 2 in real data).</summary>
     public static IReadOnlyList<CategoryPathDto> CategoryPath(Category? category)

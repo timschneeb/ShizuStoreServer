@@ -28,6 +28,16 @@ public sealed record BadgingInfo(
     /// <summary>Declared resource locales; the <c>--_--</c> pseudo-locale is dropped.</summary>
     public IReadOnlyList<string> Locales { get; init; } = [];
 
+    /// <summary>Every <c>native-code</c> ABI of the build; empty when it has no native code.</summary>
+    public IReadOnlyList<string> Abis { get; init; } = [];
+
+    /// <summary>
+    /// Localized app names from the <c>application-label-&lt;locale&gt;</c> lines,
+    /// keyed by resource qualifier. First line per locale wins.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> LocalizedLabels { get; init; } =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Android TV build (leanback launcher or the legacy television type).</summary>
     public bool IsTvFormFactor =>
         Features.Contains(FeatureLeanback) || Features.Contains(FeatureTelevision);
@@ -73,7 +83,7 @@ public static partial class BadgingParser
     [GeneratedRegex(@"^application-label:'(?<label>[^']*)'", RegexOptions.Multiline)]
     private static partial Regex ApplicationLabelLine();
 
-    [GeneratedRegex(@"^application-label-(?<lang>[A-Za-z0-9\-]+):'(?<label>[^']*)'", RegexOptions.Multiline)]
+    [GeneratedRegex(@"^application-label-(?<lang>[^:']+):'(?<label>[^']*)'", RegexOptions.Multiline)]
     private static partial Regex LocalizedApplicationLabelLine();
 
     // aapt2 emits `uses-permission:` plus `uses-permission-sdk-23:` for
@@ -169,11 +179,22 @@ public static partial class BadgingParser
         // A single native ABI names the build; several means a fat APK that runs anywhere.
         var abi = abis.Count == 1 ? abis[0] : null;
 
+        var localizedLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match match in LocalizedApplicationLabelLine().Matches(output))
+        {
+            var locale = match.Groups["lang"].Value;
+            // A label that spans lines would break the newline-joined storage
+            // encoding, so collapse it to a single line.
+            var value = match.Groups["label"].Value.ReplaceLineEndings(" ").Trim();
+            if (locale.Length > 0 && value.Length > 0)
+            {
+                localizedLabels.TryAdd(locale, value);
+            }
+        }
+
         var label = ApplicationLabelLine().Match(output) is { Success: true } direct && direct.Groups["label"].Value.Length > 0
             ? direct.Groups["label"].Value
-            : LocalizedApplicationLabelLine().Matches(output)
-                .Select(m => m.Groups["label"].Value)
-                .FirstOrDefault(v => v.Length > 0);
+            : localizedLabels.Values.FirstOrDefault();
 
         return new BadgingInfo(package.Groups["name"].Value, versionCode, versionName, minSdk, icons, permissions, abi, label)
         {
@@ -181,6 +202,8 @@ public static partial class BadgingParser
             TargetSdk = targetSdk,
             CompileSdk = compileSdk,
             Locales = locales,
+            Abis = abis,
+            LocalizedLabels = localizedLabels,
         };
     }
 }

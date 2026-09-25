@@ -44,6 +44,21 @@ public interface IGitLabReleaseClient : IAppSource
     /// </summary>
     Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
         Task.FromResult<string?>(null);
+
+    /// <summary>
+    /// Recursive blob listing via <c>GET /projects/{id}/repository/tree</c>
+    /// (paged). Null on any failure. Default impl keeps test doubles simple.
+    /// </summary>
+    Task<RepoTree?> GetRepoTreeAsync(string projectPath, CancellationToken ct = default) =>
+        Task.FromResult<RepoTree?>(null);
+
+    /// <summary>
+    /// Raw content of one blob by its SHA via
+    /// <c>GET /projects/{id}/repository/blobs/{sha}/raw</c>. Null on any
+    /// failure. Default impl keeps test doubles simple.
+    /// </summary>
+    Task<string?> GetRawBlobAsync(string projectPath, string blobSha, CancellationToken ct = default) =>
+        Task.FromResult<string?>(null);
 }
 
 /// <summary>
@@ -265,6 +280,92 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
 
     public Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
         ReadmeLink.FetchAsync(_http, url, ct);
+
+    public async Task<RepoTree?> GetRepoTreeAsync(string projectPath, CancellationToken ct = default)
+    {
+        try
+        {
+            var project = Uri.EscapeDataString(projectPath);
+            var entries = new List<RepoTreeEntry>();
+            var truncated = false;
+            for (var page = 1; page <= 4; page++)
+            {
+                using var response = await _http.GetAsync(
+                    $"https://gitlab.com/api/v4/projects/{project}/repository/tree?recursive=true&per_page=100&page={page}",
+                    HttpCompletionOption.ResponseHeadersRead, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                using var document = await JsonDocument.ParseAsync(
+                    await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                {
+                    return null;
+                }
+
+                var count = 0;
+                foreach (var item in document.RootElement.EnumerateArray())
+                {
+                    count++;
+                    if (TryReadString(item, "type", out var type) && type == "blob"
+                        && TryReadString(item, "path", out var path) && !string.IsNullOrEmpty(path))
+                    {
+                        TryReadString(item, "id", out var sha);
+                        entries.Add(new RepoTreeEntry(path, sha, null));
+                    }
+                }
+
+                if (count < 100)
+                {
+                    break;
+                }
+
+                if (page == 4)
+                {
+                    truncated = true;
+                }
+            }
+
+            return new RepoTree(entries, truncated);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or JsonException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
+
+    public async Task<string?> GetRawBlobAsync(string projectPath, string blobSha, CancellationToken ct = default)
+    {
+        try
+        {
+            var project = Uri.EscapeDataString(projectPath);
+            using var response = await _http.GetAsync(
+                $"https://gitlab.com/api/v4/projects/{project}/repository/blobs/{Uri.EscapeDataString(blobSha)}/raw",
+                HttpCompletionOption.ResponseHeadersRead, ct);
+            return response.IsSuccessStatusCode ? await response.Content.ReadAsStringAsync(ct) : null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
 
     private static bool TryReadString(JsonElement element, string name, out string? value)
     {

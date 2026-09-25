@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260925140737_AddDownloadAnalysisDetails")]
+    partial class AddDownloadAnalysisDetails
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -302,11 +305,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("analyzed");
 
-                    b.Property<string>("ApiForm")
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)")
-                        .HasColumnName("api_form");
-
                     b.Property<string>("ApkUrl")
                         .IsRequired()
                         .HasMaxLength(2000)
@@ -321,11 +319,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)")
                         .HasColumnName("archive_entry");
-
-                    b.Property<string>("Capabilities")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("capabilities");
 
                     b.Property<int?>("CompileSdk")
                         .HasColumnType("integer")
@@ -352,11 +345,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("localized_labels");
-
-                    b.Property<string>("Managers")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("managers");
 
                     b.Property<int?>("MinSdk")
                         .HasColumnType("integer")
@@ -440,41 +428,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("text")
                         .HasColumnName("trackers");
 
-                    b.Property<string>("UsageEvidence")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("usage_evidence");
-
-                    b.Property<bool>("UsageOptional")
-                        .HasColumnType("boolean")
-                        .HasColumnName("usage_optional");
-
-                    b.Property<bool>("UsageSourceScanned")
-                        .HasColumnType("boolean")
-                        .HasColumnName("usage_source_scanned");
-
-                    b.Property<string>("UsageSummary")
-                        .HasColumnType("text")
-                        .HasColumnName("usage_summary");
-
-                    b.Property<string>("UsageSummaryHash")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("usage_summary_hash");
-
-                    b.Property<string>("UsageSummaryModel")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("usage_summary_model");
-
-                    b.Property<int>("UsageSummaryVersion")
-                        .HasColumnType("integer")
-                        .HasColumnName("usage_summary_version");
-
-                    b.Property<int>("UsageVersion")
-                        .HasColumnType("integer")
-                        .HasColumnName("usage_version");
-
                     b.Property<long?>("VersionCode")
                         .HasColumnType("bigint")
                         .HasColumnName("version_code");
@@ -557,54 +510,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.HasKey("AppId", "Day");
 
                     b.ToTable("app_install_days", (string)null);
-                });
-
-            modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppSignal", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
-                        .HasColumnName("id");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("AppId")
-                        .HasColumnType("bigint")
-                        .HasColumnName("app_id");
-
-                    b.Property<string>("Confidence")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("character varying(16)")
-                        .HasColumnName("confidence");
-
-                    b.Property<DateTimeOffset>("DetectedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("detected_at");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)")
-                        .HasColumnName("kind");
-
-                    b.Property<string>("Source")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("character varying(16)")
-                        .HasColumnName("source");
-
-                    b.Property<string>("Value")
-                        .IsRequired()
-                        .HasMaxLength(256)
-                        .HasColumnType("character varying(256)")
-                        .HasColumnName("value");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AppId");
-
-                    b.ToTable("app_signals", (string)null);
                 });
 
             modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppVersion", b =>
@@ -1208,17 +1113,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Navigation("App");
                 });
 
-            modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppSignal", b =>
-                {
-                    b.HasOne("ShizuAppStoreServer.Core.Data.App", "App")
-                        .WithMany("Signals")
-                        .HasForeignKey("AppId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("App");
-                });
-
             modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppVersion", b =>
                 {
                     b.HasOne("ShizuAppStoreServer.Core.Data.App", "App")
@@ -1274,8 +1168,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Navigation("Children");
 
                     b.Navigation("Downloads");
-
-                    b.Navigation("Signals");
 
                     b.Navigation("Variants");
 
