@@ -25,7 +25,7 @@ public sealed class TrackerScannerTests
         Assert.Equal(2, hit.Id);
         Assert.Equal("AppLovin", hit.Name);
         Assert.Equal("com.applovin.", hit.Signature);
-        Assert.True(hit.Advertisement);
+        Assert.Equal(["Advertisement"], hit.Tags);
     }
 
     [Fact]
@@ -47,7 +47,20 @@ public sealed class TrackerScannerTests
 
         var hits = TrackerScanner.ScanText(["Lcom/host/app/sizmek/Tag;"], catalog);
 
-        Assert.True(Assert.Single(hits).Advertisement);
+        Assert.Equal(["Advertisement"], Assert.Single(hits).Tags);
+    }
+
+    [Fact]
+    public void CarriesAllTrackerCategoriesAsTags()
+    {
+        TrackerSignature[] catalog =
+        [
+            Signature(5, "Multi", "com.multi.", "Analytics", "Advertisement", "Location"),
+        ];
+
+        var hits = TrackerScanner.ScanText(["Lcom/multi/Tracker;"], catalog);
+
+        Assert.Equal(["Analytics", "Advertisement", "Location"], Assert.Single(hits).Tags);
     }
 
     [Fact]

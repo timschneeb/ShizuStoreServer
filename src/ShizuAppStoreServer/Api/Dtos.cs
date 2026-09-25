@@ -38,7 +38,8 @@ public sealed record AppSummaryDto(
     int? CompileSdk = null,
     int? LocaleCount = null,
     bool DhizukuDeclared = false,
-    IReadOnlyList<string>? Trackers = null);
+    IReadOnlyList<string>? Trackers = null,
+    IReadOnlyList<TrackerTagDto>? TrackerTags = null);
 
 /// <summary>
 /// One installable candidate of an app, keyed by signing identity. Clients
@@ -66,7 +67,8 @@ public sealed record DownloadDto(
     int? CompileSdk = null,
     IReadOnlyList<string>? Locales = null,
     bool DhizukuDeclared = false,
-    IReadOnlyList<string>? Trackers = null);
+    IReadOnlyList<string>? Trackers = null,
+    IReadOnlyList<TrackerTagDto>? TrackerTags = null);
 
 /// <summary>
 /// Full app detail: summary fields flattened plus URLs, relations and every
@@ -122,9 +124,13 @@ public sealed record AppDetailDto(
     int? LocaleCount = null,
     IReadOnlyList<string>? Locales = null,
     bool DhizukuDeclared = false,
-    IReadOnlyList<string>? Trackers = null);
+    IReadOnlyList<string>? Trackers = null,
+    IReadOnlyList<TrackerTagDto>? TrackerTags = null);
 
 public sealed record CategoryPathDto(string Slug, string Name);
+
+/// <summary>One detected Exodus tracker with its category tags.</summary>
+public sealed record TrackerTagDto(string Name, IReadOnlyList<string> Tags);
 
 public sealed record CategoryNodeDto(
     string Slug,

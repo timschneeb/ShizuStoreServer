@@ -677,7 +677,7 @@ public sealed class AppEnricherTests : IDisposable
         var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
         var trackers = new FakeTrackerCatalog(
             new TrackerSignature(1, "Google Analytics", "com.google.android.apps.analytics.", ["Analytics"]),
-            new TrackerSignature(2, "AppLovin", "com.applovin.", ["Advertisement"]));
+            new TrackerSignature(2, "AppLovin", "com.applovin.", ["Analytics", "Advertisement"]));
         var enricher = BuildEnricher(github, downloads, aapt2, trackers: trackers);
         var app = NewApp("trackerapp", "TrackerApp", "https://github.com/example/trackerapp");
 
@@ -687,7 +687,34 @@ public sealed class AppEnricherTests : IDisposable
         var primary = Primary(app);
         Assert.Equal(["AppLovin"], primary.Trackers);
         Assert.Equal(["com.applovin."], primary.TrackerSignatures);
+        // Each tag stays associated with its tracker, multiple tags included.
+        Assert.Equal(["AppLovin:Analytics", "AppLovin:Advertisement"], primary.TrackerTags);
         Assert.False(primary.DhizukuDeclared);
+    }
+
+    [Fact]
+    public async Task TrackerTagsBackfilledFromCatalogWithoutDownload()
+    {
+        var trackers = new FakeTrackerCatalog(
+            new TrackerSignature(2, "AppLovin", "com.applovin.", ["Analytics", "Advertisement"]));
+        var github = new StubHandler(_ => throw new InvalidOperationException("must not fetch releases"));
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("must not download"));
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var enricher = BuildEnricher(github, downloads, aapt2, trackers: trackers);
+        var app = NewApp("tagheal", "TagHeal", "https://github.com/example/tagheal");
+        var primary = AddDownload(app, SourceKind.GitHub, "https://cdn.example/tagheal.apk", versionCode: 42);
+        primary.Trackers = ["AppLovin"];
+        primary.Inspected = true;
+        await _db.SaveChangesAsync();
+        app.LastCheckedAt = T0;
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        // Inside the recheck window, so nothing is fetched; the missing tags
+        // are still backfilled from the stored names and the cached catalog.
+        Assert.Equal(EnrichOutcome.SkippedFresh, result.Outcome);
+        Assert.Equal(["AppLovin:Analytics", "AppLovin:Advertisement"], primary.TrackerTags);
+        Assert.Equal(0, github.Calls + downloads.Calls);
     }
 
     [Fact]

@@ -410,7 +410,12 @@ and ships `GRADLE_USER_HOME=/opt/shizuappstore/gradle-home`,
 paths: production sets `/opt/shizuappstore/tmp/exodus-trackers.json`,
 because the repo default is relative to the content root, which
 `ProtectSystem=strict` keeps read-only. When the cache is unwritable the
-catalog is simply refetched each pass.
+catalog is simply refetched each pass. Rows that predate the tracker
+category tags can be backfilled from the same cache without re-downloading
+anything: `sudo python3 tools/backfill-tracker-tags.py` writes the
+`tracker:tag` pairs for rows that have tracker names but no tags; trackers
+without categories in the catalog are skipped and retried on the next
+enrichment pass.
 
 Exposure: a token-managed Cloudflare Tunnel on the same host routes
 `shizustore.timschneeberger.me` to `http://localhost:5137` (configured in

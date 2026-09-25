@@ -85,6 +85,13 @@ public sealed class AppDownload
     public List<string> TrackerSignatures { get; set; } = [];
 
     /// <summary>
+    /// Exodus category tags of the detected trackers as <c>tracker:tag</c>
+    /// pairs (one entry per tag), so each tag stays associated with the
+    /// tracker it belongs to.
+    /// </summary>
+    public List<string> TrackerTags { get; set; } = [];
+
+    /// <summary>
     /// True once the recorded build was scanned for analysis signals (declared
     /// Dhizuku permission, Exodus tracker code signatures). Rows analyzed
     /// before the signals existed stay false so the next pass re-analyzes them

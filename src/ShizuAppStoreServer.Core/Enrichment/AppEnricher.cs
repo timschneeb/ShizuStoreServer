@@ -212,6 +212,7 @@ public sealed class AppEnricher(
         // unchanged-asset short-circuits would never revisit them, so repair
         // from the stored rows before anything else.
         await HealMissingPrimaryAsync(app, ct);
+        await HealTrackerTagsAsync(app, ct);
 
         if (!force
             && app.LastCheckedAt is { } checkedAt
@@ -283,6 +284,7 @@ public sealed class AppEnricher(
             // heal cannot reach them; repair here, or a flag lost to an
             // interrupted recompute would stay lost (live 2026-09-25).
             await HealMissingPrimaryAsync(variant, ct);
+            await HealTrackerTagsAsync(variant, ct);
         }
     }
 
@@ -2398,6 +2400,9 @@ public sealed class AppEnricher(
                 .Select(t => t.Name).Distinct(StringComparer.Ordinal).ToList();
             row.TrackerSignatures = candidate.Inspection.Trackers
                 .Select(t => t.Signature).Distinct(StringComparer.Ordinal).ToList();
+            row.TrackerTags = candidate.Inspection.Trackers
+                .SelectMany(t => t.Tags.Select(tag => $"{t.Name}:{tag}"))
+                .Distinct(StringComparer.Ordinal).ToList();
         }
 
         row.Abi = candidate.Abi;
@@ -2482,6 +2487,58 @@ public sealed class AppEnricher(
         }
 
         await RecomputePrimaryAsync(app, ct, app.PackageName);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Rows analyzed before the category tags were stored have tracker names
+    /// but no tags. The tags are derivable from the stored names via the
+    /// cached Exodus catalog, so backfill them without re-downloading; rows
+    /// whose trackers all lack categories retry harmlessly through the cached
+    /// catalog. Cheap: two stored-row checks plus an in-memory lookup.
+    /// </summary>
+    private async Task HealTrackerTagsAsync(App app, CancellationToken ct)
+    {
+        if (trackers is null)
+        {
+            return;
+        }
+
+        var primary = await PrimaryDownloadAsync(app, ct);
+        if (primary is null || primary.Trackers.Count == 0 || primary.TrackerTags.Count > 0)
+        {
+            return;
+        }
+
+        var catalog = await trackers.GetAsync(ct);
+        if (catalog.Count == 0)
+        {
+            return;
+        }
+
+        var byName = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var tracker in catalog)
+        {
+            if (!byName.TryGetValue(tracker.Name, out var categories))
+            {
+                byName[tracker.Name] = categories = [];
+            }
+
+            categories.AddRange(tracker.Categories);
+        }
+
+        var tags = primary.Trackers
+            .SelectMany(name => byName.TryGetValue(name, out var categories)
+                ? categories.Select(tag => $"{name}:{tag}")
+                : [])
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (tags.Count == 0)
+        {
+            return;
+        }
+
+        primary.TrackerTags = tags;
         await db.SaveChangesAsync(ct);
     }
 

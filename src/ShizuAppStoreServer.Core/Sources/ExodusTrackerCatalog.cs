@@ -16,11 +16,7 @@ public sealed record TrackerSignature(
     int Id,
     string Name,
     string CodeSignature,
-    IReadOnlyList<string> Categories)
-{
-    /// <summary>True when Exodus files this tracker under "Advertisement".</summary>
-    public bool Advertisement => Categories.Contains("Advertisement", StringComparer.Ordinal);
-}
+    IReadOnlyList<string> Categories);
 
 /// <summary>Supplies the Exodus tracker signature catalog for DEX scans.</summary>
 public interface ITrackerCatalog

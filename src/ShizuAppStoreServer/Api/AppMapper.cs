@@ -51,7 +51,8 @@ public static class AppMapper
             primary?.CompileSdk,
             primary?.Locales.Count,
             primary?.DhizukuDeclared ?? false,
-            primary?.Trackers ?? []);
+            primary?.Trackers ?? [],
+            TagGroups(primary?.TrackerTags));
     }
 
     /// <summary>
@@ -115,7 +116,8 @@ public static class AppMapper
             primary?.Locales.Count,
             primary?.Locales ?? [],
             primary?.DhizukuDeclared ?? false,
-            primary?.Trackers ?? []);
+            primary?.Trackers ?? [],
+            TagGroups(primary?.TrackerTags));
     }
 
     /// <summary>
@@ -125,6 +127,48 @@ public static class AppMapper
     private static string SourceName(App a) => a.Availability == Availability.PlayRedirect
         ? "Play Store"
         : a.SourceKind.GetDescription();
+
+    /// <summary>
+    /// Groups stored <c>tracker:tag</c> pairs by tracker name, preserving the
+    /// recorded order. Entries without a name or tag are skipped.
+    /// </summary>
+    private static IReadOnlyList<TrackerTagDto> TagGroups(IReadOnlyList<string>? pairs)
+    {
+        if (pairs is null || pairs.Count == 0)
+        {
+            return [];
+        }
+
+        List<string>? names = null;
+        Dictionary<string, List<string>>? byName = null;
+        foreach (var pair in pairs)
+        {
+            var separator = pair.LastIndexOf(':');
+            if (separator <= 0 || separator == pair.Length - 1)
+            {
+                continue;
+            }
+
+            var name = pair[..separator];
+            var tag = pair[(separator + 1)..];
+            byName ??= new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            names ??= [];
+            if (!byName.TryGetValue(name, out var tags))
+            {
+                names.Add(name);
+                byName[name] = tags = [];
+            }
+
+            tags.Add(tag);
+        }
+
+        if (names is null || byName is null)
+        {
+            return [];
+        }
+
+        return names.Select(name => new TrackerTagDto(name, byName[name])).ToList();
+    }
 
     private static DownloadDto ToDownload(AppDownload d) => new(
         ApiEnums.ToApiString(d.Source),
@@ -144,7 +188,8 @@ public static class AppMapper
         d.CompileSdk,
         d.Locales,
         d.DhizukuDeclared,
-        d.Trackers);
+        d.Trackers,
+        TagGroups(d.TrackerTags));
 
     /// <summary>Root→leaf <c>(slug, name)</c> chain for a category (max depth 2 in real data).</summary>
     public static IReadOnlyList<CategoryPathDto> CategoryPath(Category? category)

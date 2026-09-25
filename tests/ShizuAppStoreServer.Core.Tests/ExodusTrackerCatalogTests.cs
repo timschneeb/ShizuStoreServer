@@ -47,8 +47,8 @@ public sealed class ExodusTrackerCatalogTests
         var parsed = ExodusTrackerParser.Parse(Encoding.UTF8.GetBytes(Json));
 
         Assert.Equal(new[] { 1, 2 }, parsed.Select(t => t.Id));
-        Assert.True(parsed.Single(t => t.Id == 2).Advertisement);
-        Assert.False(parsed.Single(t => t.Id == 1).Advertisement);
+        Assert.Equal(["Advertisement"], parsed.Single(t => t.Id == 2).Categories);
+        Assert.Equal(["Analytics"], parsed.Single(t => t.Id == 1).Categories);
     }
 
     [Fact]

@@ -3,8 +3,12 @@ using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Enrichment;
 
-/// <summary>One Exodus tracker matched in an APK's DEX code.</summary>
-public sealed record TrackerHit(int Id, string Name, string Signature, bool Advertisement);
+/// <summary>
+/// One Exodus tracker matched in an APK's DEX code. <c>Tags</c> are the
+/// tracker's Exodus categories (Analytics, Advertisement, Location, ...) as
+/// the catalog lists them.
+/// </summary>
+public sealed record TrackerHit(int Id, string Name, string Signature, IReadOnlyList<string> Tags);
 
 /// <summary>
 /// Static Exodus tracker detection over the APK's <c>classes*.dex</c> string
@@ -63,7 +67,7 @@ public static class TrackerScanner
             if (MostSpecificMatch(dexText, tracker.CodeSignature) is { } signature)
             {
                 (hits ??= []).Add(new TrackerHit(
-                    tracker.Id, tracker.Name, signature, tracker.Advertisement));
+                    tracker.Id, tracker.Name, signature, tracker.Categories));
             }
         }
 

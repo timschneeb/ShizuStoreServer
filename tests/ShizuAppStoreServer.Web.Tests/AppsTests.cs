@@ -346,6 +346,7 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
                 SigMd5 = "c7b1",
                 SigKey = "980c",
                 IsPrimary = true,
+                TrackerTags = ["AppLovin:Analytics", "AppLovin:Advertisement", "Google Analytics:Analytics"],
                 ResolvedAt = app.UpdatedAt,
             });
             app.Downloads.Add(new AppDownload
@@ -377,6 +378,19 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Equal("980c", primary.SigSha256);
         Assert.Equal("c7b1", primary.SigMd5);
         Assert.Equal(42, primary.VersionCode);
+        // Tags stay grouped by their tracker, with multiple tags per tracker.
+        Assert.Collection(
+            primary.TrackerTags!,
+            group =>
+            {
+                Assert.Equal("AppLovin", group.Name);
+                Assert.Equal(["Analytics", "Advertisement"], group.Tags);
+            },
+            group =>
+            {
+                Assert.Equal("Google Analytics", group.Name);
+                Assert.Equal(["Analytics"], group.Tags);
+            });
         var variant = detail.Downloads.Single(d => d.Source == "fdroid");
         Assert.Equal("https://f-droid.org/repo/com.example.dual_40.apk", variant.ApkUrl);
         Assert.Equal(40, variant.VersionCode);

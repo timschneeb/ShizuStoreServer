@@ -254,6 +254,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             // Signal lists share the Locales encoding: newline-joined.
             MapNewlineList(e, x => x.Trackers, "trackers");
             MapNewlineList(e, x => x.TrackerSignatures, "tracker_signatures");
+            MapNewlineList(e, x => x.TrackerTags, "tracker_tags");
             e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
             e.Property(x => x.Analyzed).HasColumnName("analyzed");

@@ -199,8 +199,8 @@ bundle` is rebuilt per deploy, never committed.
   `apk_url`, `archive_entry`, `version_code`, `version_name`,
   `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `analyzed`, `min_sdk`,
   `target_sdk`, `compile_sdk`, `locales`, `dhizuku_declared`, `trackers`,
-  `tracker_signatures`, `inspected`, `abi`, `sig_key`, `is_primary`,
-  `resolved_at`.
+  `tracker_signatures`, `tracker_tags`, `inspected`, `abi`, `sig_key`,
+  `is_primary`, `resolved_at`.
   - `sig_key` = lowercased first space-token of `sig_sha256`, else of
     `sig_md5`, else `url:<apk_url>`; `abi` = the analyzed APK's
     `native-code` ABI (null for fat/universal builds, or the F-Droid
@@ -228,11 +228,13 @@ bundle` is rebuilt per deploy, never committed.
     `dhizuku_declared` = the build declares a
     `com.rosan.dhizuku.permission.*` permission; `trackers` = names and
     `tracker_signatures` = the matched code signatures of the Exodus
-    trackers found in the DEX. Only code signatures are matched (the
-    server does no network analysis), so an empty tracker list means
-    "not detected by code signature", never "tracker-free". The Shizuku
-    permission is intentionally not tracked: nearly every app in the
-    catalog declares it, so it separates nothing.
+    trackers found in the DEX, and `tracker_tags` = their category tags
+    as `tracker:tag` pairs (one entry per tag, newline-joined) so each
+    tag stays associated with its tracker. Only code signatures are
+    matched (the server does no network analysis), so an empty tracker
+    list means "not detected by code signature", never "tracker-free".
+    The Shizuku permission is intentionally not tracked: nearly every
+    app in the catalog declares it, so it separates nothing.
   - `inspected` = true once the recorded build was scanned for the
     analysis signals; never downgraded. Rows analyzed before the scan
     existed are false, so the next pass re-analyzes them once to
