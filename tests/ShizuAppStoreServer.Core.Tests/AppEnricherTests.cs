@@ -245,14 +245,8 @@ public sealed class AppEnricherTests : IDisposable
         return _db.Apps.Include(a => a.Versions).Single(a => a.Slug == slug);
     }
 
-    private static readonly string EmptyIndexXml = """
-        <?xml version="1.0" encoding="utf-8"?>
-        <fdroid>
-        </fdroid>
-        """;
-
-    // index-v2.json carries the screenshots index.xml lacks. Most tests only
-    // need an empty screenshot map so the lookup stays a fast no-op.
+    // Most tests only need an empty repo index so package and screenshot
+    // lookups stay a fast no-op.
     private static readonly string EmptyIndexV2Json = """{"packages":{}}""";
 
     private AppEnricher BuildEnricher(
@@ -271,13 +265,10 @@ public sealed class AppEnricherTests : IDisposable
         new(new GitHubReleaseClient(new HttpClient(github), "tok"),
             new GitLabReleaseClient(new HttpClient(gitlab ?? new StubHandler(_ =>
                 throw new InvalidOperationException("must not call GitLab")))),
-            new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(fdroid ?? new StubHandler(request =>
+            new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(fdroid ?? new StubHandler(_ =>
                 new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent(
-                        request.RequestUri!.AbsolutePath.EndsWith("index-v2.json")
-                            ? EmptyIndexV2Json
-                            : EmptyIndexXml),
+                    Content = new StringContent(EmptyIndexV2Json),
                 })))),
             aapt2,
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
@@ -1581,81 +1572,114 @@ public sealed class AppEnricherTests : IDisposable
         return (BuildEnricher(github, downloads, aapt2, gitlab, fdroid), gitlab, downloads, aapt2, zip);
     }
 
-    // Real index.xml shape (element-style version/versioncode/sig;
-    // regression cover for the M4 attribute-only parser bug).
-    private const string FdroidIndexXml = """
-        <?xml version="1.0" encoding="utf-8"?>
-        <fdroid>
-          <application id="com.example.app">
-            <name>Example</name>
-            <desc>A &lt;b&gt;plain&lt;/b&gt; summary of the app.</desc>
-            <icon>com.example.app.png</icon>
-            <source>https://github.com/example/aod</source>
-            <package>
-              <version>2.0</version>
-              <versioncode>20</versioncode>
-              <apkname>com.example.app_20.apk</apkname>
-              <hash type="sha256">0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</hash>
-              <size>1234567</size>
-              <sdkver>26</sdkver>
-              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
-            </package>
-          </application>
-        </fdroid>
-        """;
-
-    // One release per architecture plus a genuinely older package (1.0) that
-    // must not be mistaken for an ABI sibling.
-    private const string FdroidIndexXmlWithArchSiblings = """
-        <?xml version="1.0" encoding="utf-8"?>
-        <fdroid>
-          <application id="com.example.app">
-            <name>Example</name>
-            <icon>com.example.app.png</icon>
-            <source>https://github.com/example/aod</source>
-            <package>
-              <version>2.0</version>
-              <versioncode>2004</versioncode>
-              <apkname>com.example.app_2004.apk</apkname>
-              <hash type="sha256">aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111</hash>
-              <size>2222222</size>
-              <sdkver>26</sdkver>
-              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
-              <nativecode>arm64-v8a</nativecode>
-            </package>
-            <package>
-              <version>2.0</version>
-              <versioncode>2003</versioncode>
-              <apkname>com.example.app_2003.apk</apkname>
-              <hash type="sha256">bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222</hash>
-              <size>1111111</size>
-              <sdkver>26</sdkver>
-              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
-              <nativecode>armeabi-v7a</nativecode>
-            </package>
-            <package>
-              <version>1.0</version>
-              <versioncode>1000</versioncode>
-              <apkname>com.example.app_1000.apk</apkname>
-              <hash type="sha256">cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333</hash>
-              <size>999999</size>
-              <sdkver>26</sdkver>
-              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
-              <nativecode>x86</nativecode>
-            </package>
-          </application>
-        </fdroid>
-        """;
-
-    // index-v2 signer map for FdroidIndexXml: the authoritative certificate
-    // SHA-256 for the primary APK, as served by a real F-Droid repo.
+    // Real index-v2.json shape: metadata plus one release and no signer, so
+    // index-only rows keep a null SHA-256 until analysis or a signed index.
     private const string FdroidIndexV2Json = """
         {
           "packages": {
             "com.example.app": {
+              "metadata": {
+                "description": { "en-US": "A <b>plain</b> summary of the app." },
+                "icon": { "en-US": { "name": "/com.example.app/en-US/icon.png" } },
+                "sourceCode": "https://github.com/example/aod"
+              },
               "versions": {
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                  "file": {
+                    "name": "/com.example.app_20.apk",
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "size": 1234567
+                  },
                   "manifest": {
+                    "versionCode": 20,
+                    "versionName": "2.0",
+                    "usesSdk": { "minSdkVersion": 26 }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """;
+
+    // One release per architecture plus a genuinely older package (1.0) that
+    // must not be mistaken for an ABI sibling.
+    private const string FdroidIndexV2JsonWithArchSiblings = """
+        {
+          "packages": {
+            "com.example.app": {
+              "metadata": {
+                "icon": { "en-US": { "name": "/com.example.app/en-US/icon.png" } },
+                "sourceCode": "https://github.com/example/aod"
+              },
+              "versions": {
+                "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111": {
+                  "file": {
+                    "name": "/com.example.app_2004.apk",
+                    "sha256": "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+                    "size": 2222222
+                  },
+                  "manifest": {
+                    "versionCode": 2004,
+                    "versionName": "2.0",
+                    "nativecode": [ "arm64-v8a" ],
+                    "usesSdk": { "minSdkVersion": 26 }
+                  }
+                },
+                "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222": {
+                  "file": {
+                    "name": "/com.example.app_2003.apk",
+                    "sha256": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+                    "size": 1111111
+                  },
+                  "manifest": {
+                    "versionCode": 2003,
+                    "versionName": "2.0",
+                    "nativecode": [ "armeabi-v7a" ],
+                    "usesSdk": { "minSdkVersion": 26 }
+                  }
+                },
+                "cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333": {
+                  "file": {
+                    "name": "/com.example.app_1000.apk",
+                    "sha256": "cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333",
+                    "size": 999999
+                  },
+                  "manifest": {
+                    "versionCode": 1000,
+                    "versionName": "1.0",
+                    "nativecode": [ "x86" ],
+                    "usesSdk": { "minSdkVersion": 26 }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """;
+
+    // Same package plus the authoritative signer certificate SHA-256, as
+    // served by a real F-Droid repo.
+    private const string FdroidIndexV2JsonWithSigner = """
+        {
+          "packages": {
+            "com.example.app": {
+              "metadata": {
+                "description": { "en-US": "A <b>plain</b> summary of the app." },
+                "icon": { "en-US": { "name": "/com.example.app/en-US/icon.png" } },
+                "sourceCode": "https://github.com/example/aod"
+              },
+              "versions": {
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                  "file": {
+                    "name": "/com.example.app_20.apk",
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "size": 1234567
+                  },
+                  "manifest": {
+                    "versionCode": 20,
+                    "versionName": "2.0",
+                    "usesSdk": { "minSdkVersion": 26 },
                     "signer": {
                       "sha256": [ "980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9" ]
                     }
@@ -1675,14 +1699,19 @@ public sealed class AppEnricherTests : IDisposable
         iconBytes ??= TestAssets.SolidPng(256, 256, Color.Purple);
         var fdroid = new StubHandler(request =>
         {
-            var body = request.RequestUri!.AbsolutePath.EndsWith("index-v2.json")
-                ? indexV2Json ?? EmptyIndexV2Json
-                : FdroidIndexXml;
-            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+            if (!request.RequestUri!.AbsolutePath.EndsWith("index-v2.json"))
+            {
+                throw new InvalidOperationException("must not fetch index.xml");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(indexV2Json ?? FdroidIndexV2Json),
+            };
         });
         var downloads = new StubHandler(request =>
         {
-            if (icon404 || !request.RequestUri!.ToString().Contains("/icons"))
+            if (icon404 || !request.RequestUri!.ToString().EndsWith(".png"))
             {
                 return new HttpResponseMessage(HttpStatusCode.NotFound);
             }
@@ -2023,8 +2052,9 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        // index.xml plus the two index-v2 screenshot lookups (F-Droid, Izzy).
-        Assert.Equal(3, fdroid.Calls);
+        // One index-v2 fetch per repo serves the package and the screenshots
+        // (F-Droid for the package plus screenshots, Izzy for screenshots).
+        Assert.Equal(2, fdroid.Calls);
         Assert.Equal(2, downloads.Calls); // APK attempt (404 → index-only) + icon
         Assert.Equal(Availability.DirectApk, app.Availability);
         Assert.Equal(SourceKind.FDroid, app.SourceKind);
@@ -2039,14 +2069,13 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(1234567L, primary.SizeBytes);
         Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", primary.Sha256);
         Assert.Null(primary.SigSha256); // no APK analyzed: SHA-256 unknown
-        // The v1 index <sig> is a legacy fingerprint, not a cert digest, so
-        // it is never recorded as a signing-cert MD5.
+        // No APK was analyzed, so no signing-cert MD5 is recorded.
         Assert.Null(primary.SigMd5);
         Assert.Null(app.LastError);
         // F-Droid publishes no release dates, so the app stays unknown and sorts
         // last under "recently updated".
         Assert.Null(app.VersionUpdatedAt);
-        // The application-level <desc> is the only changelog text the index has.
+        // metadata.description is the only changelog text the index has.
         Assert.Equal("A <b>plain</b> summary of the app.", app.Changelog);
         // Icon is the mirrored repo PNG, normalized to 192px.
         Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
@@ -2078,6 +2107,20 @@ public sealed class AppEnricherTests : IDisposable
                         "de": [
                           { "name": "/com.example.app/de/phoneScreenshots/00.png" }
                         ]
+                      }
+                    }
+                  },
+                  "versions": {
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                      "file": {
+                        "name": "/com.example.app_20.apk",
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "size": 1234567
+                      },
+                      "manifest": {
+                        "versionCode": 20,
+                        "versionName": "2.0",
+                        "usesSdk": { "minSdkVersion": 26 }
                       }
                     }
                   }
@@ -2115,6 +2158,20 @@ public sealed class AppEnricherTests : IDisposable
                         ]
                       }
                     }
+                  },
+                  "versions": {
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                      "file": {
+                        "name": "/com.example.app_20.apk",
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "size": 1234567
+                      },
+                      "manifest": {
+                        "versionCode": 20,
+                        "versionName": "2.0",
+                        "usesSdk": { "minSdkVersion": 26 }
+                      }
+                    }
                   }
                 }
               }
@@ -2128,12 +2185,14 @@ public sealed class AppEnricherTests : IDisposable
                 throw new HttpRequestException("Connection refused (apt.izzysoft.de:443)");
             }
 
-            var body = request.RequestUri.AbsolutePath.EndsWith("index-v2.json")
-                ? indexV2
-                : FdroidIndexXml;
-            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+            if (!request.RequestUri.AbsolutePath.EndsWith("index-v2.json"))
+            {
+                throw new InvalidOperationException("must not fetch index.xml");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(indexV2) };
         });
-        var downloads = new StubHandler(request => request.RequestUri!.ToString().Contains("/icons")
+        var downloads = new StubHandler(request => request.RequestUri!.ToString().EndsWith(".png")
             ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(iconBytes) }
             : new HttpResponseMessage(HttpStatusCode.NotFound));
         var enricher = BuildEnricher(
@@ -2221,6 +2280,20 @@ public sealed class AppEnricherTests : IDisposable
                           { "name": "/com.example.app/en-US/phoneScreenshots/00.png" },
                           { "name": "/com.example.app/en-US/phoneScreenshots/01.png" }
                         ]
+                      }
+                    }
+                  },
+                  "versions": {
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                      "file": {
+                        "name": "/com.example.app_20.apk",
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "size": 1234567
+                      },
+                      "manifest": {
+                        "versionCode": 20,
+                        "versionName": "2.0",
+                        "usesSdk": { "minSdkVersion": 26 }
                       }
                     }
                   }
@@ -2454,6 +2527,20 @@ public sealed class AppEnricherTests : IDisposable
                         ]
                       }
                     }
+                  },
+                  "versions": {
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                      "file": {
+                        "name": "/com.example.app_20.apk",
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "size": 1234567
+                      },
+                      "manifest": {
+                        "versionCode": 20,
+                        "versionName": "2.0",
+                        "usesSdk": { "minSdkVersion": 26 }
+                      }
+                    }
                   }
                 }
               }
@@ -2571,11 +2658,11 @@ public sealed class AppEnricherTests : IDisposable
         var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
         var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(FdroidIndexXml),
+            Content = new StringContent(FdroidIndexV2Json),
         });
         var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = request.RequestUri!.ToString().Contains("/icons")
+            Content = request.RequestUri!.ToString().EndsWith(".png")
                 ? new ByteArrayContent(iconBytes)
                 : new ByteArrayContent(zip),
         });
@@ -2605,11 +2692,11 @@ public sealed class AppEnricherTests : IDisposable
         var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
         var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(FdroidIndexXmlWithArchSiblings),
+            Content = new StringContent(FdroidIndexV2JsonWithArchSiblings),
         });
         var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = request.RequestUri!.ToString().Contains("/icons")
+            Content = request.RequestUri!.ToString().EndsWith(".png")
                 ? new ByteArrayContent(iconBytes)
                 : new ByteArrayContent(zip),
         });
@@ -2697,12 +2784,12 @@ public sealed class AppEnricherTests : IDisposable
 
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(FdroidIndexXml),
+                Content = new StringContent(FdroidIndexV2Json),
             };
         });
         var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = request.RequestUri!.ToString().Contains("/icons")
+            Content = request.RequestUri!.ToString().EndsWith(".png")
                 ? new ByteArrayContent(iconBytes)
                 : new ByteArrayContent(zip),
         });
@@ -2742,10 +2829,10 @@ public sealed class AppEnricherTests : IDisposable
     [Fact]
     public async Task FdroidIndexOnlyRowBackfillsSignerFromIndexV2()
     {
-        // Legacy index-only rows have no SHA-256 identity; the v2 signer map
-        // backfills it without a re-download, and the backfill must not keep
-        // the row healing once it succeeded.
-        var (first, _, _) = FdroidHappyPath(indexV2Json: FdroidIndexV2Json);
+        // A signed index entry carries the authoritative certificate with the
+        // release, so the index-only row records its SHA-256 identity up front
+        // and must not keep healing afterwards.
+        var (first, _, _) = FdroidHappyPath(indexV2Json: FdroidIndexV2JsonWithSigner);
         var app = NewApp("fdv2", "FdV2", "https://f-droid.org/packages/com.example.app/");
         Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
         var primary = Primary(app);
@@ -2755,7 +2842,7 @@ public sealed class AppEnricherTests : IDisposable
         await _db.SaveChangesAsync();
         Age(app);
 
-        var (second, _, downloads) = FdroidHappyPath(indexV2Json: FdroidIndexV2Json);
+        var (second, _, downloads) = FdroidHappyPath(indexV2Json: FdroidIndexV2JsonWithSigner);
         Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(0, downloads.Calls);
     }
@@ -2786,9 +2873,9 @@ public sealed class AppEnricherTests : IDisposable
         var result = await enricher.EnrichAsync(app, T0);
 
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
-        // One index fetch for the source lookup (the regular package read
-        // rides the run memo) plus one screenshot lookup per repo.
-        Assert.Equal(3, fdroid.Calls);
+        // One index-v2 fetch per repo serves the source lookup, the package
+        // read and the screenshots.
+        Assert.Equal(2, fdroid.Calls);
         Assert.Equal(Availability.DirectApk, app.Availability);
         var primary = Primary(app);
         Assert.Equal(SourceKind.FDroid, primary.Source);
@@ -2848,7 +2935,7 @@ public sealed class AppEnricherTests : IDisposable
         var downloads = new StubHandler(request =>
         {
             var url = request.RequestUri!.ToString();
-            if (url.Contains("/icons"))
+            if (url.EndsWith(".png"))
             {
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(iconBytes) };
             }
@@ -2862,7 +2949,7 @@ public sealed class AppEnricherTests : IDisposable
         });
         var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(FdroidIndexXml),
+            Content = new StringContent(FdroidIndexV2Json),
         });
         var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
         var app = NewApp("fd-plus-forge", "Both", "https://f-droid.org/packages/com.example.app");
@@ -3095,23 +3182,28 @@ public sealed class AppEnricherTests : IDisposable
 
     // ---- M8: signatures + F-Droid alternate variant ----
 
-    // Element-format index matching the canned badging (com.example.app, v42).
-    private const string VariantIndexXml = """
-        <?xml version="1.0" encoding="utf-8"?>
-        <fdroid>
-          <application id="com.example.app">
-            <name>Example</name>
-            <package>
-              <version>4.2</version>
-              <versioncode>42</versioncode>
-              <apkname>com.example.app_42.apk</apkname>
-              <hash type="sha256">aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</hash>
-              <size>7654321</size>
-              <sdkver>26</sdkver>
-              <sig>b10a8db164e0754105b7a99be72e3fe5</sig>
-            </package>
-          </application>
-        </fdroid>
+    // Index matching the canned badging (com.example.app, v42).
+    private const string VariantIndexV2Json = """
+        {
+          "packages": {
+            "com.example.app": {
+              "versions": {
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                  "file": {
+                    "name": "/com.example.app_42.apk",
+                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "size": 7654321
+                  },
+                  "manifest": {
+                    "versionCode": 42,
+                    "versionName": "4.2",
+                    "usesSdk": { "minSdkVersion": 26 }
+                  }
+                }
+              }
+            }
+          }
+        }
         """;
 
     /// <summary>Forge primary + F-Droid variant, downloads routed by host.</summary>
@@ -3119,14 +3211,14 @@ public sealed class AppEnricherTests : IDisposable
         byte[] primaryZip,
         byte[] variantZip,
         FakeSignerRunner? signer = null,
-        string indexXml = VariantIndexXml,
+        string indexV2Json = VariantIndexV2Json,
         bool variantDownload404 = false)
     {
         var github = new StubHandler(_ => JsonReleases(
             ReleaseJson("v4.2", "app-release.apk", "https://cdn.example/app.apk", primaryZip.Length)));
         var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(indexXml),
+            Content = new StringContent(indexV2Json),
         });
         var downloads = new StubHandler(request =>
         {
@@ -3170,7 +3262,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal((long)variantZip.Length, variant.SizeBytes);
         Assert.Equal(Sha256(variantZip), variant.Sha256); // bytes win over the index hash
         Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", variant.SigSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5); // file truth wins over index <sig>
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", variant.SigMd5); // file truth wins over index metadata
     }
 
     [Fact]
@@ -3191,7 +3283,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Null(primary.SigMd5);
         var variant = rows.Single(d => d.Source == SourceKind.FDroid);
         Assert.Null(variant.SigSha256);
-        Assert.Null(variant.SigMd5); // legacy v1 <sig> is not a cert digest
+        Assert.Null(variant.SigMd5); // the index carries no signer, so the variant stays unsigned
         Assert.Equal("https://f-droid.org/repo/com.example.app_42.apk", variant.ApkUrl);
     }
 
@@ -3211,8 +3303,8 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(1, downloads.Calls); // primary only
         var variant = _db.Downloads.Local.Single(d => d.AppId == app.Id && d.Source == SourceKind.FDroid);
         Assert.Equal("unchanged", variant.Sha256);
-        // The legacy v1 <sig> is not a cert digest, so the seeded row keeps
-        // its fingerprints and nothing is refreshed from the index.
+        // The index carries no signer, so the seeded row keeps its fingerprints
+        // and nothing is refreshed from the index.
         Assert.Null(variant.SigMd5);
     }
 
@@ -3221,7 +3313,7 @@ public sealed class AppEnricherTests : IDisposable
     {
         var primaryZip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
-        var (enricher, _) = ForgeWithVariant(primaryZip, new byte[] { 9 }, indexXml: EmptyIndexXml);
+        var (enricher, _) = ForgeWithVariant(primaryZip, new byte[] { 9 }, indexV2Json: EmptyIndexV2Json);
         var app = NewApp("dropped-var", "DroppedVar", "https://github.com/example/dropped");
         AddDownload(app, SourceKind.FDroid,
             "https://f-droid.org/repo/com.example.app_42.apk",
@@ -3250,7 +3342,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(42L, variant.VersionCode);
         Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", variant.Sha256);
         Assert.Null(variant.SigSha256);
-        Assert.Null(variant.SigMd5); // legacy v1 <sig> is not a cert digest
+        Assert.Null(variant.SigMd5); // no index signer was available
     }
 
     [Fact]
@@ -3260,7 +3352,7 @@ public sealed class AppEnricherTests : IDisposable
         var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, orangeIcon));
         var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(VariantIndexXml),
+            Content = new StringContent(VariantIndexV2Json),
         });
         var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
         var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
@@ -3283,7 +3375,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(SourceKind.FDroid, primary.Source);
         Assert.Equal(Sha256(zip), primary.Sha256); // bytes win over the index hash
         Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", primary.SigSha256);
-        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", primary.SigMd5); // signer MD5 == index <sig>
+        Assert.Equal("b10a8db164e0754105b7a99be72e3fe5", primary.SigMd5); // analysis MD5
         Assert.Equal(IconProcessor.ProcessRawImage(orangeIcon)!.Sha256, app.IconHash);
     }
 
@@ -3294,7 +3386,7 @@ public sealed class AppEnricherTests : IDisposable
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Blue)));
         var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(VariantIndexXml),
+            Content = new StringContent(VariantIndexV2Json),
         });
         var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -3320,7 +3412,7 @@ public sealed class AppEnricherTests : IDisposable
         var app = NewApp("noicon", "No Icon", "https://f-droid.org/packages/com.example.app");
 
         Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
-        Assert.Equal(3, downloads.Calls); // APK attempt + icons-640 + legacy icons/
+        Assert.Equal(2, downloads.Calls); // APK attempt + the single v2 icon URL
         Assert.Equal(LetterAvatarGenerator.Generate("No Icon").Sha256, app.IconHash);
         Assert.Equal(Availability.DirectApk, app.Availability);
     }
@@ -3378,11 +3470,27 @@ public sealed class AppEnricherTests : IDisposable
               "packages": {
                 "com.example.app": {
                   "metadata": {
+                    "description": { "en-US": "A <b>plain</b> summary of the app." },
+                    "icon": { "en-US": { "name": "/com.example.app/en-US/icon.png" } },
                     "screenshots": {
                       "phone": {
                         "en-US": [
                           { "name": "/com.example.app/en-US/phoneScreenshots/00.png" }
                         ]
+                      }
+                    }
+                  },
+                  "versions": {
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                      "file": {
+                        "name": "/com.example.app_20.apk",
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "size": 1234567
+                      },
+                      "manifest": {
+                        "versionCode": 20,
+                        "versionName": "2.0",
+                        "usesSdk": { "minSdkVersion": 26 }
                       }
                     }
                   }

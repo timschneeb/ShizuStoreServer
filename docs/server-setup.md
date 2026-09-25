@@ -176,9 +176,7 @@ so Izzy builds are signature-compatible with forge releases.
 - `sig_sha256` / `sig_md5` come from `apksigner verify --print-certs`
   (SHA-256 + MD5 lines; rotation-aware, space-joined sets). Index-only
   F-Droid/Izzy rows take the signing-cert SHA-256 from the repo's
-  `index-v2.json` signer map; the legacy index `<sig>` is an F-Droid
-  specific fingerprint, not a certificate digest, and is never recorded
-  as `sig_md5`.
+  `index-v2.json` signer map, the only repo index the server reads.
 
 Client matching: hash the installed app's signing cert and filter
 `downloads[]` to candidates whose `sigSha256`/`sigMd5` match (membership

@@ -17,16 +17,19 @@ namespace ShizuAppStoreServer.Core.Tests;
 /// </summary>
 public sealed class ReleasePollerTests : IDisposable
 {
-    private const string FdroidXml = """
-        <?xml version="1.0" encoding="utf-8"?>
-        <fdroid>
-          <application id="com.example.app">
-            <name>Example</name>
-            <package version="2.0" versioncode="20">
-              <apkname>com.example.app_20.apk</apkname>
-            </package>
-          </application>
-        </fdroid>
+    private const string FdroidIndexV2Json = """
+        {
+          "packages": {
+            "com.example.app": {
+              "versions": {
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                  "file": { "name": "/com.example.app_20.apk" },
+                  "manifest": { "versionCode": 20 }
+                }
+              }
+            }
+          }
+        }
         """;
 
     private const string FdroidApkUrl = "https://f-droid.org/repo/com.example.app_20.apk";
@@ -78,9 +81,9 @@ public sealed class ReleasePollerTests : IDisposable
         "v2", null, "\"gl-etag\"",
         [new SourceAsset("app.apk", apkUrl, Primary: true)]);
 
-    private static HttpResponseMessage IndexResponse(string xml) => new(HttpStatusCode.OK)
+    private static HttpResponseMessage IndexV2Response(string json) => new(HttpStatusCode.OK)
     {
-        Content = new StringContent(xml, Encoding.UTF8, "application/xml"),
+        Content = new StringContent(json, Encoding.UTF8, "application/json"),
     };
 
     private App SeedApp(string slug, string url, Availability availability = Availability.DirectApk, string? etag = null)
@@ -134,7 +137,7 @@ public sealed class ReleasePollerTests : IDisposable
     private ReleasePoller Poller(
         IGitHubReleaseClient? github = null,
         IGitLabReleaseClient? gitlab = null,
-        string? fdroidXml = null,
+        string? fdroidIndexV2Json = null,
         string? token = "test-token",
         bool pollEnabled = true) =>
         new(
@@ -142,9 +145,9 @@ public sealed class ReleasePollerTests : IDisposable
             github ?? new StubGitHub((_, _, _) => throw new InvalidOperationException("GitHub must not be called")),
             gitlab ?? new StubGitLab((_, _) => throw new InvalidOperationException("GitLab must not be called")),
             new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(
-                new StubHandler(_ => fdroidXml is null
+                new StubHandler(_ => fdroidIndexV2Json is null
                     ? throw new InvalidOperationException("F-Droid must not be called")
-                    : IndexResponse(fdroidXml))))),
+                    : IndexV2Response(fdroidIndexV2Json))))),
             new EnrichmentOptions { GitHubToken = token },
             new SyncOptions { PollEnabled = pollEnabled, PollParallelism = 4 });
 
@@ -299,7 +302,7 @@ public sealed class ReleasePollerTests : IDisposable
     {
         var app = SeedApp("example", "https://f-droid.org/packages/com.example.app");
         SeedDownload(app.Id, "https://f-droid.org/repo/com.example.app_10.apk", SourceKind.FDroid, versionCode: 10);
-        var poller = Poller(fdroidXml: FdroidXml);
+        var poller = Poller(fdroidIndexV2Json: FdroidIndexV2Json);
 
         var changed = await poller.FindChangedAsync();
 
@@ -311,7 +314,7 @@ public sealed class ReleasePollerTests : IDisposable
     {
         var app = SeedApp("example", "https://f-droid.org/packages/com.example.app");
         SeedDownload(app.Id, FdroidApkUrl, SourceKind.FDroid, versionCode: 20);
-        var poller = Poller(fdroidXml: FdroidXml);
+        var poller = Poller(fdroidIndexV2Json: FdroidIndexV2Json);
 
         Assert.Empty(await poller.FindChangedAsync());
     }

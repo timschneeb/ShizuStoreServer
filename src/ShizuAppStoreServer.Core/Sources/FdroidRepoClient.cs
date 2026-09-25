@@ -6,10 +6,10 @@ using ShizuAppStoreServer.Core.Sync;
 namespace ShizuAppStoreServer.Core.Sources;
 
 /// <summary>
-/// Fetches F-Droid-compatible repo indexes (<c>{base}/index.xml</c>) with
-/// conditional GET. Thin over <see cref="HttpClient"/> so tests can stub
-/// the handler; parsing + caching live in <see cref="FdroidIndexParser"/>
-/// and <see cref="FdroidIndexProvider"/>.
+/// Fetches F-Droid-compatible repo indexes (<c>{base}/index-v2.json</c>)
+/// with conditional GET. Thin over <see cref="HttpClient"/> so tests can
+/// stub the handler; parsing + caching live in
+/// <see cref="FdroidIndexV2Parser"/> and <see cref="FdroidIndexProvider"/>.
 /// </summary>
 public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
 {
@@ -24,12 +24,6 @@ public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
     // cannot pin a whole pass; only the final attempt is unbounded.
     private const int MaxAttempts = 4;
     private static readonly TimeSpan AttemptBudget = TimeSpan.FromSeconds(15);
-
-    /// <returns>Index ETag + raw XML, or null on <c>304 Not Modified</c>.</returns>
-    /// <exception cref="HttpRequestException">Non-success status (unknown repo, …).</exception>
-    public Task<(string? Etag, byte[] Xml)?> GetIndexAsync(
-        string repoBase, string? etag, CancellationToken ct = default) =>
-        FetchAsync(repoBase, "index.xml", "fdroid index", "F-Droid index", etag, ct);
 
     /// <returns>Index-v2 ETag + raw JSON, or null on <c>304 Not Modified</c>.</returns>
     /// <exception cref="HttpRequestException">Non-success status (unknown repo, …).</exception>
@@ -139,19 +133,15 @@ public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
 /// </remarks>
 public sealed class FdroidIndexProvider(FdroidRepoClient client)
 {
-    private sealed record CachedIndex(string? Etag, IReadOnlyDictionary<string, IReadOnlyList<FdroidPackageInfo>> Packages);
-
-    private sealed record CachedIndexV2(
+    private sealed record CachedIndex(
         string? Etag,
+        IReadOnlyDictionary<string, IReadOnlyList<FdroidPackageInfo>> Packages,
         IReadOnlyDictionary<string, IReadOnlyList<string>> Screenshots,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>> Signers);
 
     private readonly ConcurrentDictionary<string, CachedIndex> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, CachedIndexV2> _indexV2Cache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _indexV2Gates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _validatedIndex = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, byte> _validatedIndexV2 = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Starts a new pass: the next index read may fetch once per repo, after
@@ -160,7 +150,6 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
     public void BeginRun()
     {
         _validatedIndex.Clear();
-        _validatedIndexV2.Clear();
     }
 
     /// <returns>
@@ -183,9 +172,9 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
     }
 
     /// <returns>
-    /// Every package entry for the app (document order, newest versionCode
-    /// first; empty when absent) + index ETag, or null when the index
-    /// answered 304 with nothing cached.
+    /// Every package entry for the app (newest versionCode first; empty
+    /// when absent) + index ETag, or null when the index answered 304 with
+    /// nothing cached.
     /// </returns>
     /// <param name="force">
     /// Bypasses the once-per-run memo; the permission-heal refetch needs an
@@ -248,13 +237,11 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
             // Mark before the fetch: a failing repo must not be retried for
             // every app in the pass.
             _validatedIndex[repoBase] = 0;
-            var fetched = await client.GetIndexAsync(repoBase, cached?.Etag ?? seedEtag, ct);
+            var fetched = await client.GetIndexV2Async(repoBase, cached?.Etag ?? seedEtag, ct);
             if (fetched is not null)
             {
-                using var xml = new MemoryStream(fetched.Value.Xml);
-                cached = new CachedIndex(
-                    fetched.Value.Etag,
-                    FdroidIndexParser.Parse(xml));
+                var data = FdroidIndexV2Parser.Parse(fetched.Value.Json);
+                cached = new CachedIndex(fetched.Value.Etag, data.Packages, data.Screenshots, data.Signers);
                 _cache[repoBase] = cached;
             }
 
@@ -273,7 +260,7 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
     /// </summary>
     public async Task<IReadOnlyDictionary<string, IReadOnlyList<string>>?> GetScreenshotsAsync(
         string repoBase, CancellationToken ct = default) =>
-        (await LoadIndexV2Async(repoBase, ct))?.Screenshots;
+        (await LoadIndexAsync(repoBase, seedEtag: null, ct))?.Screenshots;
 
     /// <returns>
     /// Package id to APK file SHA-256 (lowercased) to signing-cert SHA-256
@@ -282,40 +269,5 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
     /// </returns>
     public async Task<IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>>?> GetSignersAsync(
         string repoBase, CancellationToken ct = default) =>
-        (await LoadIndexV2Async(repoBase, ct))?.Signers;
-
-    /// <summary>
-    /// One conditional fetch per repo per pass feeds both the screenshot and
-    /// signer maps, mirroring <see cref="LoadIndexAsync"/>'s memo semantics.
-    /// </summary>
-    private async Task<CachedIndexV2?> LoadIndexV2Async(string repoBase, CancellationToken ct)
-    {
-        var gate = _indexV2Gates.GetOrAdd(repoBase, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
-        try
-        {
-            _indexV2Cache.TryGetValue(repoBase, out var cached);
-            if (_validatedIndexV2.ContainsKey(repoBase))
-            {
-                return cached;
-            }
-
-            // Mark before the fetch: a failing repo must not be retried for
-            // every app in the pass.
-            _validatedIndexV2[repoBase] = 0;
-            var fetched = await client.GetIndexV2Async(repoBase, cached?.Etag, ct);
-            if (fetched is not null)
-            {
-                var data = FdroidIndexV2Parser.Parse(fetched.Value.Json);
-                cached = new CachedIndexV2(fetched.Value.Etag, data.Screenshots, data.Signers);
-                _indexV2Cache[repoBase] = cached;
-            }
-
-            return cached;
-        }
-        finally
-        {
-            gate.Release();
-        }
-    }
+        (await LoadIndexAsync(repoBase, seedEtag: null, ct))?.Signers;
 }

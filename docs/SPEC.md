@@ -213,10 +213,8 @@ bundle` is rebuilt per deploy, never committed.
   - Fingerprints: analyzed rows record the `apksigner` digests
     (space-joined sets, matched by membership). Index-only F-Droid/Izzy
     rows take the signing-cert SHA-256 from the repo's `index-v2.json`
-    (`packages.<id>.versions.<fileSha>.manifest.signer.sha256`); the
-    legacy v1 `index.xml` `<sig>` is an F-Droid-specific fingerprint
-    (MD5 over the certificate hex), not a certificate digest, so it is
-    never recorded.
+    (`packages.<id>.versions.<fileSha>.manifest.signer.sha256`), the
+    only repo index the server reads.
   - `analyzed` = true once the recorded build was downloaded and
     inspected (badging plus signer extraction), false for index-only
     rows; never downgraded. Only analyzed rows re-run the permission
@@ -484,30 +482,30 @@ therefore treats Izzy as forge-like.
   the shared release pipeline). No `.apk` link → F-Droid fallback,
   else `Failed`.
 - **F-Droid/Izzy** (`FdroidRepoClient` + singleton
-  `FdroidIndexProvider`): conditional GET of `{base}/index.xml`
-  (cached or seed ETag; 304 without cache → `UpToDate`). Each repo is
-  fetched at most once per pass: `BeginRun` resets the run memo, a
-  failed fetch is remembered so a refusing host is not hammered by
-  every app, and one in-flight fetch per repo keeps parallel
+  `FdroidIndexProvider`): conditional GET of `{base}/index-v2.json`
+  (cached or seed ETag; 304 without cache → `UpToDate`) is the only repo
+  index. Each repo is fetched at most once per pass: `BeginRun` resets
+  the run memo, a failed fetch is remembered so a refusing host is not
+  hammered by every app, and one in-flight fetch per repo keeps parallel
   enrichments from stampeding. Both bases are overridable
   (`Enrichment:FdroidRepoBase`, `Enrichment:IzzyRepoBase`) and the
   Izzy base has one fallback mirror
   (`Enrichment:IzzyRepoBaseFallback`) because the official host
   refuses datacenter IPs.
-  The streaming parser collects every `<package>` per
-  `<application>` (document order, newest first); version/versioncode/sig are child
-  **elements** (package attributes accepted as fallback), `<sig>`
-  is the 32-hex signing-cert MD5. The application-level `<desc>` (long
-  description, HTML) is captured as the app's `changelog` (index-sourced
-  notes have no release page, so `changelog_url` stays null). A second
-  conditional GET of `{base}/index-v2.json` (its own per-repo ETag cache)
-  supplies `screenshots`: the preferred `phone` form factor and `en-US`
-  locale set becomes absolute upstream URLs for every package name the
-  app publishes (capped at 12); both repos are checked whatever the app's
-  primary source, so forge apps also gain shots when published on F-Droid
-  or Izzy. The repos fail independently: an unreachable repo keeps the
-  URLs it contributed earlier and never discards the other repo's fresh
-  hits.
+  The parser maps every release of every package in one deserialization,
+  newest `versionCode` first (`file.name`/`file.sha256`/`file.size`,
+  `manifest.versionCode`/`versionName`/`nativecode`/`usesSdk.minSdkVersion`
+  and `manifest.signer.sha256`); releases without a `file.name` are
+  skipped. The localized `metadata.description` (HTML, `en-US` preferred)
+  is captured as the app's `changelog` (index-sourced notes have no
+  release page, so `changelog_url` stays null), and the same fetch
+  supplies `screenshots` from `metadata.screenshots`: the preferred
+  `phone` form factor and `en-US` locale set becomes absolute upstream
+  URLs for every package name the app publishes (capped at 12); both
+  repos are checked whatever the app's primary source, so forge apps also
+  gain shots when published on F-Droid or Izzy. The repos fail
+  independently: an unreachable repo keeps the URLs it contributed
+  earlier and never discards the other repo's fresh hits.
   When both indexes end up with nothing, the app's own repo is the last
   resort: a blobless, no-checkout shallow clone
   (`git clone --depth 1 --filter=blob:none --no-checkout`) lists the tree
@@ -863,10 +861,8 @@ come from `apksigner` (every `Signer #N certificate … digest` line is
 collected - key rotation yields space-joined sets matched by
 membership; MD5 is optional for old build-tools). Index-only F-Droid/Izzy
 rows take the signing-cert SHA-256 from the repo's `index-v2.json`
-(`packages.<id>.versions.<fileSha>.manifest.signer.sha256`); the legacy
-v1 `index.xml` `<sig>` is an F-Droid-specific fingerprint (MD5 over the
-certificate hex), not a certificate digest, and is never used for
-identity or client matching.
+(`packages.<id>.versions.<fileSha>.manifest.signer.sha256`), which is
+also the only repo index the server reads.
 
 Upsert rule: a candidate with the same `package_name`, `sig_key` and
 `abi` updates the row in place only when its `version_code` is higher;

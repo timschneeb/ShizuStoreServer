@@ -5,7 +5,7 @@ using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
-using System.Xml;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
@@ -2710,7 +2710,7 @@ public sealed class AppEnricher(
         {
             fetched = await fdroid.GetPackagesAsync(repoBase, packageId, ChangelogEtag(app), ct);
         }
-        catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or InvalidDataException)
         {
             return Fail(app, now, $"F-Droid: {ex.Message}");
         }
@@ -2732,7 +2732,7 @@ public sealed class AppEnricher(
                 {
                     fetched = await fdroid.GetPackagesAsync(repoBase, packageId, null, ct, force: true);
                 }
-                catch (Exception ex) when (ex is HttpRequestException or XmlException or InvalidDataException)
+                catch (Exception ex) when (ex is HttpRequestException or JsonException or InvalidDataException)
                 {
                     fetched = null;
                 }
@@ -2746,7 +2746,6 @@ public sealed class AppEnricher(
         }
 
         var (packages, indexEtag) = fetched.Value;
-        packages = await ApplyIndexV2SignersAsync(repoBase, packages, ct);
         var package = packages.FirstOrDefault();
         if (package is null)
         {
@@ -2812,8 +2811,8 @@ public sealed class AppEnricher(
         var versionCode = analyzed?.Badging.VersionCode ?? package.VersionCode;
         var versionName = analyzed?.Badging.VersionName ?? package.VersionName;
         var minSdk = analyzed?.Badging.MinSdk ?? package.MinSdk;
-        // The v1 index <sig> is a legacy F-Droid fingerprint, not a cert
-        // digest, so it is never used for identity or client matching.
+        // Index signers come from index-v2 manifest.signer.sha256; an
+        // analyzed APK wins because it reflects the actual file.
         var sigSha256 = analyzed is null
             ? package.SigSha256
             : CertFingerprint.Join(analyzed.Signers.Select(s => s.Sha256));
@@ -2880,56 +2879,6 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
-    /// Patches every package with the signer SHA-256 from the repo
-    /// <c>index-v2.json</c> (the v1 index carries only the legacy <c>&lt;sig&gt;</c>
-    /// fingerprint, which is not a certificate digest). Matching is by the APK
-    /// file hash; packages the v2 index does not list stay untouched. Signer
-    /// trouble never fails an enrich, so any fetch error keeps the v1 data.
-    /// </summary>
-    private async Task<IReadOnlyList<FdroidPackageInfo>> ApplyIndexV2SignersAsync(
-        string repoBase, IReadOnlyList<FdroidPackageInfo> packages, CancellationToken ct)
-    {
-        if (packages.Count == 0)
-        {
-            return packages;
-        }
-
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>>? signers;
-        try
-        {
-            signers = await fdroid.GetSignersAsync(repoBase, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return packages;
-        }
-
-        if (signers is null || signers.Count == 0)
-        {
-            return packages;
-        }
-
-        List<FdroidPackageInfo>? patched = null;
-        for (var i = 0; i < packages.Count; i++)
-        {
-            var package = packages[i];
-            if (package.SigSha256 is not null
-                || NormalizeHash(package.Sha256) is not { } fileHash
-                || !signers.TryGetValue(package.PackageName, out var byFileHash)
-                || !byFileHash.TryGetValue(fileHash, out var certificates)
-                || CertFingerprint.Join(certificates) is not { } fingerprint)
-            {
-                continue;
-            }
-
-            patched ??= [.. packages];
-            patched[i] = package with { SigSha256 = fingerprint };
-        }
-
-        return patched ?? packages;
-    }
-
-    /// <summary>
     /// F-Droid candidate for forge-primary apps: when the same package is
     /// published on F-Droid, record its build next to the primary forge
     /// build. Only runs after a fresh primary enrich (never on
@@ -2953,7 +2902,7 @@ public sealed class AppEnricher(
                 return; // 304 with nothing cached: no new information.
             }
 
-            packages = await ApplyIndexV2SignersAsync(FdroidRepos.FDroidBase, fetched.Value.Packages, ct);
+            packages = fetched.Value.Packages;
             package = packages.FirstOrDefault();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2978,9 +2927,8 @@ public sealed class AppEnricher(
                 && d.Sha256 is not null);
         if (existing is not null)
         {
-            // Backfill the SHA-256 identity from the v2 index when the first
-            // discovery predates it; the legacy v1 fingerprint is not a cert
-            // digest and is never written.
+            // Backfill the SHA-256 identity from the index when the first
+            // discovery predates the signer map.
             if (existing.SigSha256 is null && package.SigSha256 is not null)
             {
                 existing.SigSha256 = package.SigSha256;

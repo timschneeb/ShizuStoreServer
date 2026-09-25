@@ -20,7 +20,7 @@
 ### I. Evidence Before Synthesis (NON-NEGOTIABLE)
 No upstream format, tool output, or API behavior is ever assumed:
 everything is captured from the real artifact first. Parsers are proven
-against live data (real `index.xml`, real `dump badging` /
+against live data (real `index-v2.json`, real `dump badging` /
 `apksigner` output from local binaries); verbatim-output tests lock
 formats so regressions surface as test failures, not production
 surprises. Code is executed to confirm outputs, tests are run to
