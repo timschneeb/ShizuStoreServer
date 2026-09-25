@@ -85,6 +85,14 @@ public sealed class AppDownload
     public List<string> TrackerSignatures { get; set; } = [];
 
     /// <summary>
+    /// True once the recorded build was scanned for analysis signals (declared
+    /// Dhizuku permission, Exodus tracker code signatures). Rows analyzed
+    /// before the signals existed stay false so the next pass re-analyzes them
+    /// once; the flag is never downgraded.
+    /// </summary>
+    public bool Inspected { get; set; }
+
+    /// <summary>
     /// Native ABI the build targets, parsed from the APK's <c>native-code</c>
     /// line; null means a fat/universal build that runs on any device.
     /// </summary>

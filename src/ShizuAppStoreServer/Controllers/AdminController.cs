@@ -19,7 +19,10 @@ public sealed class AdminController(
     /// Authenticates with <c>Authorization: Bearer &lt;token&gt;</c>; the
     /// token comes from <c>Admin:Token</c> config or the
     /// <c>SHIZU_ADMIN_TOKEN</c> / legacy <c>SHIZU_ADMIN_SECRET</c> environment
-    /// variable. The optional JSON body carries a free-form <c>reason</c>.
+    /// variable. The optional JSON body carries a free-form <c>reason</c> and a
+    /// <c>full</c> flag: <c>{"full":true}</c> upgrades the drained pass to a
+    /// full-catalog re-check like the nightly, so operators backfill without
+    /// restarting the service.
     /// </summary>
     [HttpPost]
     [RequestSizeLimit(4096)]
@@ -45,14 +48,23 @@ public sealed class AdminController(
         var bodyBytes = body.ToArray();
 
         string? reason = null;
+        var full = false;
         try
         {
             using var json = JsonDocument.Parse(bodyBytes);
-            if (json.RootElement.ValueKind == JsonValueKind.Object
-                && json.RootElement.TryGetProperty("reason", out var reasonProp)
-                && reasonProp.ValueKind == JsonValueKind.String)
+            if (json.RootElement.ValueKind == JsonValueKind.Object)
             {
-                reason = reasonProp.GetString();
+                if (json.RootElement.TryGetProperty("reason", out var reasonProp)
+                    && reasonProp.ValueKind == JsonValueKind.String)
+                {
+                    reason = reasonProp.GetString();
+                }
+
+                if (json.RootElement.TryGetProperty("full", out var fullProp)
+                    && fullProp.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    full = fullProp.GetBoolean();
+                }
             }
         }
         catch (JsonException)
@@ -64,6 +76,7 @@ public sealed class AdminController(
         {
             RequestedAt = DateTimeOffset.UtcNow,
             Reason = reason,
+            Full = full,
             Processed = false,
         });
         await db.SaveChangesAsync(ct);

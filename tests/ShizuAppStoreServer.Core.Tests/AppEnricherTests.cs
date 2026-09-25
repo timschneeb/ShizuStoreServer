@@ -691,6 +691,53 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task SignalHealReanalyzesPreSignalRowsOnce()
+    {
+        var (first, _, downloads, _, _) = HappyPath();
+        var app = NewApp("signalheal", "SignalHeal", "https://github.com/example/signalheal");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(1, downloads.Calls);
+        var primary = Primary(app);
+        Assert.True(primary.Inspected);
+
+        // Rows analyzed before the signal scan existed have no inspected flag
+        // and must be re-analyzed once to backfill their signals.
+        primary.Inspected = false;
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var (second, _, downloads2, _, _) = HappyPath();
+        Assert.Equal(EnrichOutcome.Enriched, (await second.EnrichAsync(app, T0)).Outcome);
+
+        Assert.Equal(1, downloads2.Calls);
+        Assert.True(Primary(app).Inspected);
+
+        // The backfilled flag stops the heal, so the next pass skips again.
+        await _db.SaveChangesAsync();
+        Age(app);
+        var (third, _, downloads3, _, _) = HappyPath();
+        Assert.Equal(EnrichOutcome.UpToDate, (await third.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(0, downloads3.Calls);
+    }
+
+    [Fact]
+    public async Task SignalHealKeepsIndexOnlyRowsUpToDate()
+    {
+        var (first, _, _) = FdroidHappyPath();
+        var app = NewApp("fdidxsignal", "FdIdxSignal", "https://f-droid.org/packages/com.example.app/");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.False(Primary(app).Analyzed); // APK download failed: index-only row
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        // Index-only rows never ran a badging pass, so the signal heal stays
+        // away from them and the unchanged index remains up to date.
+        var (second, _, downloads2) = FdroidHappyPath();
+        Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(0, downloads2.Calls);
+    }
+
+    [Fact]
     public async Task KeepsWearOnlyBuildWhenNoPhoneFlavorExists()
     {
         var wear = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(400, 400, Color.Red)));
@@ -2821,6 +2868,77 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Null(app.LastError);
     }
 
+    [Fact]
+    public async Task PrimaryFlipLeavesExactlyOnePrimary()
+    {
+        // The partial unique index on (app_id, is_primary) is not deferrable,
+        // so the demotion of the old primary must reach the database before
+        // the promotion of the new row lands (live 2026-09-24: batched
+        // promote-first updates tripped IX_app_downloads_app_id).
+        var (enricher, _, _, _, _) = HappyPath(versionCode: "42");
+        var app = NewApp("primary-flip", "Primary Flip", "https://github.com/example/primaryflip");
+        AddDownload(app, SourceKind.GitHub, "https://example.com/old.apk", versionCode: 5, sigSha256: SignerOutputB);
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(42, rows.Single(d => d.IsPrimary).VersionCode);
+    }
+
+    [Fact]
+    public async Task ReEnrichmentKeepsTheSameRowPrimary()
+    {
+        // The raw demote in RecomputePrimaryAsync bypasses the tracker, so the
+        // tracked row keeps its old flag as the original value; without
+        // rebasing it, a later recompute that picks the same row looks like a
+        // no-op and silently drops the primary (live 2026-09-24: hundreds of
+        // direct-APK apps ended up with no primary download).
+        var (first, _, _, _, _) = HappyPath(signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("primary-keep", "Primary Keep", "https://github.com/example/primarykeep");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.NotNull(Primary(app));
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        // A new release ships a new asset URL and different bytes, but the same
+        // signing identity, so the artifact is analyzed again and the upsert
+        // claims the exact same row.
+        var (second, _, _, _, _) = HappyPath(
+            tag: "v2.0",
+            versionCode: "43",
+            iconColor: Color.Red,
+            etag: "\"rel-etag-2\"",
+            signer: new FakeSignerRunner(_ => SignerOutputA),
+            assetUrl: "https://cdn.example/app-v43.apk");
+        Assert.Equal(EnrichOutcome.Enriched, (await second.EnrichAsync(app, T0)).Outcome);
+
+        var rows = _db.Downloads.Local.Where(d => d.AppId == app.Id).ToList();
+        Assert.Single(rows);
+        Assert.True(rows[0].IsPrimary);
+    }
+
+    [Fact]
+    public async Task HealMissingPrimaryRestoresFlagWithoutDownload()
+    {
+        // Broken post-fix state: rows exist, none primary, and the app is
+        // inside its recheck window. The heal must rebuild the flag from the
+        // stored rows without any network access.
+        var (enricher, github, downloads, _, _) = HappyPath();
+        var app = NewApp("primary-heal", "Primary Heal", "https://github.com/example/primaryheal");
+        app.LastCheckedAt = T0;
+        AddDownload(app, SourceKind.GitHub, "https://cdn.example/heal.apk",
+            versionCode: 42, sigSha256: SignerOutputA, primary: false);
+        await _db.SaveChangesAsync();
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.SkippedFresh, result.Outcome);
+        Assert.True(_db.Downloads.Local.Single(d => d.AppId == app.Id).IsPrimary);
+        Assert.Equal(0, github.Calls + downloads.Calls);
+    }
+
     // ---- Special cases: instafel updater repo + GitCode mirror ----
 
     [Fact]
@@ -4207,6 +4325,43 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
         Assert.Equal(T0, app.LastCheckedAt);
         Assert.Equal(T0, variant.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task UnchangedReleaseHealsVariantWithoutPrimary()
+    {
+        var mainApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var pluginApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("app-release.apk", "https://cdn.example/app.apk", mainApk.Length),
+            ("plugin-release.apk", "https://cdn.example/plugin.apk", pluginApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("plugin", StringComparison.Ordinal)
+                ? pluginApk
+                : mainApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == pluginApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.plugin", label: "Plugin")
+            : TestAssets.CannedBadging(package: "com.example.app", label: "Example"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("variant-primary-heal", "Variant Primary Heal", "https://github.com/example/variant-primary-heal");
+
+        await enricher.EnrichAsync(app, T0);
+        var variant = _db.Apps.Local.Single(a => a.RootAppId == app.Id);
+        var variantDownload = _db.Downloads.Local.Single(d => d.AppId == variant.Id);
+        variantDownload.IsPrimary = false;
+        await _db.SaveChangesAsync();
+
+        // The variant is never selected directly, so an unchanged root pass
+        // must still repair its missing primary flag.
+        Age(app);
+        Age(variant);
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.True(variantDownload.IsPrimary);
     }
 
     // ---- Flavor grouping: same-label APKs of one release become one app with per-package candidates ----

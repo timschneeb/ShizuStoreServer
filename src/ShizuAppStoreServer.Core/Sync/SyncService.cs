@@ -141,6 +141,11 @@ public sealed class SyncService(
             .OrderBy(r => r.Id)
             .ToListAsync(ct);
         var pendingIds = pending.Select(r => r.Id).ToList();
+
+        // A full-flagged admin request upgrades this pass: the row must not be
+        // drained without the full-catalog re-check the operator asked for.
+        fullRecheck |= pending.Exists(r => r.Full);
+
         var effectiveTrigger = pending.Count > 0 ? "webhook" : trigger;
 
         // Best-effort fetch with its own timeout: a stuck network must not

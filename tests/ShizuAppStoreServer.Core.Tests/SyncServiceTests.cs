@@ -181,6 +181,31 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task FullRequestUpgradesThePassToFullCatalog()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        _runner.Calls.Clear();
+
+        _db.SyncRequests.Add(new SyncRequest { RequestedAt = T0, Reason = "signal backfill", Full = true });
+        await _db.SaveChangesAsync();
+
+        // Nothing is due yet the full flag must still re-check every app, or
+        // the operator's backfill would be drained without running.
+        var result = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
+
+        Assert.Equal("webhook", result.Trigger);
+        Assert.False(result.Skipped);
+        Assert.Equal(3, _runner.Calls.Count);
+        Assert.All(_runner.Calls, call => Assert.True(call.Force));
+    }
+
+    [Fact]
     public async Task RequestArrivingDuringAPassStaysQueuedForTheFollowUp()
     {
         if (!InitRepo())

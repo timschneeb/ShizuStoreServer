@@ -300,6 +300,16 @@ if (!app.Environment.IsEnvironment("Testing"))
     }
 }
 
+if (!app.Environment.IsEnvironment("Testing"))
+{
+    // A Gradle daemon can outlive the service instance that started it and
+    // keeps that instance's private /tmp mount, which is gone after a
+    // restart. Paparazzi then cannot attach its ByteBuddy agent and every
+    // render falls back to a letter avatar, so stop stale daemons before
+    // the first render of this instance.
+    await app.Services.GetRequiredService<IPaparazziRenderer>().StopGradleDaemonsAsync();
+}
+
 // One-shot icon re-render:
 // re-renders every recorded-APK icon, prints counts, exits before the
 // workers start. Run with the server stopped (both processes write apps).

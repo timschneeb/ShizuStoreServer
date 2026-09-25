@@ -257,6 +257,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
             e.Property(x => x.Analyzed).HasColumnName("analyzed");
+            e.Property(x => x.Inspected).HasColumnName("inspected");
             e.Property(x => x.ResolvedAt).HasColumnName("resolved_at").IsRequired();
             // NULLS NOT DISTINCT so universal builds (abi null) still dedupe.
             // Package is part of the key: flavor builds of one app share a row
@@ -325,6 +326,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             e.Property(x => x.RequestedAt).HasColumnName("requested_at").IsRequired();
             e.Property(x => x.Reason).HasColumnName("reason").HasMaxLength(256);
+            e.Property(x => x.Full).HasColumnName("full");
             e.Property(x => x.Processed).HasColumnName("processed");
             e.Property(x => x.ProcessedAt).HasColumnName("processed_at");
             e.HasIndex(x => x.Processed);

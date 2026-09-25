@@ -208,6 +208,11 @@ public sealed class AppEnricher(
     public async Task<EnrichResult> EnrichAsync(
         App app, DateTimeOffset now, CancellationToken ct = default, bool force = false)
     {
+        // A pre-fix recompute bug left some row sets without a primary; the
+        // unchanged-asset short-circuits would never revisit them, so repair
+        // from the stored rows before anything else.
+        await HealMissingPrimaryAsync(app, ct);
+
         if (!force
             && app.LastCheckedAt is { } checkedAt
             && checkedAt + (app.LastError is null ? options.SuccessRecheckInterval : options.FailedRecheckInterval) > now)
@@ -274,6 +279,10 @@ public sealed class AppEnricher(
         {
             variant.LastCheckedAt = now;
             variant.LastError = null;
+            // Variants never run their own EnrichAsync, so the per-app primary
+            // heal cannot reach them; repair here, or a flag lost to an
+            // interrupted recompute would stay lost (live 2026-09-25).
+            await HealMissingPrimaryAsync(variant, ct);
         }
     }
 
@@ -662,10 +671,12 @@ public sealed class AppEnricher(
             if (latest is null)
             {
                 // A 304 would keep pre-fix rows permission-less forever (see
-                // NeedsPermissionHeal): refetch the list once and re-analyze
+                // NeedsPermissionHeal), and pre-signal rows would stay without
+                // their analysis signals; refetch the list once and re-analyze
                 // below. A failing refetch is not an upstream change, so stay
                 // up-to-date instead of failing the pass.
-                if (NeedsPermissionHeal(app, await PrimaryDownloadAsync(app, ct)))
+                var current = await PrimaryDownloadAsync(app, ct);
+                if (NeedsPermissionHeal(app, current) || NeedsSignalHeal(current))
                 {
                     try
                     {
@@ -873,10 +884,12 @@ public sealed class AppEnricher(
             if (latest is null)
             {
                 // A 304 would keep pre-fix rows permission-less forever (see
-                // NeedsPermissionHeal): refetch the list once and re-analyze
+                // NeedsPermissionHeal), and pre-signal rows would stay without
+                // their analysis signals; refetch the list once and re-analyze
                 // below. A failing refetch is not an upstream change, so stay
                 // up-to-date instead of failing the pass.
-                if (NeedsPermissionHeal(app, await PrimaryDownloadAsync(app, ct)))
+                var current = await PrimaryDownloadAsync(app, ct);
+                if (NeedsPermissionHeal(app, current) || NeedsSignalHeal(current))
                 {
                     try
                     {
@@ -992,6 +1005,7 @@ public sealed class AppEnricher(
             && row.IconHash is not null
             && IconFileExists(row.IconHash)
             && !NeedsPermissionHeal(row, download)
+            && !NeedsSignalHeal(download)
             && !ReleasedNewerThan(releasedAt, row);
 
         void Stamp(App row)
@@ -2060,6 +2074,19 @@ public sealed class AppEnricher(
         && package.SigSha256 is not null;
 
     /// <summary>
+    /// Pre-signals rows recorded a fully analyzed build but never scanned it
+    /// for analysis signals (Dhizuku declaration, Exodus tracker code
+    /// signatures); the same-asset short-circuits would keep them empty
+    /// forever, so re-analyze once. The inspected flag is set by the first
+    /// signal scan and never downgraded; index-only rows never ran a badging
+    /// pass and stay untouched.
+    /// </summary>
+    private static bool NeedsSignalHeal(AppDownload? primary) =>
+        primary is not null
+        && primary.Analyzed
+        && !primary.Inspected;
+
+    /// <summary>
     /// The top-level GitLab namespace (group or user) is a stable developer
     /// identity, so it can be read from the project path without a call.
     /// </summary>
@@ -2361,9 +2388,11 @@ public sealed class AppEnricher(
         }
 
         // Signals come from a real inspection only; an index-only update
-        // keeps whatever the last analysis recorded.
+        // keeps whatever the last analysis recorded. The inspected flag marks
+        // that a signal scan ran and is never downgraded.
         if (candidate.Inspection is not null)
         {
+            row.Inspected = true;
             row.DhizukuDeclared = candidate.Inspection.Signals.DhizukuDeclared;
             row.Trackers = candidate.Inspection.Trackers
                 .Select(t => t.Name).Distinct(StringComparer.Ordinal).ToList();
@@ -2400,10 +2429,60 @@ public sealed class AppEnricher(
             best = best is null ? row : PreferDownload(row, best);
         }
 
+        // The partial unique index on (app_id) where is_primary is not
+        // deferrable, and a single SaveChanges may send the promotion before
+        // the demotion. Persist the demotion first (raw, so pending inserts
+        // stay untouched), then let the caller's save promote the winner.
+        if (rows.Any(r => r.IsPrimary))
+        {
+            await db.Downloads
+                .Where(d => d.AppId == app.Id && d.IsPrimary)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.IsPrimary, false), ct);
+
+            // The raw update bypasses the tracker, so the tracked rows still
+            // carry their old flag as the original value; re-promoting the
+            // same row would then look like a no-op and never be saved.
+            foreach (var row in rows)
+            {
+                var entry = db.Entry(row);
+                if (entry.State != EntityState.Detached)
+                {
+                    entry.Property(x => x.IsPrimary).OriginalValue = false;
+                }
+            }
+        }
+
         foreach (var row in rows)
         {
             row.IsPrimary = ReferenceEquals(row, best);
         }
+    }
+
+    /// <summary>
+    /// Rebuilds the primary flag for an app whose stored rows lost it (a
+    /// pre-fix recompute bug). Cheap: one existence check, and a recompute
+    /// over rows already in the database, never a download.
+    /// </summary>
+    private async Task HealMissingPrimaryAsync(App app, CancellationToken ct)
+    {
+        if (app.Id == 0)
+        {
+            return;
+        }
+
+        if (await db.Downloads.AnyAsync(d => d.AppId == app.Id && d.IsPrimary, ct))
+        {
+            return;
+        }
+
+        var rows = await LoadDownloadsAsync(app, ct);
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        await RecomputePrimaryAsync(app, ct, app.PackageName);
+        await db.SaveChangesAsync(ct);
     }
 
     private static AppDownload PreferDownload(AppDownload a, AppDownload b)
@@ -2589,6 +2668,7 @@ public sealed class AppEnricher(
             // change, so stay up-to-date instead of failing the pass.
             var primary = await PrimaryDownloadAsync(app, ct);
             if (NeedsPermissionHeal(app, primary)
+                || NeedsSignalHeal(primary)
                 || (primary is not null && !primary.Analyzed && primary.SigSha256 is null))
             {
                 try
@@ -2647,6 +2727,7 @@ public sealed class AppEnricher(
             && app.IconHash is not null && IconFileExists(app.IconHash)
             && !NeedsPermissionHeal(app, current)
             && !NeedsSignerBackfill(current, package)
+            && !NeedsSignalHeal(current)
             && siblingsRecorded)
         {
             app.EnrichEtag = indexEtag;

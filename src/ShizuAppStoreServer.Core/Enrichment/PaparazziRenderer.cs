@@ -27,8 +27,10 @@ public interface IPaparazziRenderer
     /// Stops the warm Gradle daemon(s) for this tool. Called after a batched
     /// refresh: chunks already ran with <c>--no-daemon</c> and exited, but
     /// the daemon left warm by earlier single renders would otherwise sit on
-    /// a few hundred MB. Best effort; a failure just means the daemon idles
-    /// out on its own.
+    /// a few hundred MB. Also called at service startup, because a daemon
+    /// that survived a restart keeps the old instance's private temp mount
+    /// and can no longer host Paparazzi's self-attaching agent. Best effort;
+    /// a failure just means the daemon idles out on its own.
     /// </summary>
     Task StopGradleDaemonsAsync();
 }
@@ -270,7 +272,7 @@ public sealed class PaparazziRenderer(
                 process.ErrorDataReceived += (_, _) => { };
                 process.BeginErrorReadLine();
                 await process.WaitForExitAsync(cts.Token);
-                _runLog.Detail($"gradle --stop done after refresh (exit {process.ExitCode})");
+                _runLog.Detail($"gradle --stop done (exit {process.ExitCode})");
             }
             catch (OperationCanceledException)
             {

@@ -251,7 +251,10 @@ Batched renders are chunked (`IconBatchChunkSize`, default 50) and every
 chunk runs with `--no-daemon`, so no render JVM survives into the next
 chunk and memory cannot accumulate across a backfill; a failed chunk
 fails only its own apps, and the warm daemon is stopped once after the
-last chunk.
+last chunk. The service also stops any daemon left behind by a previous
+instance at startup: such a daemon keeps the old instance's private
+`/tmp` mount, whose files are gone after a restart, and Paparazzi's
+ByteBuddy attach then fails so every render degrades to a letter avatar.
 Raise these only after watching `systemctl status` and `free -h` during a
 full pass. The units set `TMPDIR=/opt/shizuappstore/tmp`: APK downloads
 and staged render dirs are disk-backed, because on a 4GB box a single
@@ -400,8 +403,14 @@ and ships `GRADLE_USER_HOME=/opt/shizuappstore/gradle-home`,
 `ANDROID_HOME=/opt/android-sdk`, `XDG_RUNTIME_DIR=/run/user/958` (with
 `ProtectHome=read-only` so the render scope can reach the manager bus),
 `LogsDirectory=shizu`, and
-`ReadWritePaths` for `icons`, `icon-render`, `gradle-home` and `list`
-(the list clone is `git fetch`ed in place).
+`ReadWritePaths` for `icons`, `icon-render`, `gradle-home`, `list` and
+`tmp` (the list clone is `git fetch`ed in place; `tmp` is the service's
+`TMPDIR`). The Exodus tracker catalog cache
+(`Enrichment:ExodusTrackerCachePath`) must sit on one of those writable
+paths: production sets `/opt/shizuappstore/tmp/exodus-trackers.json`,
+because the repo default is relative to the content root, which
+`ProtectSystem=strict` keeps read-only. When the cache is unwritable the
+catalog is simply refetched each pass.
 
 Exposure: a token-managed Cloudflare Tunnel on the same host routes
 `shizustore.timschneeberger.me` to `http://localhost:5137` (configured in
@@ -442,6 +451,16 @@ Never start the one-shot while `shizuappstore.service` is active: two
 enrich passes would race on the same rows. A failed run reports
 `Result=exit-code` (or `timeout`) in `systemctl status`; `reset-failed`
 before retrying a `--sync-once --full` re-run.
+
+Once the service is serving traffic it must stay up: stopping it is
+limited to deployments (a few seconds) and the first-boot window above.
+Routine heals and backfills go through the live server's admin API,
+which takes the shared sync gate and keeps reads serving. Queuing `POST
+/v1/admin/sync` wakes the fast loop for due apps; add `{"full":true}` to
+make that pass a full-catalog re-check like the nightly, which is how
+analysis-signal backfills run for rows recorded before the signal
+columns existed (`inspected = false` heals once). The nightly pass at
+`Sync:NightlyTimeUtc` (03:00 UTC) does the same on its own.
 
 If a backfill committed raster-fallback icons because a single render
 missed its timeout (fixed for future passes by the salvage and batching
@@ -491,6 +510,17 @@ curl -fsS https://shizustore.timschneeberger.me/v1/admin/refresh-screenshots \
 ```
 
 No request body; `DELETE` on the same route cancels a running pass.
+
+Backfills use the sync trigger with the full flag; the pass takes the
+sync gate, so the fast and nightly passes skip while it runs:
+
+```bash
+TOKEN=$(sudo sed -n 's/^SHIZU_ADMIN_SECRET=//p' /etc/shizuappstore/env)
+curl -fsS -X POST https://shizustore.timschneeberger.me/v1/admin/sync \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"signal backfill","full":true}'   # 202; the next fast-loop pass drains it
+```
 
 To force every client to drop its cached catalog and pull a fresh one
 (after a server-side repair left dead rows in local caches), stamp the

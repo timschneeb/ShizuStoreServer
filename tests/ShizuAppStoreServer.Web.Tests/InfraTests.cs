@@ -76,7 +76,25 @@ public sealed class AdminTests(ShizuApiFactory factory) : IClassFixture<ShizuApi
         {
             var row = await db.SyncRequests.SingleAsync();
             Assert.Equal("webhook-test", row.Reason);
+            Assert.False(row.Full);
             Assert.False(row.Processed);
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task FullFlagIsQueued()
+    {
+        await factory.ResetAsync(_ => { });
+        var client = factory.NewClient();
+
+        var response = await client.SendAsync(Authorized("""{"reason":"backfill","full":true}"""));
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        await factory.QueryAsync(async db =>
+        {
+            var row = await db.SyncRequests.SingleAsync();
+            Assert.True(row.Full);
             return 0;
         });
     }

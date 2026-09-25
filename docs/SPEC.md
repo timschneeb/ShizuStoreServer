@@ -199,7 +199,8 @@ bundle` is rebuilt per deploy, never committed.
   `apk_url`, `archive_entry`, `version_code`, `version_name`,
   `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `analyzed`, `min_sdk`,
   `target_sdk`, `compile_sdk`, `locales`, `dhizuku_declared`, `trackers`,
-  `tracker_signatures`, `abi`, `sig_key`, `is_primary`, `resolved_at`.
+  `tracker_signatures`, `inspected`, `abi`, `sig_key`, `is_primary`,
+  `resolved_at`.
   - `sig_key` = lowercased first space-token of `sig_sha256`, else of
     `sig_md5`, else `url:<apk_url>`; `abi` = the analyzed APK's
     `native-code` ABI (null for fat/universal builds, or the F-Droid
@@ -232,6 +233,11 @@ bundle` is rebuilt per deploy, never committed.
     "not detected by code signature", never "tracker-free". The Shizuku
     permission is intentionally not tracked: nearly every app in the
     catalog declares it, so it separates nothing.
+  - `inspected` = true once the recorded build was scanned for the
+    analysis signals; never downgraded. Rows analyzed before the scan
+    existed are false, so the next pass re-analyzes them once to
+    backfill the signals; index-only rows are never re-downloaded for
+    this.
   - Upsert: same `(package_name, sig_key, abi)` updates in place only
     when the new `version_code` is higher; on an equal `version_code`
     the preferred source's URL is kept; lower versions are ignored. A
@@ -247,7 +253,9 @@ bundle` is rebuilt per deploy, never committed.
     first, then `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then
     others), then a non-null `sig_sha256` (an analyzed identity beats an
     index-only twin), then a fixed source order. Exactly one primary per
-    app (partial unique index on `app_id` where `is_primary`).
+    app (partial unique index on `app_id` where `is_primary`); a row set
+    without one is rebuilt from the stored rows on the next pass without
+    downloading anything.
 - **app_versions** - (`app_id`, `version_code`, `version_name`,
   `apk_url`, `detected_at`); a row is appended only when the
   `version_code` is unseen for the app (append-only history). The
@@ -876,7 +884,11 @@ higher `version_code`, then ABI (`null` universal first, then
 `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then others), then a
 non-null `sig_sha256` (an analyzed identity beats an index-only
 twin), then a fixed source order. Exactly one primary per app
-(partial unique index on `app_id` where `is_primary`). This keeps a release that ships only
+(partial unique index on `app_id` where `is_primary`). Primary changes
+are persisted demote-first so the non-deferrable partial unique index
+never observes two primaries at once, and a row set that lost the flag
+is rebuilt from the stored rows on the next pass without downloading
+anything. This keeps a release that ships only
 per-architecture APKs (BiliDownOut-style) from defaulting to whichever
 asset happens to be largest.
 
@@ -1071,7 +1083,7 @@ rather than persisting them.
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
 | `GET /` | 302 to the project repo (`https://github.com/timschneeb/ShizuStore`); the bare host is a browser entry point, not part of the API. No rate limit, no cache. |
 | `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
-| `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). |
+| `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). The optional JSON body carries a free-form `reason` and a `full` flag: `{"full":true}` upgrades the drained pass to a full-catalog re-check like the nightly. |
 | `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Does not write a `sync_runs` row. |
 | `GET /v1/admin/refresh-icons` | Same token rules. Current refresh status: `state` (`idle\|running\|completed\|failed`), `force`, `startedAt`/`finishedAt`, `checked`/`refreshed`/`alreadyCurrent`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-icons` | Same token rules. Cancels the running refresh → 202, or 409 when nothing is running. |
