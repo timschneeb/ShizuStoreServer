@@ -179,4 +179,69 @@ public sealed class CatalogHealthCheckTests : IDisposable
 
         Assert.Empty(issues);
     }
+
+    [Fact]
+    public async Task DuplicatePackageFlagsEveryMember()
+    {
+        var category = Category();
+        var first = HealthyApp(category, "island");
+        first.PackageName = "com.oasisfeng.island";
+        var second = HealthyApp(category, "com-oasisfeng-island");
+        second.PackageName = "Com.Oasisfeng.Island";
+        var excluded = HealthyApp(category, "island-excluded");
+        excluded.Availability = Availability.Excluded;
+        excluded.PackageName = "com.oasisfeng.island";
+        var unique = HealthyApp(category, "tuner");
+        unique.PackageName = "com.example.tuner";
+        _db.Apps.AddRange(first, second, excluded, unique);
+        await _db.SaveChangesAsync();
+
+        var issues = await CatalogHealthCheck.CheckAsync(_db, T0.AddHours(1), Window);
+
+        var duplicates = issues.Where(i => i.Rule == CatalogHealthCheck.DuplicatePackage).ToList();
+        Assert.Equal(2, duplicates.Count);
+        Assert.Contains(duplicates, i => i.Slug == "island" && i.Message.Contains("'com-oasisfeng-island'"));
+        Assert.Contains(duplicates, i => i.Slug == "com-oasisfeng-island" && i.Message.Contains("'island'"));
+        Assert.DoesNotContain(duplicates, i => i.Slug == "tuner");
+    }
+
+    [Fact]
+    public async Task VersionAnomalyFlagsPrimaryOlderThanHistory()
+    {
+        var category = Category();
+        var regressed = HealthyApp(category, "universal-installer");
+        regressed.Availability = Availability.DirectApk;
+        regressed.PackageName = "com.example.installer";
+        regressed.Downloads.Add(new AppDownload
+        {
+            Source = SourceKind.GitHub,
+            ApkUrl = "https://example.com/installer.apk",
+            SigKey = "abc",
+            IsPrimary = true,
+            VersionCode = 42,
+            ResolvedAt = T0,
+        });
+        regressed.Versions.Add(new AppVersion { VersionCode = 2032, DetectedAt = T0 });
+        var clean = HealthyApp(category, "clean");
+        clean.Availability = Availability.DirectApk;
+        clean.PackageName = "com.example.clean";
+        clean.Downloads.Add(new AppDownload
+        {
+            Source = SourceKind.GitHub,
+            ApkUrl = "https://example.com/clean.apk",
+            SigKey = "abc",
+            IsPrimary = true,
+            VersionCode = 7,
+            ResolvedAt = T0,
+        });
+        clean.Versions.Add(new AppVersion { VersionCode = 7, DetectedAt = T0 });
+        _db.Apps.AddRange(regressed, clean);
+        await _db.SaveChangesAsync();
+
+        var issues = await CatalogHealthCheck.CheckAsync(_db, T0.AddHours(1), Window);
+
+        var anomaly = Assert.Single(issues, i => i.Rule == CatalogHealthCheck.VersionAnomaly);
+        Assert.Equal("universal-installer", anomaly.Slug);
+        Assert.Contains("2032", anomaly.Message);
+    }
 }

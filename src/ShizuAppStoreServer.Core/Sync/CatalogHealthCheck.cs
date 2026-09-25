@@ -20,6 +20,8 @@ public static class CatalogHealthCheck
     public const string NeverChecked = "never_checked";
     public const string StaleCheck = "stale_check";
     public const string BadUrl = "bad_url";
+    public const string DuplicatePackage = "duplicate_package";
+    public const string VersionAnomaly = "version_anomaly";
 
     public static async Task<List<QualityIssue>> CheckAsync(
         ShizuDbContext db, DateTimeOffset now, TimeSpan successWindow, CancellationToken ct = default)
@@ -27,6 +29,7 @@ public static class CatalogHealthCheck
         var apps = await db.Apps.AsNoTracking()
             .Where(a => a.Availability != Availability.Excluded)
             .Include(a => a.Downloads)
+            .Include(a => a.Versions)
             .ToListAsync(ct);
 
         var issues = new List<QualityIssue>();
@@ -79,9 +82,49 @@ public static class CatalogHealthCheck
                 // the loop is likely wedged for it rather than just due.
                 issues.Add(new QualityIssue(StaleCheck, app.Id, app.Slug, "App missed two enrichment windows."));
             }
+
+            var primary = app.Downloads.FirstOrDefault(d => d.IsPrimary);
+            if (primary?.VersionCode is long primaryCode)
+            {
+                var newest = app.Versions.Count == 0 ? null : app.Versions.Max(v => v.VersionCode);
+                if (newest > primaryCode)
+                {
+                    issues.Add(new QualityIssue(VersionAnomaly, app.Id, app.Slug,
+                        $"Primary download version {primaryCode} is older than the newest recorded version {newest}; " +
+                        "check for a skipped release or failed APK analysis."));
+                }
+            }
         }
 
+        AddDuplicatePackageIssues(apps, issues);
+
         return issues;
+    }
+
+    /// <summary>
+    /// Two live listings sharing a canonical package overwrite each other on
+    /// install, so every member of a duplicate group is reported.
+    /// </summary>
+    private static void AddDuplicatePackageIssues(List<App> apps, List<QualityIssue> issues)
+    {
+        var groups = apps
+            .Where(a => !string.IsNullOrWhiteSpace(a.PackageName))
+            .GroupBy(a => a.PackageName!, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Select(a => a.Slug).Distinct(StringComparer.Ordinal).Count() > 1)
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in groups)
+        {
+            var members = group.OrderBy(a => a.Slug, StringComparer.Ordinal).ToList();
+            foreach (var app in members)
+            {
+                var others = string.Join(", ", members
+                    .Where(m => m.Slug != app.Slug)
+                    .Select(m => $"'{m.Slug}'"));
+                issues.Add(new QualityIssue(DuplicatePackage, app.Id, app.Slug,
+                    $"Package '{group.Key}' is also listed as {others}."));
+            }
+        }
     }
 
     private static bool IsHttpUrl(string url) =>

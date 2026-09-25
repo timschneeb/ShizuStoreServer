@@ -939,7 +939,9 @@ pass's warnings (README plus `ARCHIVED.md`), enrich rows from every
 non-excluded row currently carrying `last_error`, quality rows from
 `CatalogHealthCheck` (missing license/description/icon, non-http
 entry or source URL, direct-APK rows without package name or primary
-download, never-checked or twice-window-stale rows; excluded rows are
+download, never-checked or twice-window-stale rows, duplicate
+canonical packages across live listings, primary downloads older
+than the newest recorded version; excluded rows are
 never checked, and a variant shares its root's check freshness because
 the root's completed pass stamps the whole variant group). Due-only
 passes (HEAD unchanged) keep the previous
