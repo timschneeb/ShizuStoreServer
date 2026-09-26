@@ -215,6 +215,57 @@ public sealed class App
     /// <summary>Installable build candidates: one row per signing identity.</summary>
     public List<AppDownload> Downloads { get; } = [];
 
-    /// <summary>Evidence rows behind the Shizuku usage classification.</summary>
-    public List<AppSignal> Signals { get; } = [];
+    /// <summary>
+    /// One-line AI summary of what the app does with Shizuku, shown in the
+    /// details usage row. Null when the app has no analyzable repo or the
+    /// analysis has not succeeded yet. Server-only: sent on the detail
+    /// endpoint, never in summaries or the change feed.
+    /// </summary>
+    public string? UsageShort { get; set; }
+
+    /// <summary>
+    /// Full AI usage report as GitHub-flavored markdown, shown on the usage
+    /// subscreen. Null under the same conditions as <see cref="UsageShort"/>.
+    /// Server-only: sent on the detail endpoint, never in summaries or the
+    /// change feed.
+    /// </summary>
+    public string? UsageMarkdown { get; set; }
+
+    /// <summary>
+    /// Capability section of the report on its own: intro sentence plus the
+    /// bold-labelled capability bullets. Stored so the sections can be
+    /// rendered separately; <see cref="UsageMarkdown"/> is the composed text
+    /// with the server-owned headings.
+    /// </summary>
+    public string? UsageMarkdownUsage { get; set; }
+
+    /// <summary>API list section of the report on its own, without a heading; null when no Shizuku usage was found.</summary>
+    public string? UsageMarkdownApiUsage { get; set; }
+
+    /// <summary>Notable details section of the report on its own, without a heading; null when there is nothing notable.</summary>
+    public string? UsageMarkdownNotableDetails { get; set; }
+
+    /// <summary>When the stored analysis completed; null means never analyzed.</summary>
+    public DateTimeOffset? UsageAnalyzedAt { get; set; }
+
+    /// <summary>Model id that produced the stored analysis.</summary>
+    public string? UsageModel { get; set; }
+
+    /// <summary>Commit the stored analysis was generated from.</summary>
+    public string? UsageCommit { get; set; }
+
+    /// <summary>Release tag the commit came from, when one was resolved.</summary>
+    public string? UsageReleaseRef { get; set; }
+
+    /// <summary>
+    /// Prompt contract generation of the stored analysis; older than
+    /// <c>UsageAnalysisOptions.PromptVersion</c> marks it stale for backfill.
+    /// </summary>
+    public int UsagePromptVersion { get; set; }
+
+    /// <summary>
+    /// Pipeline generation (context, tools, validation) of the stored analysis;
+    /// older than <c>UsageAnalysisOptions.AnalysisVersion</c> marks it stale.
+    /// </summary>
+    public int UsageAnalysisVersion { get; set; }
 }

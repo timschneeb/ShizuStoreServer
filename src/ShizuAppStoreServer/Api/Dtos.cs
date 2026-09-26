@@ -39,7 +39,6 @@ public sealed record AppSummaryDto(
     int? LocaleCount = null,
     IReadOnlyList<string>? Abis = null,
     IReadOnlyDictionary<string, string>? LocalizedLabels = null,
-    IReadOnlyList<string>? Managers = null,
     bool DhizukuDeclared = false,
     IReadOnlyList<string>? Trackers = null,
     IReadOnlyList<TrackerTagDto>? TrackerTags = null);
@@ -132,12 +131,9 @@ public sealed record AppDetailDto(
     int? LocaleCount = null,
     IReadOnlyList<string>? Locales = null,
     IReadOnlyList<string>? Abis = null,
-    IReadOnlyList<string>? Managers = null,
-    string? ApiForm = null,
-    IReadOnlyList<string>? Capabilities = null,
-    bool UsageOptional = false,
-    string? UsageSummary = null,
-    IReadOnlyList<AppSignalDto>? Signals = null,
+    string? UsageShort = null,
+    string? UsageMarkdown = null,
+    DateTimeOffset? UsageAnalyzedAt = null,
     bool DhizukuDeclared = false,
     IReadOnlyList<string>? Trackers = null,
     IReadOnlyList<TrackerTagDto>? TrackerTags = null);
@@ -146,13 +142,6 @@ public sealed record CategoryPathDto(string Slug, string Name);
 
 /// <summary>One detected Exodus tracker with its category tags.</summary>
 public sealed record TrackerTagDto(string Name, IReadOnlyList<string> Tags);
-
-/// <summary>
-/// One evidence row behind the Shizuku usage classification. <c>Kind</c> is
-/// permission/component/marker/command/manager/fallback, <c>Source</c> is
-/// apk/source and <c>Confidence</c> is strong/weak.
-/// </summary>
-public sealed record AppSignalDto(string Kind, string Value, string Confidence);
 
 public sealed record CategoryNodeDto(
     string Slug,
@@ -242,3 +231,66 @@ public sealed record ScreenshotRefreshStatusDto(
 
 /// <summary>Result of <c>POST /v1/apps/{slug}/installs</c>: the new total.</summary>
 public sealed record InstallRecordedDto(string Slug, long InstallCount);
+
+/// <summary>Optional body for <c>POST /v1/admin/usage-analysis/queue</c>.</summary>
+public sealed record UsageAnalysisQueueRequestDto(
+    bool OnlyMissing = true,
+    bool Stale = false,
+    bool Force = false,
+    string? Slug = null,
+    int? Limit = null);
+
+public sealed record UsageAnalysisQueueDto(int Queued);
+
+/// <summary>Operator view of the AI usage-analysis queue and budget.</summary>
+public sealed record UsageAnalysisStatusDto(
+    bool Enabled,
+    string Model,
+    int Pending,
+    int Running,
+    int Succeeded,
+    int Failed,
+    int StartedToday,
+    int MaxRunsPerDay,
+    decimal SpentThisMonthUsd,
+    decimal MonthlyBudgetUsd,
+    IReadOnlyList<UsageAnalysisRunDto> RecentFailures);
+
+public sealed record UsageAnalysisRunDto(
+    long Id,
+    string? Slug,
+    string Model,
+    int Attempts,
+    string? RepoCommit,
+    string? Error,
+    string? LogFile,
+    long InputTokens,
+    long CachedInputTokens,
+    long OutputTokens,
+    decimal CostUsd,
+    int ToolCalls,
+    DateTimeOffset? FinishedAt);
+
+/// <summary>Aggregated token and cost stats for the analyzer.</summary>
+public sealed record UsageAnalysisStatsDto(
+    int Runs,
+    long InputTokens,
+    long CachedInputTokens,
+    long OutputTokens,
+    decimal CostUsd,
+    IReadOnlyList<UsageAnalysisDayDto> Days,
+    IReadOnlyList<UsageAnalysisModelDto> Models);
+
+public sealed record UsageAnalysisDayDto(
+    string Day,
+    int Runs,
+    long InputTokens,
+    long OutputTokens,
+    decimal CostUsd);
+
+public sealed record UsageAnalysisModelDto(
+    string Model,
+    int Runs,
+    long InputTokens,
+    long OutputTokens,
+    decimal CostUsd);

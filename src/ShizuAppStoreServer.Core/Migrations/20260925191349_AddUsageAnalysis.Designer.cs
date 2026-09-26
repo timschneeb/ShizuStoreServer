@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260925191349_AddUsageAnalysis")]
+    partial class AddUsageAnalysis
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -263,18 +266,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("text")
                         .HasColumnName("usage_markdown");
 
-                    b.Property<string>("UsageMarkdownApiUsage")
-                        .HasColumnType("text")
-                        .HasColumnName("usage_markdown_api_usage");
-
-                    b.Property<string>("UsageMarkdownNotableDetails")
-                        .HasColumnType("text")
-                        .HasColumnName("usage_markdown_notable_details");
-
-                    b.Property<string>("UsageMarkdownUsage")
-                        .HasColumnType("text")
-                        .HasColumnName("usage_markdown_usage");
-
                     b.Property<string>("UsageModel")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")
@@ -399,11 +390,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)")
                         .HasColumnName("package_name");
-
-                    b.Property<string>("ReleaseTag")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)")
-                        .HasColumnName("release_tag");
 
                     b.Property<DateTimeOffset>("ResolvedAt")
                         .HasColumnType("timestamp with time zone")
@@ -1158,11 +1144,6 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Property<long>("InputTokens")
                         .HasColumnType("bigint")
                         .HasColumnName("input_tokens");
-
-                    b.Property<string>("LogFile")
-                        .HasMaxLength(260)
-                        .HasColumnType("character varying(260)")
-                        .HasColumnName("log_file");
 
                     b.Property<string>("Model")
                         .HasMaxLength(64)

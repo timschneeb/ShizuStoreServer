@@ -28,6 +28,14 @@ public sealed class AppDownload
     /// <summary>Repo key or F-Droid package id used to re-resolve the source.</summary>
     public string? SourceRef { get; set; }
 
+    /// <summary>
+    /// Forge release tag the artifact URL belongs to, recorded from the release
+    /// metadata. Source analysis checks out this tag; the badged version name
+    /// can lag behind the release (for example when the project never bumps
+    /// <c>versionName</c>).
+    /// </summary>
+    public string? ReleaseTag { get; set; }
+
     public required string ApkUrl { get; set; }
 
     /// <summary>APK entry inside <see cref="ApkUrl"/> when that is a zip archive.</summary>
@@ -98,67 +106,6 @@ public sealed class AppDownload
     /// once; the flag is never downgraded.
     /// </summary>
     public bool Inspected { get; set; }
-
-    /// <summary>
-    /// Shizuku-family managers the build can drive, canonical order:
-    /// <c>shizuku</c>, <c>dhizuku</c>, <c>sui</c>, <c>root</c>. Empty until the
-    /// usage pass ran or when no manager evidence was found.
-    /// </summary>
-    public List<string> Managers { get; set; } = [];
-
-    /// <summary>
-    /// Shizuku API form the build uses: <c>user_service</c>, <c>new_process</c>
-    /// or <c>permission</c>; null until usage evidence exists.
-    /// </summary>
-    public string? ApiForm { get; set; }
-
-    /// <summary>
-    /// Capabilities the shell command strings suggest, canonical order:
-    /// install, uninstall, freeze, appops, system_settings, process,
-    /// diagnostics, reboot, wireless_adb, compile. Evidence of capability, not
-    /// proof of use.
-    /// </summary>
-    public List<string> Capabilities { get; set; } = [];
-
-    /// <summary>
-    /// True when a fallback path (package installer, install intent) suggests
-    /// Shizuku is optional rather than required. Only meaningful with managers.
-    /// </summary>
-    public bool UsageOptional { get; set; }
-
-    /// <summary>
-    /// True once a source scan reached the repo tree, so a row without evidence
-    /// is genuinely usage-free rather than unscanned. A failed fetch stays
-    /// false so the next pass retries.
-    /// </summary>
-    public bool UsageSourceScanned { get; set; }
-
-    /// <summary>
-    /// Usage extraction generation (<c>0</c> before versioning). Rows older
-    /// than <c>AppEnricher.CurrentUsageVersion</c> are re-scanned once.
-    /// </summary>
-    public int UsageVersion { get; set; }
-
-    /// <summary>
-    /// Raw usage evidence as <c>kind|value|source|confidence</c> entries, so a
-    /// detection can be audited and replayed without a second scan.
-    /// </summary>
-    public List<string> UsageEvidence { get; set; } = [];
-
-    /// <summary>Evidence-bound usage summary shown on the details screen; null until generated.</summary>
-    public string? UsageSummary { get; set; }
-
-    /// <summary>Generator that produced <see cref="UsageSummary"/>: a model id or <c>template-v1</c>.</summary>
-    public string? UsageSummaryModel { get; set; }
-
-    /// <summary>Hash of the evidence bundle the summary was generated from.</summary>
-    public string? UsageSummaryHash { get; set; }
-
-    /// <summary>
-    /// Summary generation version. A stored summary older than
-    /// <c>AppEnricher.CurrentUsageSummaryVersion</c> is regenerated once.
-    /// </summary>
-    public int UsageSummaryVersion { get; set; }
 
     /// <summary>
     /// Native ABI the build targets, parsed from the APK's <c>native-code</c>

@@ -89,15 +89,6 @@ factor is the app.
 - signing certificate, its DN, key algorithm and size, and the verified
   signature schemes (v1..v4)
 - the declared Dhizuku permission, if any
-- Shizuku usage: manager support (Shizuku, Dhizuku, Sui, root), the integration
-  form (modern user service, legacy new process, permission flow), capability
-  hints from shell command strings (install, uninstall, freeze, AppOps, system
-  and power settings, process control, diagnostics, reboot, wireless ADB
-  pairing, app compilation) and fallback markers that suggest Shizuku is
-  optional
-- a bounded source scan of the app's forge repository (repository tree plus
-  selected manifest, Kotlin/Java/AIDL, Gradle and ProGuard files; never a
-  clone), merged with the APK markers
 - Exodus tracker code signatures matched in the DEX, with each tracker's
   category tags
 
@@ -121,15 +112,75 @@ does. The Dhizuku flag means the build declares a
 `com.rosan.dhizuku.permission.*` permission; the Shizuku permission is not
 tracked because nearly every app declares it.
 
-Shizuku capability hints describe what an app can do with a granted manager,
-never what it does: a shell command string proves the app is able to run that
-operation, not that it ever runs it. The server ships a deterministic summary
-built from the detected markers. When an OpenAI-compatible endpoint is
-configured, a model may replace that summary, but only with claims that cite
-evidence ids which are validated against the evidence bundle; otherwise the
-template text stands. The source scan is bounded (a few files per app, no
-clone) and best-effort: a failed tree fetch leaves the row pending so a later
-pass retries, and APK markers alone still produce a classification.
+### How the AI usage report is written
+
+The "How this app uses Shizuku" text is generated from the app's **public
+source repository**, not from the APK. The server shallow-clones the repo at
+the release tag the served artifact came from: the tag recorded from the forge
+release metadata, else the tag in the artifact URL, and only then a tag
+matching the badged version (falling back to the default branch). That order
+matters because a project can publish a new release without bumping its
+`versionName`; the badged version alone would check out an older tree. The
+server pre-scans the checkout into a privilege surface map (Shizuku imports,
+entry points, user services, AIDL members and command helpers with file and
+line, plus bridge call sites and dependency declarations for Flutter/Dart,
+TypeScript/JavaScript and C#/.NET projects), and lets a model trace every
+entry to its call sites through read-only tools (`repo_map`, `read_symbol`,
+`find_callers`, `trace_symbol`, `read_file`, `search_code`). Symbol tracing
+covers Kotlin, Java and AIDL; a bridge or package entry is followed by
+searching the channel, plugin or method name across the repository and
+reading the Dart, TypeScript or C# callers. When the implementation lives in
+an external package (pub, npm or NuGet), the report describes what the app's
+own code calls and names the dependency as the mechanism, without guessing
+the package internals. Help screens, documentation and assets that only
+mention Shizuku are not usage. When a report already exists for an older
+release, it is carried into the next run as reference material: the model
+re-verifies every claim against the current source, keeps what still holds
+and drops what the new release no longer supports. The model may only say
+what the source shows
+(capability, never actual runtime behavior): it reads the callers before
+stating a capability, and only claims a generic "run arbitrary commands"
+capability when a traced call site forwards user input. A run does not
+finalize while any surface entry is still uninspected: the model gets that
+concrete list back for another pass, a bounded number of times, after which
+the report is accepted. Tracing is advisory by default, but a run that used
+no symbol tool at all is sent back once with its entry, user-service and
+AIDL rows listed. The analysis is
+Shizuku-only: root, su and Dhizuku backends are neither traced nor mentioned.
+The report is a
+one-line summary plus three markdown sections written for end users: the
+capability text, the "Android APIs or commands used" list and an optional
+"Notable details" note. The model returns them separately and the server adds
+the section headings when it composes the text the app displays, so a
+section can be rendered on its own later. The API list names the traced
+Android platform APIs: framework classes and methods, hidden or internal
+APIs, binder interfaces and shell commands, one backticked item per bullet
+and without prose. It is Android platform APIs and commands only, never the
+app's own classes, AIDL interfaces, user-service methods or Shizuku SDK
+helpers, and it is omitted when no Shizuku usage was found. The capability
+text is capability-first: each bullet opens with a bold short label and then
+says what the user can do, not how the app implements it (no onboarding,
+setup, permission-grant, lifecycle or health-check walkthroughs). Text that
+is not a bullet list, whose bullets do not start with a bold label, or whose
+API list carries prose lines or missing backticks is rejected so the model
+rewrites it.
+
+Consequences for app developers:
+
+- A public GitHub or GitLab repository linked from the list entry (or the
+  `source_url`) is required. Apps without one show no usage section; there is
+  no marker-based fallback text anymore.
+- Only direct-APK entries are analyzed. Play-redirect and link-only entries
+  show no usage report, and a report is kept if an entry stops being
+  direct-APK after it was written.
+- Keep release tags matching the version name (for example `v1.2.3`) so the
+  analysis can be pinned to the released code instead of the branch head.
+- The report is generated once per app and then only for new releases, and it
+  is cached by repository commit, prompt generation and model. Plain English
+  is required; raw HTML, images and external links are stripped, and only
+  GitHub/GitLab links survive.
+- If the source contains no Shizuku usage, the report
+  says so plainly instead of guessing.
 
 ### Icons
 

@@ -13,6 +13,7 @@ using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Sources;
 using ShizuAppStoreServer.Core.Sync;
+using ShizuAppStoreServer.Core.UsageAnalysis;
 using ShizuAppStoreServer.Sync;
 using ShizuAppStoreServer.Tracking;
 
@@ -105,7 +106,6 @@ builder.Services.AddSingleton(adminOptions);
 var enrichment = builder.Configuration.GetSection("Enrichment").Get<EnrichmentOptions>() ?? new();
 enrichment.GitHubToken ??= Environment.GetEnvironmentVariable("SHIZU_GITHUB_TOKEN");
 enrichment.GitLabToken ??= Environment.GetEnvironmentVariable("SHIZU_GITLAB_TOKEN");
-enrichment.UsageSummaryApiKey ??= Environment.GetEnvironmentVariable("SHIZU_USAGE_AI_KEY");
 if (!string.IsNullOrWhiteSpace(enrichment.FdroidRepoBase))
 {
     // f-droid.org throttles datacenter IPs to a few hundred KB/s, which
@@ -169,14 +169,21 @@ builder.Services.AddSingleton<IGitRunner>(_ => new GitProcessRunner(enrichment.G
 builder.Services.AddSingleton<IRepoScreenshotResolver>(sp => new RepoScreenshotResolver(
     sp.GetRequiredService<IGitRunner>(), enrichment,
     sp.GetRequiredService<ILogger<RepoScreenshotResolver>>()));
-// Shizuku usage intelligence: a bounded source-tree scan per app plus an
-// optional OpenAI-compatible summarizer. Without a base URL and model the
-// generator stays disabled and the deterministic template ships instead.
-builder.Services.AddScoped<ISourceUsageClient, SourceUsageClient>();
-builder.Services.AddHttpClient<OpenAiUsageSummaryGenerator>(
-    client => client.Timeout = enrichment.UsageSummaryTimeout);
-builder.Services.AddSingleton<IUsageSummaryGenerator>(
-    sp => sp.GetRequiredService<OpenAiUsageSummaryGenerator>());
+// AI source analysis: a queued worker reads each app's public repo through
+// read-only tools and stores a one-line summary plus a markdown report. Off
+// until UsageAnalysis:Enabled plus base URL and model are configured; the API
+// key falls back to SHIZU_USAGE_ANALYSIS_KEY. The chat client factory is the
+// test seam (a scripted IChatClient replaces the real OpenAI-compatible one).
+var usageAnalysis = builder.Configuration.GetSection("UsageAnalysis").Get<UsageAnalysisOptions>() ?? new();
+usageAnalysis.ApiKey ??= Environment.GetEnvironmentVariable("SHIZU_USAGE_ANALYSIS_KEY");
+builder.Services.AddSingleton(usageAnalysis);
+builder.Services.AddSingleton<IUsageAnalysisChatClientFactory, OpenAiUsageAnalysisChatClientFactory>();
+builder.Services.AddSingleton<IUsageAnalysisAgent, UsageAnalysisAgent>();
+builder.Services.AddSingleton<IRepoSnapshotProvider, GitRepoSnapshotProvider>();
+builder.Services.AddSingleton<UsageContextBuilder>();
+builder.Services.AddSingleton<IUsageAnalysisLogWriter, UsageAnalysisLogWriter>();
+builder.Services.AddScoped<IUsageAnalysisQueue, UsageAnalysisQueue>();
+builder.Services.AddScoped<IUsageAnalysisRunner, UsageAnalysisRunner>();
 builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IGitHubReleaseClient>(),
     sp.GetRequiredService<IGitLabReleaseClient>(),
@@ -194,8 +201,7 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IRunLog>(),
     sp.GetRequiredService<IRepoScreenshotResolver>(),
     sp.GetRequiredService<ITrackerCatalog>(),
-    sp.GetRequiredService<ISourceUsageClient>(),
-    sp.GetRequiredService<IUsageSummaryGenerator>()));
+    sp.GetRequiredService<IUsageAnalysisQueue>()));
 
 // Sync engine (M6): fast loop + nightly full re-check in this same binary
 // Workers resolve SyncService per pass; enrichment fans out over per-app scopes.
@@ -218,6 +224,7 @@ builder.Services.AddSingleton<IconRefreshCoordinator>();
 builder.Services.AddSingleton<ScreenshotRefreshCoordinator>();
 builder.Services.AddHostedService<SyncWorker>();
 builder.Services.AddHostedService<NightlyWorker>();
+builder.Services.AddHostedService<UsageAnalysisWorker>();
 
 // Anonymous client usage stats (aggregate per User-Agent + per UTC day).
 // DB-only, no endpoint; the buffer keeps request latency unaffected.
@@ -374,6 +381,20 @@ if (args.Contains("--sync-once"))
     }
 
     return syncResult.Failed > 0 ? 1 : 0;
+}
+
+// Re-render stored analysis transcripts after a renderer change:
+// --render-usage-logs [dir] rewrites every .html next to its .json source.
+// Defaults to UsageAnalysis:LogPath; exits before the workers start.
+if (args.Contains("--render-usage-logs"))
+{
+    var logFlag = Array.IndexOf(args, "--render-usage-logs");
+    var logDir = logFlag + 1 < args.Length && !args[logFlag + 1].StartsWith("--", StringComparison.Ordinal)
+        ? args[logFlag + 1]
+        : usageAnalysis.LogPath ?? string.Empty;
+    var renderedLogs = UsageAnalysisLogWriter.RenderDirectory(logDir, app.Logger);
+    app.Logger.LogInformation("Rendered {Count} usage log page(s) in {Dir}.", renderedLogs, logDir);
+    return renderedLogs > 0 ? 0 : 1;
 }
 
 // Configure the HTTP request pipeline.

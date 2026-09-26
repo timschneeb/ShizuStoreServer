@@ -42,6 +42,10 @@ rsync -av --delete --rsync-path="$REMOTE_RSYNC" \
   --exclude 'build/' --exclude '.gradle/' --exclude 'local.properties' \
   tools/icon-render/ "$SERVER:$ICON_TOOL_DIR/"
 
+# 3c. Usage-analysis logs live outside the publish tree; keep the directory
+# present and owned by the service user (the unit grants write access to it).
+ssh "$SERVER" "sudo install -d -o shizu -g shizu /opt/shizuappstore/usage-logs"
+
 # 4. Migrate + restart on the server.
 # The connection string comes from the server's own
 # appsettings.Production.json / /etc/shizuappstore/env, so no secrets cross

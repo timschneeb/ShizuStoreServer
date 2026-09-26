@@ -77,14 +77,40 @@ rsync excludes it by name):
   "Sync": {
     "ListPath": "/opt/shizuappstore/list",
     "PollParallelism": 4
+  },
+  "UsageAnalysis": {
+    "Enabled": true,
+    "BaseUrl": "https://opencode.ai/zen/go/v1",
+    "Model": "muse-spark-1.3-contributor",
+    "Protocol": "responses",
+    "RequireTracing": false,
+    "PromptVersion": 17,
+    "AnalysisVersion": 12,
+    "InputPricePerMillion": 0.10,
+    "CachedInputPricePerMillion": 0.002,
+    "OutputPricePerMillion": 0.20,
+    "MaxParallelism": 3,
+    "MaxRunsPerDay": 600,
+    "MonthlyBudgetUsd": 20,
+    "SnapshotRoot": "/opt/shizuappstore/tmp",
+    "LogPath": "/opt/shizuappstore/usage-logs"
   }
 }
 ```
 
-`MaxParallelism` 2 and `PollParallelism` 4 fit a 2 vCPU host; raise them on
-beefier hardware. `RunLogPath` needs a writable directory: the unit's
-`LogsDirectory=shizu` creates `/var/log/shizu` and grants access under
+`UsageAnalysis:MaxParallelism` 3 and `PollParallelism` 4 fit a 2 vCPU host;
+raise them on beefier hardware. `RunLogPath` needs a writable directory: the
+unit's `LogsDirectory=shizu` creates `/var/log/shizu` and grants access under
 `ProtectSystem=strict`.
+
+Every analysis attempt writes a JSON transcript and a self-contained HTML
+page (conversation, expandable tool calls, token and cost stats) under
+`UsageAnalysis:LogPath`; point it at a writable directory such as
+`/opt/shizuappstore/usage-logs`, or set it to `null` to disable logging.
+The unit's `ReadWritePaths` must include that directory under
+`ProtectSystem=strict`, and `deploy/deploy.sh` creates it owned by `shizu`
+before the restart. Pages can be regenerated from the stored JSON with
+`ShizuAppStoreServer --render-usage-logs [dir]`.
 
 GitHub PAT (higher Releases-API rate limits for the ~350-repo backfill):
 
@@ -107,7 +133,32 @@ SHIZU_ADMIN_SECRET=$(openssl rand -hex 32)
 
 `Admin:Token` config and the `SHIZU_ADMIN_TOKEN` env name work too; the
 legacy `SHIZU_ADMIN_SECRET` name is kept for existing deployments. Never
-commit the token to appsettings.json. A request queues a run and wakes the
+commit the token to appsettings.json.
+
+AI source analysis (writes the "How this app uses Shizuku" text; `GET
+/v1/admin/usage-analysis/*`). Disabled by default: without `Enabled`, a base
+URL and a model the queue and worker stay idle. The API key is env-only:
+
+```bash
+# systemd unit or /etc/shizuappstore/env:
+SHIZU_USAGE_ANALYSIS_KEY=…   # opencode Go / Zen key
+```
+
+The analyzer shallow-clones each app repo under `SnapshotRoot` (give it a
+writable directory on the data disk; checkouts are deleted after each run)
+and needs `git` plus outbound HTTPS to the model endpoint. Populate the
+catalog once with:
+
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $SHIZU_ADMIN_SECRET" \
+  -H 'Content-Type: application/json' --data '{"onlyMissing":true}' \
+  https://<host>/v1/admin/usage-analysis/queue
+```
+
+Poll `GET /v1/admin/usage-analysis/status` while it drains; token and cost
+totals are on `GET /v1/admin/usage-analysis/stats`. The migration drops the
+old marker-classification columns and the `app_signals` table, so run the
+backfill after deploying the new schema or the usage section stays hidden. A request queues a run and wakes the
 fast loop right away; a commit that lands during a pass triggers an
 immediate follow-up pass. GitHub Actions example (secret
 `SHIZU_ADMIN_SECRET`):

@@ -1,0 +1,301 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using ShizuAppStoreServer.Core.Data;
+
+namespace ShizuAppStoreServer.Core.UsageAnalysis;
+
+public interface IUsageAnalysisRunner
+{
+    /// <summary>
+    /// Claims and processes one due queue entry. Returns false when the queue
+    /// is empty, the analyzer is disabled or a budget is exhausted.
+    /// </summary>
+    Task<bool> RunNextAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Requeues rows left <c>Running</c> by a process that died mid-analysis.
+    /// Called once at worker startup so a restart never strands an app.
+    /// </summary>
+    Task<int> RecoverInterruptedAsync(CancellationToken ct = default);
+}
+
+/// <summary>
+/// Executes one queued AI analysis end to end: snapshot, pre-scan, agent,
+/// validation, storage. Failures are retried with linear backoff until
+/// <c>RetryMaxAttempts</c>, then parked as failed. Token usage and cost are
+/// recorded per attempt either way.
+/// </summary>
+public sealed class UsageAnalysisRunner(
+    ShizuDbContext db,
+    UsageAnalysisOptions options,
+    IRepoSnapshotProvider snapshots,
+    IUsageAnalysisAgent agent,
+    ILogger<UsageAnalysisRunner>? log = null,
+    IUsageAnalysisLogWriter? logs = null) : IUsageAnalysisRunner
+{
+    public async Task<int> RecoverInterruptedAsync(CancellationToken ct = default)
+    {
+        var interrupted = await db.UsageAnalysisRuns
+            .Where(r => r.Status == UsageAnalysisStatus.Running)
+            .ToListAsync(ct);
+        if (interrupted.Count == 0)
+        {
+            return 0;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var parked = 0;
+        foreach (var run in interrupted)
+        {
+            if (run.Attempts >= Math.Max(1, options.RetryMaxAttempts))
+            {
+                run.Status = UsageAnalysisStatus.Failed;
+                run.Error = "interrupted by a restart and out of retries";
+                run.FinishedAt = now;
+                parked++;
+            }
+            else
+            {
+                run.Status = UsageAnalysisStatus.Pending;
+            }
+
+            run.StartedAt = null;
+            run.NextAttemptAt = now;
+        }
+
+        await db.SaveChangesAsync(ct);
+        log?.LogWarning("Recovered {Count} interrupted usage analysis run(s); {Parked} parked as failed.",
+            interrupted.Count, parked);
+        return interrupted.Count;
+    }
+
+    public async Task<bool> RunNextAsync(CancellationToken ct = default)
+    {        if (!options.IsConfigured)
+        {
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (await IsOverBudgetAsync(now, ct))
+        {
+            return false;
+        }
+
+        // The queue holds at most a few hundred pending rows, and the SQLite
+        // test provider cannot translate DateTimeOffset range comparisons, so
+        // due filtering happens in memory.
+        var pending = await db.UsageAnalysisRuns
+            .Where(r => r.Status == UsageAnalysisStatus.Pending)
+            .Select(r => new { r.Id, r.CreatedAt, r.NextAttemptAt })
+            .ToListAsync(ct);
+        var candidateId = pending
+            .OrderBy(r => r.CreatedAt)
+            .ThenBy(r => r.Id)
+            .FirstOrDefault(r => r.NextAttemptAt <= now)?.Id ?? 0;
+        if (candidateId == 0)
+        {
+            return false;
+        }
+
+        // Atomic claim: enrichment enqueues and other worker slots may race.
+        var claimed = await db.UsageAnalysisRuns
+            .Where(r => r.Id == candidateId && r.Status == UsageAnalysisStatus.Pending)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, UsageAnalysisStatus.Running)
+                .SetProperty(r => r.StartedAt, now)
+                .SetProperty(r => r.Attempts, r => r.Attempts + 1), ct);
+        if (claimed == 0)
+        {
+            return false;
+        }
+
+        // ExecuteUpdate bypasses the change tracker; drop any locally tracked
+        // copy so the reload below sees the claimed row (tests share the context).
+        var tracked = db.ChangeTracker.Entries<UsageAnalysisRun>()
+            .FirstOrDefault(e => e.Entity.Id == candidateId);
+        if (tracked is not null)
+        {
+            tracked.State = EntityState.Detached;
+        }
+
+        var run = await db.UsageAnalysisRuns
+            .Include(r => r.App)
+            .FirstAsync(r => r.Id == candidateId, ct);
+        var app = run.App
+            ?? throw new InvalidOperationException($"Usage analysis run {run.Id} has no app.");
+
+        run.Model = options.Model;
+        run.PromptVersion = options.PromptVersion;
+
+        var primary = await db.Downloads
+            .Where(d => d.AppId == app.Id && d.IsPrimary)
+            .Select(d => new { d.VersionName, d.ReleaseTag, d.ApkUrl })
+            .FirstOrDefaultAsync(ct);
+        var version = primary?.VersionName;
+
+        // The agent enforces RunTimeout on itself and returns a timed-out
+        // result with its partial transcript; this outer budget only guards a
+        // stuck snapshot and adds the clone allowance.
+        var wallBudget = options.CloneTimeout + options.RunTimeout + TimeSpan.FromMinutes(1);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(wallBudget);
+
+        UsageAgentResult? result = null;
+        string? error = null;
+        RepoSnapshot? snapshot = null;
+        try
+        {
+            snapshot = await snapshots.CreateAsync(
+                app, version ?? app.VersionName, primary?.ReleaseTag, primary?.ApkUrl, budget.Token);
+            if (snapshot is null)
+            {
+                error = "no analyzable GitHub/GitLab repository, or the checkout failed";
+            }
+            else
+            {
+                var context = new UsageContextBuilder(options).Build(app, snapshot, version ?? app.VersionName);
+                var search = new RepoSearch(snapshot, options);
+                result = await agent.AnalyzeAsync(app, context, search, budget.Token);
+                if (result.TimedOut)
+                {
+                    error = $"timed out after {options.RunTimeout}";
+                }
+                else if (result.Report is null)
+                {
+                    error = "the model did not return a valid report";
+                }
+
+                run.RepoForge = snapshot.ForgeName;
+                run.RepoCommit = snapshot.Commit;
+                run.RepoRef = snapshot.Ref;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            error = $"timed out after {wallBudget}";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error = ex.Message;
+            log?.LogWarning(ex, "Usage analysis failed for {Slug}.", app.Slug);
+        }
+        finally
+        {
+            snapshot?.Dispose();
+        }
+
+        var finishedAt = DateTimeOffset.UtcNow;
+        var input = result?.InputTokens ?? 0;
+        var cached = result?.CachedInputTokens ?? 0;
+        var output = result?.OutputTokens ?? 0;
+        run.InputTokens += input;
+        run.CachedInputTokens += cached;
+        run.OutputTokens += output;
+        run.ToolCalls += result?.ToolCalls ?? 0;
+        run.CostUsd += ComputeCost(input, cached, output, options);
+
+        if (result?.Report is { } report && error is null)
+        {
+            app.UsageShort = report.Short;
+            app.UsageMarkdown = report.ComposedMarkdown;
+            app.UsageMarkdownUsage = report.MarkdownUsage;
+            app.UsageMarkdownApiUsage = report.MarkdownApiUsage;
+            app.UsageMarkdownNotableDetails = report.MarkdownNotableDetails;
+            app.UsageAnalyzedAt = finishedAt;
+            app.UsageModel = options.Model;
+            app.UsageCommit = run.RepoCommit;
+            app.UsageReleaseRef = run.RepoRef;
+            app.UsagePromptVersion = options.PromptVersion;
+            app.UsageAnalysisVersion = options.AnalysisVersion;
+
+            // Usage text is detail-only, but a finished analysis is still a
+            // change clients must learn about: bump the summary clock so
+            // /v1/changes and the detail ETag pick it up.
+            app.UpdatedAt = finishedAt;
+
+            run.Status = UsageAnalysisStatus.Succeeded;
+            run.Error = null;
+            run.FinishedAt = finishedAt;
+            var coverage = result.Coverage;
+            log?.LogInformation(
+                "Usage analysis succeeded for {Slug} in {Turns} turns, {Tools} tools, {Input}+{Output} tokens, ${Cost:F4}; surface {Surface}/{SurfaceTotal}, call sites {SitesRead}/{Sites}, {Rounds} coverage round(s), {SymbolTools} symbol tool call(s).",
+                app.Slug, result.Turns, result.ToolCalls, input, output, run.CostUsd,
+                coverage?.SurfaceInspected ?? 0, coverage?.SurfaceEntries ?? 0,
+                coverage?.TracedCallSitesRead ?? 0, coverage?.TracedCallSites ?? 0,
+                coverage?.Rounds ?? 0, coverage?.SymbolToolCalls ?? 0);
+        }
+        else
+        {
+            var terminal = run.Attempts >= Math.Max(1, options.RetryMaxAttempts);
+            run.Status = terminal ? UsageAnalysisStatus.Failed : UsageAnalysisStatus.Pending;
+            run.Error = Truncate(error ?? "analysis failed", 1024);
+            run.NextAttemptAt = finishedAt + options.RetryBackoff * Math.Max(1, run.Attempts);
+            run.FinishedAt = terminal ? finishedAt : null;
+            log?.LogInformation(
+                "Usage analysis attempt {Attempt} for {Slug} failed: {Error}",
+                run.Attempts, app.Slug, run.Error);
+        }
+
+        if (logs is not null)
+        {
+            // The transcript page is the main debugging artifact, so it is
+            // written even for failures and without the run cancellation token.
+            run.LogFile = await logs.WriteAsync(run, app, version, finishedAt, result, error, CancellationToken.None);
+            if (run.LogFile is not null)
+            {
+                log?.LogDebug("Usage analysis log for {Slug}: {File}.", app.Slug, run.LogFile);
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    /// <summary>
+    /// Cached tokens are billed at the cached rate but counted inside the
+    /// input total, so only the uncached remainder pays the full input price.
+    /// </summary>
+    public static decimal ComputeCost(long input, long cached, long output, UsageAnalysisOptions options)
+    {
+        var uncached = Math.Max(0, input - Math.Max(0, cached));
+        return (uncached * options.InputPricePerMillion
+                + Math.Max(0, cached) * options.CachedInputPricePerMillion
+                + Math.Max(0, output) * options.OutputPricePerMillion) / 1_000_000m;
+    }
+
+    private async Task<bool> IsOverBudgetAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var dayStart = new DateTimeOffset(now.UtcDateTime.Date, TimeSpan.Zero);
+        if (options.MaxRunsPerDay > 0)
+        {
+            var starts = await db.UsageAnalysisRuns
+                .Where(r => r.StartedAt != null)
+                .Select(r => r.StartedAt)
+                .ToListAsync(ct);
+            if (starts.Count(s => s >= dayStart) >= options.MaxRunsPerDay)
+            {
+                return true;
+            }
+        }
+
+        if (options.MonthlyBudgetUsd > 0)
+        {
+            var monthStart = new DateTimeOffset(new DateTime(now.UtcDateTime.Year, now.UtcDateTime.Month, 1), TimeSpan.Zero);
+            // Materialize before summing: the SQLite test provider cannot
+            // translate decimal aggregation, and a month holds few rows.
+            var costs = await db.UsageAnalysisRuns
+                .Where(r => r.FinishedAt != null)
+                .Select(r => new { r.FinishedAt, r.CostUsd })
+                .ToListAsync(ct);
+            if (costs.Where(c => c.FinishedAt >= monthStart).Sum(c => c.CostUsd) >= options.MonthlyBudgetUsd)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string Truncate(string value, int max) =>
+        value.Length <= max ? value : value[..max];
+}

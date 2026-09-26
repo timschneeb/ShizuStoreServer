@@ -42,7 +42,9 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=5
 IOWeight=50
 # systemd creates /var/log/shizu (Enrichment:RunLogPath) with the right owner
-# and implies write access under ProtectSystem=strict.
+# and implies write access under ProtectSystem=strict. Usage-analysis logs
+# live under /opt/shizuappstore/usage-logs and need the ReadWritePaths entry
+# below instead.
 LogsDirectory=shizu
 # Hardening (the service only needs loopback HTTP + Postgres + outbound HTTPS
 # for the GitHub/GitLab/F-Droid APIs, plus write access to the icon store, the
@@ -54,7 +56,7 @@ ProtectSystem=strict
 # bus: the render scope (systemd-run --user) could not connect and every icon
 # would silently fall back to a letter avatar.
 ProtectHome=read-only
-ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list /opt/shizuappstore/tmp
+ReadWritePaths=/opt/shizuappstore/icons /opt/shizuappstore/icon-render /opt/shizuappstore/gradle-home /opt/shizuappstore/list /opt/shizuappstore/tmp /opt/shizuappstore/usage-logs
 
 [Install]
 WantedBy=multi-user.target

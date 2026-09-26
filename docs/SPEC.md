@@ -183,6 +183,18 @@ bundle` is rebuilt per deploy, never committed.
     commits excluded; drives "recently added", nulls sort last),
     `last_checked_at`,
     `last_error` (trimmed to 500 chars).
+  - AI usage report (detail-only, null until analyzed; §5.4):
+    `usage_short` (one plain sentence for the details row),
+    `usage_markdown` (composed GitHub-flavored markdown report for the usage
+    subscreen, with the server-owned section headings) plus its parts
+    `usage_markdown_usage`, `usage_markdown_api_usage` and
+    `usage_markdown_notable_details` (null when that section is absent),
+    `usage_analyzed_at`, `usage_model`, `usage_commit`,
+    `usage_release_ref` (release tag when one matched the served
+    version), `usage_prompt_version`, `usage_analysis_version`. A
+    successful analysis bumps `updated_at`, so clients learn about it
+    through `/v1/changes` and the detail ETag even though the text is
+    detail-only.
   - `exclude_override` (operator flag, never touched by the
     upserter), `excluded_reason`, `added_at`/`updated_at` (git
     history, §4; `updated_at` is the change clock, not the release
@@ -195,15 +207,14 @@ bundle` is rebuilt per deploy, never committed.
   `sig_md5`, `apk_source`, `apk_source_ref`, and the 7 `fdroid_*`
   columns). Columns: `id`, `app_id` (FK cascade), `source`
   (`GitHub|GitLab|Codeberg|FDroid|Izzy|Play|Other`), `source_ref`,
+  `release_tag` (the forge release the artifact URL belongs to, when the
+  source publishes releases),
   `package_name` (the package this build installs; differs per flavor),
   `apk_url`, `archive_entry`, `version_code`, `version_name`,
   `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `analyzed`, `min_sdk`,
   `target_sdk`, `compile_sdk`, `locales`, `abis`, `localized_labels`,
   `signer_dn`, `signer_scheme`, `signer_key_algorithm`, `dhizuku_declared`,
-  `trackers`, `tracker_signatures`, `tracker_tags`, `managers`, `api_form`,
-  `capabilities`, `usage_optional`, `usage_source_scanned`, `usage_version`,
-  `usage_evidence`, `usage_summary`, `usage_summary_model`,
-  `usage_summary_hash`, `usage_summary_version`, `inspected`, `abi`,
+  `trackers`, `tracker_signatures`, `tracker_tags`, `inspected`, `abi`,
   `sig_key`, `analysis_version`, `is_primary`, `resolved_at`.
   - `sig_key` = lowercased first space-token of `sig_sha256`, else of
     `sig_md5`, else `url:<apk_url>`; `abi` = the analyzed APK's
@@ -260,30 +271,8 @@ bundle` is rebuilt per deploy, never committed.
     existed are false, so the next pass re-analyzes them once to
     backfill the signals; index-only rows are never re-downloaded for
     this.
-  - Shizuku usage intelligence (analyzed rows only, empty elsewhere):
-    `managers` = supported manager families (`shizuku`, `dhizuku`, `sui`,
-    `root`) from declared permissions, manifest components and the DEX;
-    `api_form` = the strongest observed integration (`user_service` for
-    `bindUserService`/`UserServiceArgs`, `new_process` for
-    `Shizuku.newProcess`, `permission` for the request/check flow);
-    `capabilities` = the shell command families the app can drive
-    (`install`, `uninstall`, `freeze`, `appops`, `system_settings`,
-    `process`, `diagnostics`, `reboot`, `wireless_adb`, `compile`);
-    `usage_optional` = a fallback path exists (for example
-    `PackageInstaller` or `ACTION_MANAGE_UNKNOWN_APP_SOURCES`) next to
-    Shizuku usage, so Shizuku is not strictly required. Every entry in
-    `usage_evidence` is `kind|value|source|confidence` (`kind` =
-    `permission|component|marker|command|manager|fallback`, `source` =
-    `apk|source`, `confidence` = `strong|weak`) and also lands in the
-    `app_signals` table. `usage_source_scanned` = the bounded forge
-    source scan ran (a tree fetch that failed leaves it false so the next
-    pass retries); `usage_version` = the classification level
-    (`AppEnricher.CurrentUsageVersion`), rows below it re-derive once.
-    `usage_summary` = a deterministic template, replaced by an
-    OpenAI-compatible model only when one is configured and the model's
-    claims cite evidence ids (model id and evidence hash stored in
-    `usage_summary_model`/`usage_summary_hash`,
-    `usage_summary_version` = `AppEnricher.CurrentUsageSummaryVersion`).
+  - Shizuku usage reports are source-derived and stored on the `apps`
+    row, not on the build; §5.4.
   - Upsert: same `(package_name, sig_key, abi)` updates in place only
     when the new `version_code` is higher; on an equal `version_code`
     the preferred source's URL is kept; lower versions are ignored. A
@@ -302,12 +291,17 @@ bundle` is rebuilt per deploy, never committed.
     app (partial unique index on `app_id` where `is_primary`); a row set
     without one is rebuilt from the stored rows on the next pass without
     downloading anything.
-- **app_signals** - (`app_id` FK cascade, `kind`, `value`, `source`,
-  `confidence`, `detected_at`); one row per evidence item behind an app's
-  Shizuku usage classification, rebuilt from the primary download's
-  `usage_evidence` on every usage pass and capped at 64 rows per app.
-  Serves the detail `signals[]` list; summaries carry only the derived
-  `managers[]` filter.
+- **usage_analysis_runs** - one row per AI source-analysis attempt and
+  the work queue for the analyzer (`app_id` FK cascade, `status`
+  (`Pending|Running|Succeeded|Failed`), `attempts`, `repo_forge`,
+  `repo_commit`, `repo_ref`, `model`, `prompt_version`, `error`,
+  `log_file`, `input_tokens`, `cached_input_tokens`, `output_tokens`,
+  `cost_usd`, `tool_calls`, `created_at`, `started_at`, `finished_at`,
+  `next_attempt_at`). A partial unique index on `app_id` where the status
+  is `Pending` or `Running` keeps at most one active run per app; the
+  worker claims rows atomically and retries failures with linear backoff
+  until parked. Every attempt is kept so token usage and cost stay
+  auditable; failed rows carry no user-visible output.
 - **app_versions** - (`app_id`, `version_code`, `version_name`,
   `apk_url`, `detected_at`); a row is appended only when the
   `version_code` is unseen for the app (append-only history). The
@@ -900,6 +894,146 @@ for every gated row that lacks the permission and has no
 reason above. This check runs in `CollectIssuesAsync` rather than
 `CatalogHealthCheck` because the latter ignores excluded rows.
 
+### 5.4 AI source analysis ("How this app uses Shizuku")
+
+The user-visible Shizuku usage report is generated by an in-process agent
+(`Core/UsageAnalysis/`) that reads the app's public source, not its APK.
+It replaces the earlier marker classification and template/LLM summary;
+marker scanning survives only as internal context extraction.
+
+- Queue policy: a run is queued when a build is first analyzed, when a new
+  APK artifact appears, or through the admin backfill. Routine fast and
+  nightly passes never re-analyze an unchanged app. Only `DirectApk` rows
+  are eligible; Play-redirect, link-only and excluded rows are never
+  analyzed. A row that becomes `DirectApk` later is analyzed on its first
+  checksum, and existing reports are kept, not deleted.
+- Source revision: the repo is resolved from the list URL/source URL. The
+  checkout prefers the release the served artifact came from: the
+  `release_tag` recorded at enrichment, else the tag parsed from the
+  artifact URL (`/releases/download/<tag>/`, GitLab
+  `/-/releases/<tag>/downloads/` and `/-/archive/<tag>/`), then a tag
+  matching the badged version (`v<version>`, `<version>`,
+  `release-<version>`, `V<version>`), else the default branch HEAD. The
+  commit is stored with the report. Version names can lag behind the
+  release (projects that never bump `versionName`), so the release tag
+  wins over the version when both exist.
+- Pipeline: shallow `git clone --depth 1` into a temp directory, a
+  deterministic pre-scan that builds a privilege surface map (imports of the
+  Shizuku packages, declared artifacts, entry points, user services,
+  AIDL members and command helpers, each with file, line and its innermost
+  enclosing declaration; shell keywords like `wm`, `pm` or `reboot` are
+  deliberately not collected). The scan also covers non-JVM apps: bridge call sites in Dart,
+  TypeScript/JavaScript and C#, dependency declarations in `pubspec.yaml`,
+  `package.json` and `.csproj` files, and a detected `projectKind` (flutter,
+  react-native, capacitor, dotnet, unity, kmp, android). Documentation, help
+  screens and assets that merely mention Shizuku are not collected. When an
+  earlier report exists for the app, the context also carries it as
+  `previousAnalysis` (short, full markdown, commit, release ref, analyzed at)
+  as reference material. Then a
+  `Microsoft.Extensions.AI` `FunctionInvokingChatClient`
+  loop against the OpenAI-compatible endpoint. The wire protocol follows
+  `UsageAnalysis:Protocol`: `chat` posts to `/chat/completions` while
+  `responses` uses the Responses API and disables response storage, because
+  the endpoint does not retain stored responses for `previous_response_id`
+  chaining. Tools are read-only:
+  `repo_map` (declaration index), `read_symbol` (brace-matched body),
+  `find_callers` (call sites with the enclosing function and the argument
+  expression), `trace_symbol` (bounded caller tree), `read_file` (numbered,
+  bounded) and `search_code` (regex, bounded). Tool arguments are optional;
+  a dotted `Class.method` resolves inside that class, repeated surface
+  needles collapse to one row per kind, and a tool failure returns a short
+  error message instead of failing the turn. Identical tool calls are
+  memoized, the last 32 tool payloads stay in the outgoing request and older
+  ones are replaced with placeholders in one big batch once 16 more have aged
+  out, because every rewrite invalidates the provider prompt cache; a pacing
+  note reports the spent budget. No shell, no writes, no network from
+  the tools; repository text is treated as untrusted data.
+- Analysis method: the agent starts at the surface map and traces every
+  entry to its call sites, reading the callers before it states a capability.
+  Symbol tracing covers Kotlin, Java and AIDL; for a bridge or package entry
+  the agent searches the channel, plugin, package or method name across the
+  repository and reads the Dart, TypeScript/JavaScript or C# callers. When
+  the privileged implementation lives in a dependency outside the repository
+  (pub, npm or NuGet), the report describes the capability from the app's own
+  call sites and names the dependency as the mechanism, without fetching or
+   assuming the package internals; the "Android APIs or commands used" list
+   then holds only what the repository evidences. Help screens, documentation,
+   store text
+  and assets that mention Shizuku are not usage. A previous report for an
+  older release is reference, not evidence: every claim is re-verified
+  against the current source, kept only while it still holds, and
+  capabilities the new release dropped must not survive into the new report.
+  The tools record what they actually read and traced, so a report that
+  leaves surface entries uninspected is sent back with that concrete list
+  (up to `UsageAnalysis:MaxCoverageRounds` extra tool rounds) before it can
+  finalize; once the rounds are used up the report is accepted as is, so a
+  run can never fail or loop on coverage alone. Tracing is advisory by
+  default: with `UsageAnalysis:RequireTracing` off, an `entry`, `service` or
+  `aidl` row is satisfied by a read, but a run that used no symbol tool at
+  all is sent back once with those rows listed, so tracing never silently
+  disappears. With the flag on, those rows count as inspected only after
+  `read_symbol`, `find_callers` or `trace_symbol` followed their symbol; a
+  plain file read is not enough. `bridge` and `command` rows have no reliable
+  traceable symbol and stay satisfied by a read. `import`, `manifest`,
+  `dependency` and `package` rows are informational and never gate. Traced
+  call sites are tracked and logged as coverage stats but do not gate the
+  report: requiring every traced site to be read multiplied run cost without
+  adding findings.
+  The report covers Shizuku only: root, su and Dhizuku backends are neither
+  traced nor mentioned, even when the source supports them.
+  A generic "run arbitrary commands" claim is only allowed when a traced
+  call site forwards user input; otherwise the concrete traced operations
+  are listed.
+- Output contract: JSON `{short, markdown_usage, markdown_api_usage,
+  markdown_notable_details}`. `markdown_usage` (intro sentence plus
+  bold-labelled capability bullets) and `short` are required; the API list
+  and the notable details are nullable when there is no Shizuku usage or
+  nothing notable. The model never writes section headings: the server owns
+  them and composes the served markdown as `## Android APIs or commands
+  used` and `## Notable details` below the capability text. The visible text
+  must not mention file paths, line numbers or code-level names, except in
+  the API list, which names the traced Android platform APIs: framework
+  classes and methods, hidden or internal APIs, system binder interfaces and
+  shell commands, one per bullet, each backticked and without prose. The
+  list holds Android platform APIs and commands only, never the app's own
+  classes, AIDL interfaces, user-service methods or Shizuku SDK helpers.
+  Reports that name Shizuku SDK helpers anywhere, that make the API list a
+  prose paragraph or omit the backticks, or whose capability section is
+  plain lines or unbolded bullets, are rejected so the correction round
+  rewrites them. Setup is not usage: onboarding, Shizuku
+  installation/activation and permission request, grant or approval
+  narration is rejected so the correction round rewrites it. The validator
+  also strips raw HTML and images, allowlists links to GitHub/GitLab, drops
+  relative (repository) links, and caps the parts at 200 (short), 3500
+  (usage), 3000 (API list) and 1000 (notable details) characters. Invalid
+  output gets up to four correction rounds (with tools disabled); each
+  rejection restates the output contract so a correction cannot fix one
+  violation and leave another. When the corrections run out, the run fails
+  closed: no partial text is ever shown.
+- Storage: `usage_short`/`usage_markdown` plus the separate
+  `usage_markdown_usage`, `usage_markdown_api_usage` and
+  `usage_markdown_notable_details` parts, and the generation markers on the
+  `apps` row (§3), plus one `usage_analysis_runs` row per attempt with
+  tokens (input/cached/output), computed cost and tool calls. A success
+  bumps `updated_at`.
+- Logs: every attempt writes `{timestamp}-{slug}-r{runId}.json` and a
+  self-contained `.html` page under `UsageAnalysis:LogPath`: the final
+  report rendered as formatted markdown, the full conversation with
+  expandable tool calls (arguments and results), per-call token stats,
+  cost and outcome. Both files also carry the run's coverage stats (surface
+  entries inspected, traced call sites read, coverage rounds, symbol tool
+  calls) and, when the report was accepted with gaps, the list of locations
+  still uninspected.
+  The HTML references no external assets; tool results
+  are truncated at `MaxTranscriptToolResultChars`. `run.log_file` is
+  returned by the admin status endpoint, and `--render-usage-logs [dir]`
+  re-renders every stored JSON.
+- Budgets: per-run wall clock, tool-step cap, daily run cap and monthly
+  USD cap from the recorded run costs. Failures retry with linear backoff
+  and are then parked; the queue endpoint can force a retry.
+- Stats: `GET /v1/admin/usage-analysis/stats` (token/cost per day and
+  model); the ShizuAppStoreStats dashboard is wired separately.
+
 ## 6. Signature-keyed downloads
 
 Each `app_downloads` row is one (package, signing identity, ABI).
@@ -1080,11 +1214,11 @@ source `versionCode`/`versionName`/`minSdk`/`size`/`sigSha256`/`sigMd5`
 from the primary download (`size` is the primary APK's `size_bytes`, null
 when unknown). Badging-derived `targetSdk`/`compileSdk`/`localeCount`/
 `abis[]` and the analysis signals (`dhizukuDeclared`, `trackers[]`,
-`trackerTags[]`, `managers[]`) ride on summaries and detail; summaries carry
+`trackerTags[]`) ride on summaries and detail; summaries carry
 only the `localizedLabels` entries whose label differs from the display name
 so unchanged strings do not inflate list payloads; detail adds
-full `locales[]`, the Shizuku usage fields (`apiForm`, `capabilities[]`,
-`usageOptional`, `usageSummary`) with the `signals[]` evidence rows, and,
+full `locales[]`, the AI usage report (`usageShort`, `usageMarkdown`,
+`usageAnalyzedAt`; §5.4), and,
 per `downloads[]` entry, the full localized label map and
 signer details (`localizedLabels`, `signerDn`, `signerScheme`,
 `signerKeyAlgorithm`, §3/§5.1).
@@ -1139,7 +1273,7 @@ rather than persisting them.
 | Endpoint | Behavior |
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. Poisoned User-Agents get doctored rows and bypass the cache (§2). |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `managers[]`, `apiForm`, `capabilities[]`, `usageOptional`, `usageSummary`, `signals[]`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. Poisoned User-Agents get a random other row's doctored downloads/lists, never a 304, and bypass the cache (§2). |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. Poisoned User-Agents get a random other row's doctored downloads/lists, never a 304, and bypass the cache (§2). |
 | `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
@@ -1154,6 +1288,10 @@ rather than persisting them.
 | `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy for every served app and forces the repo lookup when the indexes carry nothing, even inside the per-app recheck window; stored repo URLs are dropped when an index supplies shots. Takes the shared sync gate exactly like `refresh-icons`. Does not write a `sync_runs` row. |
 | `GET /v1/admin/refresh-screenshots` | Same token rules. Current status: `state` (`idle\|running\|completed\|failed`), `startedAt`/`finishedAt`, `checked`/`updated`/`current`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-screenshots` | Same token rules. Cancels the running pass → 202, or 409 when nothing is running. |
+| `POST /v1/admin/usage-analysis/queue` | Same token rules. Queues AI source analyses; body `{"onlyMissing":true,"stale":false,"force":false,"slug":null,"limit":null}`. Defaults to apps that have never been analyzed and skips apps with an active run and parked failures (unless `force`); `stale` adds rows whose prompt/analysis generation is older than configured. → 202 `{queued:n}`. |
+| `GET /v1/admin/usage-analysis/status` | Same token rules. Queue counts per status, runs started today, month-to-date cost, budget and the ten most recent failures. |
+| `GET /v1/admin/usage-analysis/stats?days=30` | Same token rules. Token and cost totals per day and per model for finished runs. |
+| `DELETE /v1/admin/usage-analysis/pending` | Same token rules. Deletes pending queue rows (running rows are untouched). |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. In the same transaction it upserts the `app_install_days` row for the server's current UTC day (`app_id` + `day`, count +1), plus an `app_version_install_days` row keyed on the optional JSON body `{ "versionCode": 123, "installType": "fresh\|update" }`; absent or malformed bodies and out-of-range codes fall back to `versionCode` 0 / `installType` `unknown`, and anything other than `fresh`/`update` (case-insensitive) normalizes to `unknown`, so older clients stay valid. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).
@@ -1203,14 +1341,22 @@ all environments; Scalar UI is development-only.
 | `Enrichment:DownloadTimeout` | `10min` | APK download HTTP timeout |
 | `Enrichment:RunLogPath` | `null` | Append-only per-pass human-readable log (one line per app, timestamped slow-action details, plus the issues snapshot, §7.3); null disables it |
 | `Enrichment:GitHubToken` / `GitLabToken` | `null` (+ `SHIZU_GITHUB_TOKEN` / `SHIZU_GITLAB_TOKEN` env fallback) | Release-API auth/rate limits |
-| `Enrichment:SourceUsageTimeout` | `90s` | Budget for the bounded Shizuku source scan per app |
-| `Enrichment:SourceUsageMaxFiles` | `24` | Source files fetched per repo scan (manifest and Shizuku-hinted paths first) |
-| `Enrichment:SourceUsageMaxFileBytes` | `64KB` | Skip source entries with a larger declared size |
-| `Enrichment:UsageSummaryBaseUrl` | `null` | OpenAI-compatible API base URL; blank keeps AI summaries off |
-| `Enrichment:UsageSummaryModel` | `null` | Chat model id; blank keeps AI summaries off |
-| `SHIZU_USAGE_AI_KEY` | `null` | Bearer key for the summarizer (env only, like the forge tokens) |
-| `Enrichment:UsageSummaryMaxPerDay` | `200` | AI summary calls per UTC day; the deterministic template serves the rest |
-| `Enrichment:UsageSummaryTimeout` | `60s` | Summarizer HTTP timeout |
+| `UsageAnalysis:Enabled` | `false` | Master switch for AI source analysis; off leaves the queue and worker idle |
+| `UsageAnalysis:BaseUrl` | `https://opencode.ai/zen/go/v1` | OpenAI-compatible chat completions base URL |
+| `UsageAnalysis:Model` | `mimo-v2.6-flash` | Model id (opencode Go also serves `mimo-v2.6-pro`) |
+| `UsageAnalysis:Protocol` | `chat` | Wire protocol for the model: `chat` for `/chat/completions` or `responses` for the Responses API; responses requests set `store: false` because the endpoint does not retain responses |
+| `SHIZU_USAGE_ANALYSIS_KEY` | `null` | Bearer key for the analyzer (env only, like the forge tokens) |
+| `UsageAnalysis:UserAgent` / `PromptVersion` / `AnalysisVersion` | `ShizuStoreAnalyzer/1.0` / `1` / `1` | Request identity and generation markers |
+| `UsageAnalysis:MaxToolSteps` / `MaxReadLines` / `MaxSearchResults` / `MaxFileBytes` | `400` / `250` / `60` / `512KB` | Agent tool caps; the step cap is a sanity limit, not the stopping rule |
+| `UsageAnalysis:MaxCoverageRounds` | `1` | Extra tool rounds when a valid report still leaves surface entries uninspected; the agent gets the concrete list to read, then the report is accepted |
+| `UsageAnalysis:RequireTracing` | `false` | `entry`, `service` and `aidl` rows must be followed with `read_symbol`, `find_callers` or `trace_symbol` before they count as inspected; bridge and command rows stay read-only. When off, tracing is advisory but a run that used no symbol tool is sent back once |
+| `UsageAnalysis:MaxOutputTokens` | `8192` | Output cap per model call; reasoning tokens count against it |
+| `UsageAnalysis:CloneTimeout` / `RequestTimeout` / `RunTimeout` | `3min` / `3min` / `10min` | Clone, per-request and whole-run budgets |
+| `UsageAnalysis:MaxParallelism` / `MaxRunsPerDay` / `MonthlyBudgetUsd` | `3` / `100` / `20` | Concurrency and spend guards |
+| `UsageAnalysis:InputPricePerMillion` / `CachedInputPricePerMillion` / `OutputPricePerMillion` | `0.14` / `0.0028` / `0.28` | Cost table for recorded usage |
+| `UsageAnalysis:RetryMaxAttempts` / `RetryBackoff` | `3` / `30min` | Failure retry policy |
+| `UsageAnalysis:SnapshotRoot` / `PollInterval` | `null` (temp) / `30s` | Checkout location and worker idle poll |
+| `UsageAnalysis:LogPath` / `MaxTranscriptToolResultChars` | `usage-logs` / `20000` | Per-run JSON+HTML transcript directory (null disables) and tool-result truncation (0 keeps everything) |
 | `Sync:ListPath` | `/opt/shizuappstore/list` | Local list clone |
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |
 | `Sync:NightlyTimeUtc` | `03:00` | Full re-check time (UTC) |

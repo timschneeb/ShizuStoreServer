@@ -11,7 +11,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<App> Apps => Set<App>();
     public DbSet<AppVersion> AppVersions => Set<AppVersion>();
     public DbSet<AppDownload> Downloads => Set<AppDownload>();
-    public DbSet<AppSignal> AppSignals => Set<AppSignal>();
+    public DbSet<UsageAnalysisRun> UsageAnalysisRuns => Set<UsageAnalysisRun>();
     public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
     public DbSet<SyncIssue> SyncIssues => Set<SyncIssue>();
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
@@ -208,6 +208,19 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.LastCheckedAt).HasColumnName("last_checked_at");
             e.Property(x => x.LastError).HasColumnName("last_error");
             e.Property(x => x.EnrichEtag).HasColumnName("enrich_etag").HasMaxLength(256);
+            // AI source analysis. Detail-only fields plus the generation
+            // markers the backfill compares against.
+            e.Property(x => x.UsageShort).HasColumnName("usage_short").HasMaxLength(320);
+            e.Property(x => x.UsageMarkdown).HasColumnName("usage_markdown");
+            e.Property(x => x.UsageMarkdownUsage).HasColumnName("usage_markdown_usage");
+            e.Property(x => x.UsageMarkdownApiUsage).HasColumnName("usage_markdown_api_usage");
+            e.Property(x => x.UsageMarkdownNotableDetails).HasColumnName("usage_markdown_notable_details");
+            e.Property(x => x.UsageAnalyzedAt).HasColumnName("usage_analyzed_at");
+            e.Property(x => x.UsageModel).HasColumnName("usage_model").HasMaxLength(64);
+            e.Property(x => x.UsageCommit).HasColumnName("usage_commit").HasMaxLength(64);
+            e.Property(x => x.UsageReleaseRef).HasColumnName("usage_release_ref").HasMaxLength(128);
+            e.Property(x => x.UsagePromptVersion).HasColumnName("usage_prompt_version");
+            e.Property(x => x.UsageAnalysisVersion).HasColumnName("usage_analysis_version");
             e.HasIndex(x => x.CategoryId);
             e.HasIndex(x => x.UpdatedAt);
             e.HasIndex(x => x.Availability);
@@ -223,6 +236,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(255);
             e.Property(x => x.Source).HasColumnName("source").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.SourceRef).HasColumnName("source_ref").HasMaxLength(256);
+            e.Property(x => x.ReleaseTag).HasColumnName("release_tag").HasMaxLength(128);
             e.Property(x => x.ApkUrl).HasColumnName("apk_url").HasMaxLength(2000).IsRequired();
             e.Property(x => x.ArchiveEntry).HasColumnName("archive_entry").HasMaxLength(256);
             e.Property(x => x.VersionCode).HasColumnName("version_code");
@@ -264,20 +278,6 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.SignerScheme).HasColumnName("signer_scheme").HasMaxLength(64);
             e.Property(x => x.SignerKeyAlgorithm).HasColumnName("signer_key_algorithm").HasMaxLength(64);
             e.Property(x => x.AnalysisVersion).HasColumnName("analysis_version");
-            // Shizuku usage classification: fixed columns for filtering and
-            // evidence strings for the details card.
-            MapNewlineList(e, x => x.Managers, "managers");
-            e.Property(x => x.ApiForm).HasColumnName("api_form").HasMaxLength(32);
-            MapNewlineList(e, x => x.Capabilities, "capabilities");
-            e.Property(x => x.UsageOptional).HasColumnName("usage_optional");
-            e.Property(x => x.UsageSourceScanned).HasColumnName("usage_source_scanned");
-            e.Property(x => x.UsageVersion).HasColumnName("usage_version");
-            // "kind|value|source|confidence" entries.
-            MapNewlineList(e, x => x.UsageEvidence, "usage_evidence");
-            e.Property(x => x.UsageSummary).HasColumnName("usage_summary");
-            e.Property(x => x.UsageSummaryModel).HasColumnName("usage_summary_model").HasMaxLength(64);
-            e.Property(x => x.UsageSummaryHash).HasColumnName("usage_summary_hash").HasMaxLength(64);
-            e.Property(x => x.UsageSummaryVersion).HasColumnName("usage_summary_version");
             e.Property(x => x.SigKey).HasColumnName("sig_key").HasMaxLength(128).IsRequired();
             e.Property(x => x.IsPrimary).HasColumnName("is_primary");
             e.Property(x => x.Analyzed).HasColumnName("analyzed");
@@ -291,19 +291,36 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.HasIndex(x => x.AppId).IsUnique().HasFilter("is_primary");
         });
 
-        b.Entity<AppSignal>(e =>
+        b.Entity<UsageAnalysisRun>(e =>
         {
-            e.ToTable("app_signals");
+            e.ToTable("usage_analysis_runs");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             e.Property(x => x.AppId).HasColumnName("app_id");
-            e.HasOne(x => x.App).WithMany(x => x.Signals).HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
-            e.Property(x => x.Kind).HasColumnName("kind").HasMaxLength(32).IsRequired();
-            e.Property(x => x.Value).HasColumnName("value").HasMaxLength(256).IsRequired();
-            e.Property(x => x.Source).HasColumnName("source").HasMaxLength(16).IsRequired();
-            e.Property(x => x.Confidence).HasColumnName("confidence").HasMaxLength(16).IsRequired();
-            e.Property(x => x.DetectedAt).HasColumnName("detected_at").IsRequired();
-            e.HasIndex(x => x.AppId);
+            e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.Attempts).HasColumnName("attempts");
+            e.Property(x => x.RepoForge).HasColumnName("repo_forge").HasMaxLength(16);
+            e.Property(x => x.RepoCommit).HasColumnName("repo_commit").HasMaxLength(64);
+            e.Property(x => x.RepoRef).HasColumnName("repo_ref").HasMaxLength(128);
+            e.Property(x => x.Model).HasColumnName("model").HasMaxLength(64);
+            e.Property(x => x.PromptVersion).HasColumnName("prompt_version");
+            e.Property(x => x.Error).HasColumnName("error").HasMaxLength(1024);
+            e.Property(x => x.LogFile).HasColumnName("log_file").HasMaxLength(260);
+            e.Property(x => x.InputTokens).HasColumnName("input_tokens");
+            e.Property(x => x.CachedInputTokens).HasColumnName("cached_input_tokens");
+            e.Property(x => x.OutputTokens).HasColumnName("output_tokens");
+            e.Property(x => x.CostUsd).HasColumnName("cost_usd").HasPrecision(12, 6);
+            e.Property(x => x.ToolCalls).HasColumnName("tool_calls");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.StartedAt).HasColumnName("started_at");
+            e.Property(x => x.FinishedAt).HasColumnName("finished_at");
+            e.Property(x => x.NextAttemptAt).HasColumnName("next_attempt_at").IsRequired();
+            // At most one active run per app; enforce in the database because
+            // claim and enqueue race across worker slots and enrichment scopes.
+            e.HasIndex(x => x.AppId).IsUnique().HasFilter("status in ('Pending', 'Running')");
+            e.HasIndex(x => new { x.Status, x.NextAttemptAt });
+            e.HasIndex(x => new { x.AppId, x.CreatedAt });
         });
 
         b.Entity<AppVersion>(e =>

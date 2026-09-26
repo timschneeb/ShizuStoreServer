@@ -177,32 +177,4 @@ public sealed class EnrichmentOptions
 
     /// <summary>How long a fetched tracker catalog stays fresh.</summary>
     public TimeSpan ExodusTrackerRefreshInterval { get; set; } = TimeSpan.FromHours(24);
-
-    /// <summary>
-    /// OpenAI-compatible chat completions base URL (for example
-    /// <c>https://api.openai.com/v1</c>). Blank disables AI summaries; the
-    /// deterministic template is used instead.
-    /// </summary>
-    public string? UsageSummaryBaseUrl { get; set; }
-
-    /// <summary>Model id for usage summaries; blank disables AI summaries.</summary>
-    public string? UsageSummaryModel { get; set; }
-
-    /// <summary>API key for the usage summary endpoint (env SHIZU_USAGE_AI_KEY).</summary>
-    public string? UsageSummaryApiKey { get; set; }
-
-    /// <summary>Upper bound on AI summary requests per UTC day.</summary>
-    public int UsageSummaryMaxPerDay { get; set; } = 200;
-
-    /// <summary>Timeout for one usage summary request.</summary>
-    public TimeSpan UsageSummaryTimeout { get; set; } = TimeSpan.FromSeconds(60);
-
-    /// <summary>Timeout for one repo tree listing plus bounded file fetch.</summary>
-    public TimeSpan SourceUsageTimeout { get; set; } = TimeSpan.FromSeconds(90);
-
-    /// <summary>Max source files fetched per repo for the usage scan.</summary>
-    public int SourceUsageMaxFiles { get; set; } = 24;
-
-    /// <summary>Skip tree entries larger than this when the forge reports a size.</summary>
-    public int SourceUsageMaxFileBytes { get; set; } = 64 * 1024;
 }

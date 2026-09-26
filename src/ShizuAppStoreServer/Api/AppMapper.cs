@@ -52,7 +52,6 @@ public static class AppMapper
             primary?.Locales.Count,
             primary?.Abis ?? [],
             SummaryLabels(primary?.LocalizedLabels, a.ApkLabel ?? DisplayName(a)),
-            primary?.Managers ?? [],
             primary?.DhizukuDeclared ?? false,
             primary?.Trackers ?? [],
             TagGroups(primary?.TrackerTags));
@@ -119,12 +118,9 @@ public static class AppMapper
             primary?.Locales.Count,
             primary?.Locales ?? [],
             primary?.Abis ?? [],
-            primary?.Managers ?? [],
-            primary?.ApiForm,
-            primary?.Capabilities ?? [],
-            primary?.UsageOptional ?? false,
-            primary?.UsageSummary,
-            Signals(a.Signals),
+            a.UsageShort,
+            a.UsageMarkdown,
+            a.UsageAnalyzedAt,
             primary?.DhizukuDeclared ?? false,
             primary?.Trackers ?? [],
             TagGroups(primary?.TrackerTags));
@@ -205,31 +201,6 @@ public static class AppMapper
         d.DhizukuDeclared,
         d.Trackers,
         TagGroups(d.TrackerTags));
-
-    /// <summary>
-    /// Detail-only evidence rows, ordered as stored. Empty kinds or values are
-    /// skipped so a corrupt row never reaches clients as a blank claim.
-    /// </summary>
-    private static IReadOnlyList<AppSignalDto> Signals(IReadOnlyList<AppSignal> signals)
-    {
-        if (signals.Count == 0)
-        {
-            return [];
-        }
-
-        var mapped = new List<AppSignalDto>(signals.Count);
-        foreach (var signal in signals)
-        {
-            if (string.IsNullOrWhiteSpace(signal.Kind) || string.IsNullOrWhiteSpace(signal.Value))
-            {
-                continue;
-            }
-
-            mapped.Add(new AppSignalDto(signal.Kind, signal.Value, signal.Confidence));
-        }
-
-        return mapped;
-    }
 
     /// <summary>
     /// Summary-safe label map: only locales whose label differs from the APK's
