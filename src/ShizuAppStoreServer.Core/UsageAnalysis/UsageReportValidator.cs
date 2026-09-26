@@ -21,11 +21,13 @@ public sealed record UsageReport(
     /// <summary>Full markdown as served and rendered, with the server-owned headings.</summary>
     public string ComposedMarkdown => !string.IsNullOrWhiteSpace(Markdown)
         ? Markdown
-        : Compose(MarkdownUsage, MarkdownApiUsage, MarkdownNotableDetails);
+        : Compose(Short, MarkdownUsage, MarkdownApiUsage, MarkdownNotableDetails);
 
-    public static string Compose(string usage, string? apiUsage, string? notableDetails)
+    public static string Compose(string shortText, string usage, string? apiUsage, string? notableDetails)
     {
         var builder = new StringBuilder("### How this app uses Shizuku\n\n");
+        // One-line infobox so the app list summary is visible in the report too.
+        builder.Append("> Summary: ").Append(shortText.Trim()).Append("\n\n");
         builder.Append(usage.Trim());
         if (!string.IsNullOrWhiteSpace(apiUsage))
         {

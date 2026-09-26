@@ -20,6 +20,9 @@ public sealed class UsageReportValidatorTests
         Assert.Contains("IPackageManager.installPackage", report.MarkdownApiUsage);
         Assert.Null(report.MarkdownNotableDetails);
         Assert.Contains("### Android APIs or commands used", report.ComposedMarkdown);
+        Assert.StartsWith(
+            "### How this app uses Shizuku\n\n> Summary: Can install apps using PackageManager.\n\n",
+            report.ComposedMarkdown);
     }
 
     [Fact]
