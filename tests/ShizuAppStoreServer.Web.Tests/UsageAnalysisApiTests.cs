@@ -58,10 +58,7 @@ public sealed class UsageAnalysisApiTests : IClassFixture<UsageAnalysisApiTests.
         {
             var app = Seeds.NewApp("usage", Seeds.NewCategory("apps"), availability: Availability.DirectApk);
             app.UsageShort = "Can install apps using PackageManager.";
-            app.UsageMarkdown = "Installs via `PackageManager` (`Installer.kt:3`).\n\n## Android APIs or commands used\n\n- `IPackageManager.installPackage`";
-            app.UsageMarkdownUsage = "Installs via `PackageManager` (`Installer.kt:3`).";
-            app.UsageMarkdownApiUsage = "- `IPackageManager.installPackage`";
-            app.UsageMarkdownNotableDetails = "A fallback uses the system installer.";
+            app.UsageMarkdown = "Installs via `PackageManager` (`Installer.kt:3`).";
             app.UsageAnalyzedAt = DateTimeOffset.UtcNow;
             app.UsageModel = "mimo-v2.6-flash";
             db.Apps.Add(app);
@@ -72,9 +69,6 @@ public sealed class UsageAnalysisApiTests : IClassFixture<UsageAnalysisApiTests.
         var detail = (await response.Content.ReadFromJsonAsync<AppDetailDto>())!;
         Assert.Equal("Can install apps using PackageManager.", detail.UsageShort);
         Assert.Contains("Installer.kt:3", detail.UsageMarkdown);
-        Assert.Contains("Installer.kt:3", detail.UsageMarkdownUsage);
-        Assert.Equal("- `IPackageManager.installPackage`", detail.UsageMarkdownApiUsage);
-        Assert.Equal("A fallback uses the system installer.", detail.UsageMarkdownNotableDetails);
         Assert.NotNull(detail.UsageAnalyzedAt);
 
         // The heuristic fields are gone from the wire shape.
