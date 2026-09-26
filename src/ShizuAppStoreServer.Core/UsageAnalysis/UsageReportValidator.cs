@@ -25,7 +25,8 @@ public sealed record UsageReport(
 
     public static string Compose(string usage, string? apiUsage, string? notableDetails)
     {
-        var builder = new StringBuilder(usage.Trim());
+        var builder = new StringBuilder("### How this app uses Shizuku\n\n");
+        builder.Append(usage.Trim());
         if (!string.IsNullOrWhiteSpace(apiUsage))
         {
             builder.Append("\n\n### Android APIs or commands used\n\n").Append(apiUsage.Trim());

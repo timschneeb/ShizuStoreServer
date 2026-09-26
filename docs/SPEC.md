@@ -989,8 +989,9 @@ marker scanning survives only as internal context extraction.
   bold-labelled capability bullets) and `short` are required; the API list
   and the notable details are nullable when there is no Shizuku usage or
   nothing notable. The model never writes section headings: the server owns
-  them and composes the served markdown as `### Android APIs or commands
-  used` and `### Notable details` below the capability text. The visible text
+  them and composes the served markdown as `### How this app uses Shizuku`
+  on top, then `### Android APIs or commands used` and `### Notable details`
+  below the capability text. The visible text
   must not mention file paths, line numbers or code-level names, except in
   the API list, which names the traced Android platform APIs: framework
   classes and methods, hidden or internal APIs, system binder interfaces and

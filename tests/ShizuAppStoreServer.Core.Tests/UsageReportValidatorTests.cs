@@ -119,6 +119,7 @@ public sealed class UsageReportValidatorTests
         Assert.Null(error);
         Assert.NotNull(report);
         Assert.Contains("IActivityManager.startActivityAsUser", report.MarkdownApiUsage);
+        Assert.StartsWith("### How this app uses Shizuku", report.ComposedMarkdown);
         Assert.Contains("### Android APIs or commands used", report.ComposedMarkdown);
         Assert.DoesNotContain("### Android APIs or commands used", report.MarkdownUsage);
     }
