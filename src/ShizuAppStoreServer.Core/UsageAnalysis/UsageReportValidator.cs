@@ -143,7 +143,7 @@ public static partial class UsageReportValidator
             shortClean = shortClean[..MaxShortChars].TrimEnd();
         }
 
-        var usageClean = Cap(NormalizeMarkdown(usage), MaxUsageChars);
+        var usageClean = Cap(NormalizeUsageBullets(NormalizeMarkdown(usage)), MaxUsageChars);
         var apiClean = string.IsNullOrWhiteSpace(apiUsage)
             ? null
             : Cap(NormalizeApiList(NormalizeMarkdown(apiUsage)), MaxApiChars);
@@ -218,6 +218,26 @@ public static partial class UsageReportValidator
         }
 
         return node.GetValue<string>();
+    }
+
+    // The model sometimes writes capability lines without the bullet marker.
+    // A bold-labelled line is unambiguous, so repair it instead of rejecting;
+    // unbolded lines still fail the contract check.
+    private static string NormalizeUsageBullets(string text)
+    {
+        var lines = text.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var trimmed = lines[i].TrimStart();
+            if (trimmed.StartsWith("**", StringComparison.Ordinal)
+                && trimmed.IndexOf("**", 2, StringComparison.Ordinal) > 2
+                && !AnyBulletItem().IsMatch(lines[i]))
+            {
+                lines[i] = "- " + trimmed;
+            }
+        }
+
+        return string.Join('\n', lines);
     }
 
     // The model sometimes drops the bullet marker on the first API line. A

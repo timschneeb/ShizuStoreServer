@@ -115,13 +115,27 @@ public sealed class UsageReportValidatorTests
     public void RejectsAUsageReportWhoseCapabilitySectionIsNotABulletList()
     {
         var json = """
-            {"short":"Can change settings.","markdown_usage":"Changes settings.\n\n**Change display size**: a value is applied with `wm density`.","markdown_api_usage":"- `wm density`"}
+            {"short":"Can change settings.","markdown_usage":"Changes settings.\n\nThe display size can be changed with `wm density`.","markdown_api_usage":"- `wm density`"}
             """;
 
         var report = UsageReportValidator.Validate(json, out var error);
 
         Assert.Null(report);
         Assert.Contains("bullet list", error);
+    }
+
+    [Fact]
+    public void RepairsBoldCapabilityLinesIntoBullets()
+    {
+        var json = """
+            {"short":"Can change settings.","markdown_usage":"Changes settings.\n\n**Change display size**: a value is applied with `wm density`.","markdown_api_usage":"- `wm density`"}
+            """;
+
+        var report = UsageReportValidator.Validate(json, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(report);
+        Assert.Contains("- **Change display size**", report.MarkdownUsage);
     }
 
     [Fact]
