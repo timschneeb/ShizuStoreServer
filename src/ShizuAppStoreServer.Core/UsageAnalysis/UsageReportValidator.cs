@@ -120,10 +120,10 @@ public static partial class UsageReportValidator
         try
         {
             root = json;
-            shortText = root["short"]?.GetValue<string>();
-            usage = root["markdown_usage"]?.GetValue<string>();
-            apiUsage = root["markdown_api_usage"] is null ? null : root["markdown_api_usage"]!.GetValue<string>();
-            notable = root["markdown_notable_details"] is null ? null : root["markdown_notable_details"]!.GetValue<string>();
+            shortText = ReadText(root["short"]);
+            usage = ReadText(root["markdown_usage"]);
+            apiUsage = ReadText(root["markdown_api_usage"]);
+            notable = ReadText(root["markdown_notable_details"]);
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException)
         {
@@ -201,6 +201,24 @@ public static partial class UsageReportValidator
     }
 
     private static string Cap(string text, int max) => text.Length > max ? text[..max].TrimEnd() : text;
+
+    // The model occasionally emits a list where a string is expected (for
+    // example one backticked API per array element). Join those instead of
+    // rejecting; the bullet repair below normalizes the result.
+    private static string? ReadText(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return null;
+        }
+
+        if (node is JsonArray array)
+        {
+            return string.Join('\n', array.Select(item => item?.GetValue<string>() ?? string.Empty));
+        }
+
+        return node.GetValue<string>();
+    }
 
     // The model sometimes drops the bullet marker on the first API line. A
     // backticked line is unambiguous, so repair it instead of rejecting.

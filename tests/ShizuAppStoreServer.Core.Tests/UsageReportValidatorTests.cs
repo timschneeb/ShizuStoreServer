@@ -206,6 +206,21 @@ public sealed class UsageReportValidatorTests
     }
 
     [Fact]
+    public void JoinsAnApiArrayIntoTheList()
+    {
+        var json = """
+            {"short":"Can install apps.","markdown_usage":"Installs packages through a user service.\n\n- **Install apps**: packages are installed silently.","markdown_api_usage":["`cmd package install -r -S`","`pm install`"]}
+            """;
+
+        var report = UsageReportValidator.Validate(json, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(report);
+        Assert.StartsWith("- `cmd package install -r -S`", report.MarkdownApiUsage);
+        Assert.Contains("- `pm install`", report.MarkdownApiUsage);
+    }
+
+    [Fact]
     public void NormalizesEmDashesAndFencedJson()
     {
         var json = "```json\n{\"short\":\"Can install apps \u2014 safely.\",\"markdown_usage\":\"Installs via `PackageManager` \u2014 silently.\"}\n```";
