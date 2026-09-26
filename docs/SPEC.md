@@ -989,10 +989,10 @@ marker scanning survives only as internal context extraction.
   bold-labelled capability bullets) and `short` are required; the API list
   and the notable details are nullable when there is no Shizuku usage or
   nothing notable. The model never writes section headings: the server owns
-  them and composes the served markdown with a `> **Summary:** <short>` infobox
-  on top, then `### How this app uses Shizuku`, then
-  `### Android APIs or commands used` and `### Notable details` below the
-  capability text. The client appends its own AI disclaimer infobox. The visible text
+  them and composes the served markdown as `### How this app uses Shizuku` on
+  top, then `### Android APIs or commands used` and `### Notable details`
+  below the capability text. The client renders `usageShort` as its own
+  summary card above the markdown and appends its AI disclaimer infobox. The visible text
   must not mention file paths, line numbers or code-level names, except in
   the API list, which names the traced Android platform APIs: framework
   classes and methods, hidden or internal APIs, system binder interfaces and
@@ -1379,7 +1379,7 @@ all environments; Scalar UI is development-only.
   `version_code`, then fixed source order); exactly one primary per
   app.
 - Signatures govern client choice: clients filter `downloads[]` by
-  the installed cert's fingerprint, compare that candidate's version,
+  the installed cert's fingerprint, compare that candingerprint, compare that candidate's version,
   and never switch a user between signatures.
 - `apps.url` is not an identity - always key on
   `(listing, url, category)`.

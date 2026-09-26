@@ -299,10 +299,7 @@ public static partial class UsageReportValidator
 
         try
         {
-            return JsonNode.Parse(text[start..(end + 1)]) as JsonObject;
-        }
-        catch (JsonException)
-        {
+            return JsonNode.Parse(text[start..(end + 1)]) as JsonObject{
             return null;
         }
     }
