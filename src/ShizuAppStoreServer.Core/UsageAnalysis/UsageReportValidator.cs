@@ -25,9 +25,10 @@ public sealed record UsageReport(
 
     public static string Compose(string shortText, string usage, string? apiUsage, string? notableDetails)
     {
-        var builder = new StringBuilder("### How this app uses Shizuku\n\n");
-        // One-line infobox so the app list summary is visible in the report too.
-        builder.Append("> Summary: ").Append(shortText.Trim()).Append("\n\n");
+        // One-line infobox above the heading so the app list summary is visible
+        // in the report too.
+        var builder = new StringBuilder("> **Summary:** ").Append(shortText.Trim()).Append("\n\n");
+        builder.Append("### How this app uses Shizuku\n\n");
         builder.Append(usage.Trim());
         if (!string.IsNullOrWhiteSpace(apiUsage))
         {

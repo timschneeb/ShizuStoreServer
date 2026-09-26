@@ -21,7 +21,7 @@ public sealed class UsageReportValidatorTests
         Assert.Null(report.MarkdownNotableDetails);
         Assert.Contains("### Android APIs or commands used", report.ComposedMarkdown);
         Assert.StartsWith(
-            "### How this app uses Shizuku\n\n> Summary: Can install apps using PackageManager.\n\n",
+            "> **Summary:** Can install apps using PackageManager.\n\n### How this app uses Shizuku\n\n",
             report.ComposedMarkdown);
     }
 
@@ -122,7 +122,9 @@ public sealed class UsageReportValidatorTests
         Assert.Null(error);
         Assert.NotNull(report);
         Assert.Contains("IActivityManager.startActivityAsUser", report.MarkdownApiUsage);
-        Assert.StartsWith("### How this app uses Shizuku", report.ComposedMarkdown);
+        Assert.StartsWith(
+            "> **Summary:** Can record calls.\n\n### How this app uses Shizuku",
+            report.ComposedMarkdown);
         Assert.Contains("### Android APIs or commands used", report.ComposedMarkdown);
         Assert.DoesNotContain("### Android APIs or commands used", report.MarkdownUsage);
     }
