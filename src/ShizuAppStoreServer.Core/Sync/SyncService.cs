@@ -108,7 +108,10 @@ public sealed class SyncService(
         {
             return await RunCoreAsync(trigger, fullRecheck, now, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // A request-level timeout surfaces as OperationCanceledException while
+        // the passed token is still live; that is a failed pass, not a host
+        // shutdown, and must not escape to stop the host.
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             // The error row keeps only the message; the journal keeps the stack.
             _log?.LogError(ex, "Sync pass failed; writing an error run row.");
@@ -297,7 +300,9 @@ public sealed class SyncService(
         {
             return await poll.FindChangedAsync(ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Best effort, so a request-level timeout (an OperationCanceledException
+        // while the passed token is live) must not fail the whole pass.
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             return new HashSet<long>();
         }

@@ -19,6 +19,12 @@ using ShizuAppStoreServer.Tracking;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// A worker exception must never take the API down. The hosted workers catch
+// per iteration; this covers the gaps (for example a request-level timeout
+// surfacing as OperationCanceledException) that would otherwise stop the host.
+builder.Services.Configure<HostOptions>(o =>
+    o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+
 // Add services to the container.
 
 builder.Services.AddControllers(o => o.Filters.Add<ResponsePoisonFilter>());

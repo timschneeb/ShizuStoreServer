@@ -768,6 +768,24 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PollTimeoutDoesNotFailThePass()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var service = Service(poll: new TimeoutPoller());
+
+        await service.RunAsync("scheduled", fullRecheck: false, T0);
+        var result = await service.RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
+
+        Assert.Null(result.Error);
+        Assert.True(result.Skipped);
+    }
+
+    [Fact]
     public async Task RefreshIconsRefusesWhenApkAnalysisSkipped()
     {
         var service = new SyncService(
@@ -792,6 +810,14 @@ public sealed class SyncServiceTests : IDisposable
             Calls++;
             return Task.FromResult<IReadOnlySet<long>>(changed ?? new HashSet<long>());
         }
+    }
+
+    /// <summary>Simulates the HttpClient timeout that killed the host in production.</summary>
+    private sealed class TimeoutPoller : IReleasePoller
+    {
+        public Task<IReadOnlySet<long>> FindChangedAsync(CancellationToken ct = default) =>
+            Task.FromException<IReadOnlySet<long>>(new TaskCanceledException(
+                "The request was canceled due to the configured HttpClient.Timeout of 30 seconds elapsing."));
     }
 
     private sealed class ThrowingRunner : IEnrichmentRunner

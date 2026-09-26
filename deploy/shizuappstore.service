@@ -26,7 +26,8 @@ Environment=TMPDIR=/opt/shizuappstore/tmp
 # manager through this runtime dir (needs linger, see the setup doc). The
 # numeric UID is the service user's: %U expands to the system manager's UID.
 Environment=XDG_RUNTIME_DIR=/run/user/958
-Restart=on-failure
+# Always: a clean exit must not leave the API down. Manual stops are respected.
+Restart=always
 RestartSec=10
 # The worker enriches APKs in parallel; hard-cap CPU/memory/IO so a full
 # backfill cannot starve the rest of the box. Icon render JVMs live outside
