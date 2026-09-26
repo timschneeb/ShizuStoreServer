@@ -21,14 +21,13 @@ public sealed record UsageReport(
     /// <summary>Full markdown as served and rendered, with the server-owned headings.</summary>
     public string ComposedMarkdown => !string.IsNullOrWhiteSpace(Markdown)
         ? Markdown
-        : Compose(Short, MarkdownUsage, MarkdownApiUsage, MarkdownNotableDetails);
+        : Compose(MarkdownUsage, MarkdownApiUsage, MarkdownNotableDetails);
 
-    public static string Compose(string shortText, string usage, string? apiUsage, string? notableDetails)
+    public static string Compose(string usage, string? apiUsage, string? notableDetails)
     {
-        // One-line infobox above the heading so the app list summary is visible
-        // in the report too.
-        var builder = new StringBuilder("> **Summary:** ").Append(shortText.Trim()).Append("\n\n");
-        builder.Append("### How this app uses Shizuku\n\n");
+        // The client renders the short line as its own summary card above the
+        // markdown, so the composed text starts at the heading.
+        var builder = new StringBuilder("### How this app uses Shizuku\n\n");
         builder.Append(usage.Trim());
         if (!string.IsNullOrWhiteSpace(apiUsage))
         {
@@ -299,7 +298,10 @@ public static partial class UsageReportValidator
 
         try
         {
-            return JsonNode.Parse(text[start..(end + 1)]) as JsonObject{
+            return JsonNode.Parse(text[start..(end + 1)]) as JsonObject;
+        }
+        catch (JsonException)
+        {
             return null;
         }
     }

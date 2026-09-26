@@ -21,7 +21,7 @@ public sealed class UsageReportValidatorTests
         Assert.Null(report.MarkdownNotableDetails);
         Assert.Contains("### Android APIs or commands used", report.ComposedMarkdown);
         Assert.StartsWith(
-            "> **Summary:** Can install apps using PackageManager.\n\n### How this app uses Shizuku\n\n",
+            "### How this app uses Shizuku\n\n",
             report.ComposedMarkdown);
     }
 
@@ -200,7 +200,8 @@ public sealed class UsageReportValidatorTests
     public void RejectsShizukuSdkHelpersInTheApiList()
     {
         var json = """
-            {"short":"Can install apps.","markdown_usage":"Installs apps through a privileged path.\n\n- **Install apps**: packages are installed silently."," """;
+            {"short":"Can install apps.","markdown_usage":"Installs apps through a privileged path.\n\n- **Install apps**: packages are installed silently.","markdown_api_usage":"- `Shizuku.newProcess`\n- `IPackageManager.installPackage`"}
+            """;
 
         var report = UsageReportValidator.Validate(json, out var error);
 
