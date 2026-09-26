@@ -127,7 +127,7 @@ public sealed class UsageAnalysisAgentTests : IDisposable
     private UsageAnalysisAgent NewAgent(IChatClient client) =>
         new(new ScriptedFactory(client), _options, null);
 
-    private const string ValidJson = """{"short":"Can install apps.","markdown_usage":"Installs via `PackageManager`."}""";
+    private const string ValidJson = """{"short":"Can install apps.","markdown_usage":"Installs packages through a user service.\n\n- **Install apps**: packages are installed silently.","markdown_api_usage":"- `IPackageManager.installPackage`"}""";
 
     [Fact]
     public async Task InvokesToolsAndReturnsTheValidatedReport()

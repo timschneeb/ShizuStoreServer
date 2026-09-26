@@ -5,7 +5,7 @@ namespace ShizuAppStoreServer.Core.Tests;
 public sealed class UsageReportValidatorTests
 {
     private const string ValidJson = """
-        {"short":"Can install apps using PackageManager.","markdown_usage":"Installs packages via `PackageManager`."}
+        {"short":"Can install apps using PackageManager.","markdown_usage":"Installs packages through a user service.\n\n- **Install apps**: packages are installed silently.","markdown_api_usage":"- `IPackageManager.installPackage`"}
         """;
 
     [Fact]
@@ -16,17 +16,44 @@ public sealed class UsageReportValidatorTests
         Assert.Null(error);
         Assert.NotNull(report);
         Assert.Equal("Can install apps using PackageManager.", report.Short);
-        Assert.Contains("PackageManager", report.MarkdownUsage);
-        Assert.Null(report.MarkdownApiUsage);
+        Assert.Contains("packages are installed silently", report.MarkdownUsage);
+        Assert.Contains("IPackageManager.installPackage", report.MarkdownApiUsage);
         Assert.Null(report.MarkdownNotableDetails);
-        Assert.Contains("PackageManager", report.ComposedMarkdown);
+        Assert.Contains("## Android APIs or commands used", report.ComposedMarkdown);
+    }
+
+    [Fact]
+    public void RejectsAUsageReportThatClaimsUsageButHasNoBullets()
+    {
+        var json = """
+            {"short":"Can control each app's volume.","markdown_usage":"Volume Manager uses Shizuku to control playback per app."}
+            """;
+
+        var report = UsageReportValidator.Validate(json, out var error);
+
+        Assert.Null(report);
+        Assert.Contains("bullet list", error);
+    }
+
+    [Fact]
+    public void AcceptsANoUsageReportWithoutBullets()
+    {
+        var json = """
+            {"short":"No Shizuku usage remains in the current app.","markdown_usage":"The current app does not use Shizuku for any feature; shell access now goes through its own direct ADB connection."}
+            """;
+
+        var report = UsageReportValidator.Validate(json, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(report);
+        Assert.Null(report.MarkdownApiUsage);
     }
 
     [Fact]
     public void StripsHtmlImagesAndOffAllowlistLinks()
     {
         var json = """
-            {"short":"Can install apps.","markdown_usage":"<script>alert(1)</script>Installs apps <b>silently</b>.\n\n![shot](https://evil.example/x.png)\n\nSee [docs](https://evil.example/page) and [code](app/src/main/java/Installer.kt#L3)."}
+            {"short":"Can install apps.","markdown_usage":"<script>alert(1)</script>Installs apps <b>silently</b>.\n\n- **Install apps**: packages are installed silently.\n\n![shot](https://evil.example/x.png)\n\nSee [docs](https://evil.example/page) and [code](app/src/main/java/Installer.kt#L3).","markdown_api_usage":"- `IPackageManager.installPackage`"}
             """;
 
         var report = UsageReportValidator.Validate(json, out var error);
@@ -71,7 +98,7 @@ public sealed class UsageReportValidatorTests
     public void AcceptsOtherAppsPermissionDialogsAsACapability()
     {
         var json = """
-            {"short":"Can dismiss system permission dialogs.","markdown_usage":"Automatically taps Allow on other apps' permission dialogs."}
+            {"short":"Can dismiss system permission dialogs.","markdown_usage":"Automatically taps Allow on other apps' permission dialogs.\n\n- **Dismiss dialogs**: Allow buttons are tapped automatically.","markdown_api_usage":"- `input tap`"}
             """;
 
         var report = UsageReportValidator.Validate(json, out var error);
@@ -237,7 +264,7 @@ public sealed class UsageReportValidatorTests
     [Fact]
     public void NormalizesEmDashesAndFencedJson()
     {
-        var json = "```json\n{\"short\":\"Can install apps \u2014 safely.\",\"markdown_usage\":\"Installs via `PackageManager` \u2014 silently.\"}\n```";
+        var json = "```json\n{\"short\":\"Can install apps \u2014 safely.\",\"markdown_usage\":\"Installs via a user service.\\n\\n- **Install apps**: installs via `PackageManager` \u2014 silently.\",\"markdown_api_usage\":\"- `IPackageManager.installPackage`\"}\n```";
 
         var report = UsageReportValidator.Validate(json, out var error);
 

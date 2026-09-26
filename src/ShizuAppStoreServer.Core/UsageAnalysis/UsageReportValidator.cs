@@ -98,6 +98,11 @@ public static partial class UsageReportValidator
     [GeneratedRegex(@"(?m)^[ \t]*[-*+][ \t]+\S")]
     private static partial Regex AnyBulletItem();
 
+    // Only a report that finds no Shizuku usage may skip the capability
+    // bullets. Everything else must list what the app does.
+    [GeneratedRegex(@"(?i)\bno\s+Shizuku\b|\b(?:does\s+not|doesn't|not)\s+use\s+Shizuku\b|\bShizuku\b[^.\n]{0,30}\bnot\s+used\b")]
+    private static partial Regex NoUsageNarration();
+
     /// <summary>
     /// Parses and validates the model output. On failure returns null and an
     /// error describing what to fix, so the caller can ask for one correction.
@@ -178,6 +183,12 @@ public static partial class UsageReportValidator
         if (apiClean is not null && !BulletItem().IsMatch(usageClean))
         {
             error = "'markdown_usage' must be a markdown bullet list: one \"- \" bullet per capability, each starting with a bold label such as **Install apps**, instead of plain lines or unbolded bullets";
+            return null;
+        }
+
+        if (apiClean is null && !NoUsageNarration().IsMatch(usageClean))
+        {
+            error = "'markdown_usage' must list the capabilities as a bullet list; only a report that finds no Shizuku usage may be plain text";
             return null;
         }
 
