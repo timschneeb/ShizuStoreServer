@@ -28,12 +28,12 @@ public sealed record UsageReport(
         var builder = new StringBuilder(usage.Trim());
         if (!string.IsNullOrWhiteSpace(apiUsage))
         {
-            builder.Append("\n\n## Android APIs or commands used\n\n").Append(apiUsage.Trim());
+            builder.Append("\n\n### Android APIs or commands used\n\n").Append(apiUsage.Trim());
         }
 
         if (!string.IsNullOrWhiteSpace(notableDetails))
         {
-            builder.Append("\n\n## Notable details\n\n").Append(notableDetails.Trim());
+            builder.Append("\n\n### Notable details\n\n").Append(notableDetails.Trim());
         }
 
         return builder.ToString();

@@ -19,7 +19,7 @@ public sealed class UsageReportValidatorTests
         Assert.Contains("packages are installed silently", report.MarkdownUsage);
         Assert.Contains("IPackageManager.installPackage", report.MarkdownApiUsage);
         Assert.Null(report.MarkdownNotableDetails);
-        Assert.Contains("## Android APIs or commands used", report.ComposedMarkdown);
+        Assert.Contains("### Android APIs or commands used", report.ComposedMarkdown);
     }
 
     [Fact]
@@ -119,8 +119,8 @@ public sealed class UsageReportValidatorTests
         Assert.Null(error);
         Assert.NotNull(report);
         Assert.Contains("IActivityManager.startActivityAsUser", report.MarkdownApiUsage);
-        Assert.Contains("## Android APIs or commands used", report.ComposedMarkdown);
-        Assert.DoesNotContain("## Android APIs or commands used", report.MarkdownUsage);
+        Assert.Contains("### Android APIs or commands used", report.ComposedMarkdown);
+        Assert.DoesNotContain("### Android APIs or commands used", report.MarkdownUsage);
     }
 
     [Fact]
@@ -135,7 +135,7 @@ public sealed class UsageReportValidatorTests
         Assert.Null(error);
         Assert.NotNull(report);
         Assert.Contains("fallback", report.MarkdownNotableDetails);
-        Assert.Contains("## Notable details", report.ComposedMarkdown);
+        Assert.Contains("### Notable details", report.ComposedMarkdown);
     }
 
     [Fact]
