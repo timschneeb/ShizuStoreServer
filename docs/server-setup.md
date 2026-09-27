@@ -518,7 +518,10 @@ which takes the shared sync gate and keeps reads serving. Queuing `POST
 /v1/admin/sync` wakes the fast loop for due apps; add `{"full":true}` to
 make that pass a full-catalog re-check like the nightly, which is how
 analysis-signal backfills run for rows recorded before the signal
-columns existed (`inspected = false` heals once). The nightly pass at
+columns existed (`inspected = false` heals once). Add `{"icons":false}`
+to force the drained pass to skip APK icon rendering entirely (no inline
+resolve or adoption, no full-pass icon batch), for backfills that must
+not touch the icon store. The nightly pass at
 `Sync:NightlyTimeUtc` (03:00 UTC) does the same on its own.
 
 If a backfill committed raster-fallback icons because a single render
@@ -579,6 +582,16 @@ curl -fsS -X POST https://shizustore.timschneeberger.me/v1/admin/sync \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"reason":"signal backfill","full":true}'   # 202; the next fast-loop pass drains it
+```
+
+Re-check the catalog without re-rendering any APK icons:
+
+```bash
+TOKEN=$(sudo sed -n 's/^SHIZU_ADMIN_SECRET=//p' /etc/shizuappstore/env)
+curl -fsS -X POST https://shizustore.timschneeberger.me/v1/admin/sync \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"full check without icon rendering","full":true,"icons":false}'
 ```
 
 To force every client to drop its cached catalog and pull a fresh one

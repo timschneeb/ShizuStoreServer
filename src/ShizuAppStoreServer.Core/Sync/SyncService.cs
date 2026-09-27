@@ -151,9 +151,13 @@ public sealed class SyncService(
         // drained without the full-catalog re-check the operator asked for.
         fullRecheck |= pending.Exists(r => r.Full);
 
+        // An icons:false request force-disables icon rendering for the whole
+        // drained pass; with several pending rows any veto wins.
+        var skipIcons = pending.Exists(r => !r.Icons);
+
         var effectiveTrigger = pending.Count > 0 ? "webhook" : trigger;
         var start = new JobStart(
-            JobKind.Sync, ParseTrigger(effectiveTrigger), now, Metadata: new { fullRecheck });
+            JobKind.Sync, ParseTrigger(effectiveTrigger), now, Metadata: new { fullRecheck, skipIcons });
 
         // Best-effort fetch with its own timeout: a stuck network must not
         // wedge the loop (the git process itself may linger; it exits alone).
@@ -197,6 +201,7 @@ public sealed class SyncService(
                 new { due = dueIds.Count, polled = freshIds.Count, fullRecheck });
             try
             {
+                enrichment.SkipIconRenders = skipIcons;
                 var (enriched, upToDate, failed, failedMessages) =
                     await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
                 await ApplyShizukuFilterAsync(ct);
@@ -207,6 +212,10 @@ public sealed class SyncService(
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 return await FailRunAsync(dueSession, effectiveTrigger, ex);
+            }
+            finally
+            {
+                enrichment.SkipIconRenders = false;
             }
         }
 
@@ -262,7 +271,7 @@ public sealed class SyncService(
             session.Phase("enrich", $"enriching {ids.Count + extraIds.Count} apps",
                 new { asserted = ids.Count, polled = extraIds.Count, fullRecheck });
 
-            var batchIcons = fullRecheck && enrichment.BatchIconsOnFullPass;
+            var batchIcons = fullRecheck && enrichment.BatchIconsOnFullPass && !skipIcons;
             if (batchIcons)
             {
                 // Full passes batch their icon renders after enrichment (see
@@ -274,10 +283,12 @@ public sealed class SyncService(
             (int Enriched, int UpToDate, int Failed, List<string> FailedMessages) full;
             try
             {
+                enrichment.SkipIconRenders = skipIcons;
                 full = await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
             }
             finally
             {
+                enrichment.SkipIconRenders = false;
                 enrichment.DeferXmlIconRenders = false;
             }
 

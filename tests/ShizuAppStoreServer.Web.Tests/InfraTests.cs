@@ -77,6 +77,7 @@ public sealed class AdminTests(ShizuApiFactory factory) : IClassFixture<ShizuApi
             var row = await db.SyncRequests.SingleAsync();
             Assert.Equal("webhook-test", row.Reason);
             Assert.False(row.Full);
+            Assert.True(row.Icons);
             Assert.False(row.Processed);
             return 0;
         });
@@ -95,6 +96,25 @@ public sealed class AdminTests(ShizuApiFactory factory) : IClassFixture<ShizuApi
         {
             var row = await db.SyncRequests.SingleAsync();
             Assert.True(row.Full);
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task IconsFlagIsQueued()
+    {
+        await factory.ResetAsync(_ => { });
+        var client = factory.NewClient();
+
+        var response = await client.SendAsync(
+            Authorized("""{"reason":"no icons","full":true,"icons":false}"""));
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        await factory.QueryAsync(async db =>
+        {
+            var row = await db.SyncRequests.SingleAsync();
+            Assert.True(row.Full);
+            Assert.False(row.Icons);
             return 0;
         });
     }

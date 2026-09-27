@@ -14,6 +14,13 @@ public sealed class SyncRequest
     /// </summary>
     public bool Full { get; set; }
 
+    /// <summary>
+    /// False force-disables APK icon rendering for the drained pass: no
+    /// inline raster/XML resolve or adoption and no full-pass icon batch.
+    /// Defaults to true so requests predating the flag render normally.
+    /// </summary>
+    public bool Icons { get; set; } = true;
+
     public bool Processed { get; set; }
     public DateTimeOffset? ProcessedAt { get; set; }
 }

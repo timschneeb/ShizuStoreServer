@@ -19,10 +19,12 @@ public sealed class AdminController(
     /// Authenticates with <c>Authorization: Bearer &lt;token&gt;</c>; the
     /// token comes from <c>Admin:Token</c> config or the
     /// <c>SHIZU_ADMIN_TOKEN</c> / legacy <c>SHIZU_ADMIN_SECRET</c> environment
-    /// variable. The optional JSON body carries a free-form <c>reason</c> and a
-    /// <c>full</c> flag: <c>{"full":true}</c> upgrades the drained pass to a
-    /// full-catalog re-check like the nightly, so operators backfill without
-    /// restarting the service.
+    /// variable. The optional JSON body carries a free-form <c>reason</c>, a
+    /// <c>full</c> flag and an <c>icons</c> flag: <c>{"full":true}</c> upgrades
+    /// the drained pass to a full-catalog re-check like the nightly, so
+    /// operators backfill without restarting the service, and
+    /// <c>{"icons":false}</c> force-disables APK icon rendering for that pass
+    /// (no inline resolve/adopt, no end-of-pass batch).
     /// </summary>
     [HttpPost]
     [RequestSizeLimit(4096)]
@@ -49,6 +51,7 @@ public sealed class AdminController(
 
         string? reason = null;
         var full = false;
+        var icons = true;
         try
         {
             using var json = JsonDocument.Parse(bodyBytes);
@@ -65,6 +68,14 @@ public sealed class AdminController(
                 {
                     full = fullProp.GetBoolean();
                 }
+
+                // Only an explicit false disables icons: absent or malformed
+                // values keep the historical render-everything behavior.
+                if (json.RootElement.TryGetProperty("icons", out var iconsProp)
+                    && iconsProp.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    icons = iconsProp.GetBoolean();
+                }
             }
         }
         catch (JsonException)
@@ -77,6 +88,7 @@ public sealed class AdminController(
             RequestedAt = DateTimeOffset.UtcNow,
             Reason = reason,
             Full = full,
+            Icons = icons,
             Processed = false,
         });
         await db.SaveChangesAsync(ct);

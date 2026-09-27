@@ -1395,7 +1395,7 @@ public sealed class AppEnricher(
         // (XML renders wait for the batch phase), so adopting one here would
         // downgrade an existing adaptive icon. The batch phase owns icon
         // writes then.
-        var adoptIcon = analysis.Icon is not null && !options.DeferXmlIconRenders;
+        var adoptIcon = analysis.Icon is not null && !options.DeferXmlIconRenders && !options.SkipIconRenders;
         if (adoptIcon)
         {
             await WriteIconFileAsync(analysis.Icon!, ct);
@@ -3718,7 +3718,9 @@ public sealed class AppEnricher(
         var signalsStarted = Stopwatch.GetTimestamp();
         var inspection = await InspectApkAsync(apkPath, badging, ct);
         var iconStarted = Stopwatch.GetTimestamp();
-        var icon = await ResolveIconAsync(badging, apkPath, ct);
+        // An icons:false admin pass renders nothing: skip the resolve so no
+        // raster decode or Gradle XML render runs and no icon gets adopted.
+        var icon = options.SkipIconRenders ? null : await ResolveIconAsync(badging, apkPath, ct);
         JobContext.Current?.Analyze($"analyze {label} badging {Elapsed(badgingStarted)}ms, "
             + $"signers {Elapsed(signerStarted)}ms, signals {Elapsed(signalsStarted)}ms, "
             + $"icon {Elapsed(iconStarted)}ms, total {Elapsed(started)}ms");

@@ -1569,6 +1569,35 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task SkipIconRendersKeepsTheExistingIcon()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("skipicon", "Skipped Icon", "https://github.com/o/rd");
+        await enricher.EnrichAsync(app, T0);
+        var original = app.IconHash;
+        Assert.NotNull(original);
+
+        Age(app);
+        var (second, _, _, _, _) = HappyPath(
+            tag: "v1.1", versionCode: "43", iconColor: Color.Red,
+            assetUrl: "https://cdn.example/app-v1.1.apk");
+        // An icons:false admin pass renders nothing: the build updates but the
+        // recorded icon must survive untouched.
+        _options.SkipIconRenders = true;
+        try
+        {
+            var result = await second.EnrichAsync(app, T0);
+            Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        }
+        finally
+        {
+            _options.SkipIconRenders = false;
+        }
+
+        Assert.Equal(original, app.IconHash);
+    }
+
+    [Fact]
     public async Task RecordsFailureAndBacksOff()
     {
         var github = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)

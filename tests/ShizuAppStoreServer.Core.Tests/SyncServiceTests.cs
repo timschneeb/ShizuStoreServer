@@ -1204,6 +1204,52 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task IconsFalseRequestSkipsTheBatchRenderEntirely()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        MarkDirectApk();
+        _db.SyncRequests.Add(new SyncRequest
+        {
+            RequestedAt = T0,
+            Reason = "no icons",
+            Full = true,
+            Icons = false,
+        });
+        await _db.SaveChangesAsync();
+
+        _runner.PrepareHook = id =>
+            new PrepareIconResult(EnrichOutcome.UpToDate, null, new PendingBatchIcon($"b{id}_0", null));
+        var renderer = new CannedBatchRenderer([7]);
+        var enrichment = new EnrichmentOptions { MaxParallelism = 2, BatchIconsOnFullPass = true };
+        var service = new SyncService(
+            _db,
+            new CatalogUpserter(_db),
+            new GitHistoryService(),
+            _runner,
+            new FakePoller(),
+            renderer,
+            new SyncOptions { ListPath = _repo },
+            enrichment,
+            new RecordingJobSink(_db).Log);
+
+        var result = await service.RunAsync("manual", fullRecheck: true, T0);
+
+        Assert.Null(result.Error);
+        Assert.False(result.Skipped);
+        Assert.Empty(renderer.Calls); // the icons:false request vetoed the batch
+        Assert.Empty(_runner.Commits);
+        Assert.False(enrichment.SkipIconRenders); // cleared for later passes
+        Assert.False(enrichment.DeferXmlIconRenders);
+        Assert.True(_db.SyncRequests.Single().Processed);
+    }
+
+    [Fact]
     public async Task FullPassBatchIconsSurvivesABrokenBatchRender()
     {
         if (!InitRepo())

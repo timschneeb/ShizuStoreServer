@@ -131,6 +131,14 @@ public sealed class EnrichmentOptions
     public bool DeferXmlIconRenders { get; set; }
 
     /// <summary>
+    /// Set by the sync engine when the drained admin request carries
+    /// <c>icons:false</c>. Not bound from config: a per-pass switch that
+    /// force-disables all APK icon rendering, inline raster/XML resolve and
+    /// adoption included, so the pass touches no icon bytes at all.
+    /// </summary>
+    public bool SkipIconRenders { get; set; }
+
+    /// <summary>
     /// F-Droid repo base override for hosts that f-droid.org throttles: set a
     /// mirror such as https://ftp.fau.de/fdroid/repo; null keeps upstream.
     /// </summary>

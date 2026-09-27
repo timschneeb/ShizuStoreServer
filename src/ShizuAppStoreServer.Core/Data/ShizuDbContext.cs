@@ -424,6 +424,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.RequestedAt).HasColumnName("requested_at").IsRequired();
             e.Property(x => x.Reason).HasColumnName("reason").HasMaxLength(256);
             e.Property(x => x.Full).HasColumnName("full");
+            e.Property(x => x.Icons).HasColumnName("icons").HasDefaultValue(true);
             e.Property(x => x.Processed).HasColumnName("processed");
             e.Property(x => x.ProcessedAt).HasColumnName("processed_at");
             e.HasIndex(x => x.Processed);

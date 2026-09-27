@@ -680,7 +680,10 @@ and a full pass with `Enrichment:BatchIconsOnFullPass` defers the XML
 levels to the batched icon phase after enrichment (while deferred, the inline
 analysis resolves rasters but never writes an icon, so a fallback raster
 cannot downgrade an existing adaptive icon; the batch phase owns icon
-commits). With `Enrichment:IconRenderScope` the Gradle call runs in a
+commits). A queued `{"icons":false}` admin request vetoes icon rendering
+for the whole drained pass: no inline raster or XML resolve, no adoption
+and no batched phase, so the pass touches no icon bytes and analyzed
+builds keep their recorded icon. With `Enrichment:IconRenderScope` the Gradle call runs in a
 transient systemd user scope (`systemd-run --user --scope`) with its own
 memory/CPU boundaries, so render JVMs are never charged to the API unit's
 cgroup (an over-budget render is throttled or killed inside the scope
@@ -1402,7 +1405,7 @@ rather than persisting them.
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
 | `GET /` | 302 to the project repo (`https://github.com/timschneeb/ShizuStore`); the bare host is a browser entry point, not part of the API. No rate limit, no cache. |
 | `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
-| `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). The optional JSON body carries a free-form `reason` and a `full` flag: `{"full":true}` upgrades the drained pass to a full-catalog re-check like the nightly. |
+| `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). The optional JSON body carries a free-form `reason`, a `full` flag and an `icons` flag: `{"full":true}` upgrades the drained pass to a full-catalog re-check like the nightly, and `{"icons":false}` force-disables APK icon rendering for that pass (no inline resolve or adoption, no end-of-pass batch; with several drained requests any `icons:false` vetoes). |
 | `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Records one `job_runs` row (`kind=IconRefresh`, `trigger=Manual`) with its event stream; the catalog cursor ignores it (§7.3). |
 | `GET /v1/admin/refresh-icons` | Same token rules. Current refresh status: `state` (`idle\|running\|completed\|failed`), `force`, `startedAt`/`finishedAt`, `checked`/`refreshed`/`alreadyCurrent`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-icons` | Same token rules. Cancels the running refresh → 202, or 409 when nothing is running. |
