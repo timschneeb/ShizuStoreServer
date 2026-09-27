@@ -731,6 +731,15 @@ public sealed class AppEnricher(
             return await HandleGitHubFailureAsync(app, ex, now, ct);
         }
 
+        // A forge whose newest release ships no binary is no longer the
+        // download channel; remember that so later passes and primary
+        // recomputes keep preferring an alternative source.
+        app.ForgeAssetsStale = release.IsOlderFallback;
+        if (release.IsOlderFallback && await TryAlternativeSourceAsync(app, release, now, ct) is { } alternative)
+        {
+            return alternative;
+        }
+
         if (await EnrichFromReleaseAsync(app, SourceKind.GitHub, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
         {
             return enriched;
@@ -747,6 +756,45 @@ public sealed class AppEnricher(
         }
 
         return Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
+    }
+
+    /// <summary>
+    /// The forge's newest release ships no installable artifact, so an
+    /// F-Droid build is the better served version when one exists. A missing
+    /// or failing alternative returns null and the older forge APK is used,
+    /// so index trouble never costs the download.
+    /// </summary>
+    private async Task<EnrichResult?> TryAlternativeSourceAsync(
+        App app, SourceRelease release, DateTimeOffset now, CancellationToken ct)
+    {
+        var previous = await PrimaryDownloadAsync(app, ct);
+        var result = await TryFdroidFallbackAsync(app, now, ct);
+        if (result is null || result.Outcome == EnrichOutcome.Failed)
+        {
+            return null;
+        }
+
+        // The forge release notes are the app's changelog; the index
+        // description only stands when the forge publishes none.
+        if (release.Changelog is not null)
+        {
+            app.Changelog = NormalizeChangelog(release.Changelog);
+            app.ChangelogUrl = release.WebUrl;
+        }
+
+        // The stored report describes the old forge build now; re-run it
+        // against the served alternative build.
+        var served = await PrimaryDownloadAsync(app, ct);
+        if (usageQueue is not null
+            && app.UsageAnalyzedAt is not null
+            && previous is not null
+            && served is not null
+            && previous.ApkUrl != served.ApkUrl)
+        {
+            await usageQueue.EnqueueAsync(app, artifactChanged: true, firstAnalysis: false, ct);
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -2804,8 +2852,10 @@ public sealed class AppEnricher(
 
     /// <summary>
     /// Default candidate for fresh installs: forge sources beat F-Droid/Izzy,
-    /// then the newest version, then a fixed source order. Exactly one row is
-    /// primary per app (invariant enforced here, not by a DB constraint).
+    /// then the newest version, then a fixed source order; when the forge no
+    /// longer ships binaries (see <see cref="App.ForgeAssetsStale"/>) the
+    /// alternatives compete on version code alone. Exactly one row is primary
+    /// per app (invariant enforced here, not by a DB constraint).
     /// </summary>
     private async Task RecomputePrimaryAsync(
         App app, CancellationToken ct, string? preferredPackage = null, string? preferredReleaseTag = null)
@@ -2825,7 +2875,7 @@ public sealed class AppEnricher(
         AppDownload? best = null;
         foreach (var row in candidates)
         {
-            best = best is null ? row : PreferDownload(row, best, preferredReleaseTag);
+            best = best is null ? row : PreferDownload(row, best, preferredReleaseTag, preferForge: !app.ForgeAssetsStale);
         }
 
         // The partial unique index on (app_id) where is_primary is not
@@ -2936,25 +2986,31 @@ public sealed class AppEnricher(
         await db.SaveChangesAsync(ct);
     }
 
-    private static AppDownload PreferDownload(AppDownload a, AppDownload b, string? preferredReleaseTag = null)
+    private static AppDownload PreferDownload(
+        AppDownload a, AppDownload b, string? preferredReleaseTag = null, bool preferForge = true)
     {
-        var aForge = IsForgeSource(a.Source);
-        var bForge = IsForgeSource(b.Source);
-        if (aForge != bForge)
+        // When the forge stopped shipping binaries, its rows compete on
+        // version code only: the alternative source's newer build leads.
+        if (preferForge)
         {
-            return aForge ? a : b;
-        }
-
-        // The release just scanned owns its tag's rows: when a repo switches
-        // from prereleases to stable, the freshly recorded stable build must
-        // outrank older prerelease rows kept for ABI or signature history.
-        if (preferredReleaseTag is not null)
-        {
-            var aTag = string.Equals(a.ReleaseTag, preferredReleaseTag, StringComparison.Ordinal);
-            var bTag = string.Equals(b.ReleaseTag, preferredReleaseTag, StringComparison.Ordinal);
-            if (aTag != bTag)
+            var aForge = IsForgeSource(a.Source);
+            var bForge = IsForgeSource(b.Source);
+            if (aForge != bForge)
             {
-                return aTag ? a : b;
+                return aForge ? a : b;
+            }
+
+            // The release just scanned owns its tag's rows: when a repo switches
+            // from prereleases to stable, the freshly recorded stable build must
+            // outrank older prerelease rows kept for ABI or signature history.
+            if (preferredReleaseTag is not null)
+            {
+                var aTag = string.Equals(a.ReleaseTag, preferredReleaseTag, StringComparison.Ordinal);
+                var bTag = string.Equals(b.ReleaseTag, preferredReleaseTag, StringComparison.Ordinal);
+                if (aTag != bTag)
+                {
+                    return aTag ? a : b;
+                }
             }
         }
 

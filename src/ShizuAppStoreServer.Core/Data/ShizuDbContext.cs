@@ -209,6 +209,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.LastCheckedAt).HasColumnName("last_checked_at");
             e.Property(x => x.LastError).HasColumnName("last_error");
             e.Property(x => x.EnrichEtag).HasColumnName("enrich_etag").HasMaxLength(256);
+            e.Property(x => x.ForgeAssetsStale).HasColumnName("forge_assets_stale");
             // AI source analysis. Detail-only fields plus the generation
             // markers the backfill compares against.
             e.Property(x => x.UsageShort).HasColumnName("usage_short").HasMaxLength(320);

@@ -212,6 +212,32 @@ public sealed class AppEnricherTests : IDisposable
         }).ToJsonString();
     }
 
+    /// <summary>Newest stable release without assets above an older servable one.</summary>
+    private static string AssetlessNewestFeed(string newestTag, string oldTag, string oldAssetUrl, long oldSize) =>
+        new JsonArray(
+            new JsonObject
+            {
+                ["tag_name"] = newestTag,
+                ["draft"] = false,
+                ["prerelease"] = false,
+                ["published_at"] = "2024-06-01T00:00:00Z",
+                ["assets"] = new JsonArray(),
+            },
+            new JsonObject
+            {
+                ["tag_name"] = oldTag,
+                ["draft"] = false,
+                ["prerelease"] = false,
+                ["published_at"] = "2024-01-01T00:00:00Z",
+                ["assets"] = new JsonArray(new JsonObject
+                {
+                    ["name"] = "app-release.apk",
+                    ["browser_download_url"] = oldAssetUrl,
+                    ["size"] = oldSize,
+                    ["content_type"] = "application/vnd.android.package-archive",
+                }),
+            }).ToJsonString();
+
     private static HttpResponseMessage JsonReleases(string json, string? etag = null)
     {
         var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) };
@@ -3181,6 +3207,146 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(SourceKind.FDroid, primary.Source);
         Assert.Equal("com.example.app", primary.SourceRef);
         Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", primary.ApkUrl);
+    }
+
+    [Fact]
+    public async Task AssetlessNewestForgeReleaseUsesNewerFdroidBuild()
+    {
+        // The project stopped attaching APKs to GitHub releases and moved to
+        // F-Droid; the old GitHub APK must not stay the served build.
+        var (enricher, _, _) = FdroidHappyPath(githubResponse: () => JsonReleases(
+            AssetlessNewestFeed("v2.0", "v1.0", "https://cdn.example/forge-v1.0.apk", 100)));
+        var app = NewApp("assetless", "Assetless", "https://github.com/example/aod");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.True(app.ForgeAssetsStale);
+        Assert.Equal(SourceKind.FDroid, app.SourceKind);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal(20L, primary.VersionCode);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", primary.ApkUrl);
+        // The stale forge release is not even recorded as a candidate.
+        Assert.DoesNotContain(_db.Downloads.Local, d => d.AppId == app.Id && d.Source == SourceKind.GitHub);
+    }
+
+    [Fact]
+    public async Task AssetlessNewestForgeReleaseWithoutFdroidKeepsServableForgeApk()
+    {
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(
+            AssetlessNewestFeed("v2.0", "v1.0", "https://cdn.example/forge-v1.0.apk", zip.Length)));
+        var downloads = new StubHandler(request =>
+            request.RequestUri!.ToString().EndsWith(".apk")
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) }
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "5"));
+        var app = NewApp("assetless-nofd", "AssetlessNoFd", "https://github.com/example/aod");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.True(app.ForgeAssetsStale);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.GitHub, primary.Source);
+        Assert.Equal(5L, primary.VersionCode);
+        Assert.Equal("https://cdn.example/forge-v1.0.apk", primary.ApkUrl);
+    }
+
+    [Fact]
+    public async Task StaleForgeKeepsFdroidPrimaryOnRepass()
+    {
+        var (first, _, _) = FdroidHappyPath(githubResponse: () => JsonReleases(
+            AssetlessNewestFeed("v2.0", "v1.0", "https://cdn.example/forge-v1.0.apk", 100)));
+        var app = NewApp("assetless-repass", "AssetlessRepass", "https://github.com/example/aod");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(SourceKind.FDroid, Primary(app).Source);
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var (second, _, _) = FdroidHappyPath(githubResponse: () => JsonReleases(
+            AssetlessNewestFeed("v2.0", "v1.0", "https://cdn.example/forge-v1.0.apk", 100)));
+        // The index is unchanged, so the pass is a no-op; the stale forge
+        // feed must not flip the primary back.
+        Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
+
+        Assert.True(app.ForgeAssetsStale);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal(20L, primary.VersionCode);
+    }
+
+    [Fact]
+    public async Task ForgeShippingAssetsAgainRestoresForgePrimary()
+    {
+        var (first, _, _) = FdroidHappyPath(githubResponse: () => JsonReleases(
+            AssetlessNewestFeed("v2.0", "v1.0", "https://cdn.example/forge-v1.0.apk", 100)));
+        var app = NewApp("assetless-resume", "AssetlessResume", "https://github.com/example/aod");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(SourceKind.FDroid, Primary(app).Source);
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v2.0", "app-release.apk", "https://cdn.example/forge-v2.0.apk", zip.Length)));
+        var downloads = new StubHandler(request =>
+            request.RequestUri!.ToString() == "https://cdn.example/forge-v2.0.apk"
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) }
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "25"));
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(FdroidIndexV2Json),
+        });
+
+        var result = await BuildEnricher(github, downloads, aapt2, fdroid: fdroid).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.False(app.ForgeAssetsStale);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.GitHub, primary.Source);
+        Assert.Equal(25L, primary.VersionCode);
+        Assert.Equal("https://cdn.example/forge-v2.0.apk", primary.ApkUrl);
+    }
+
+    [Fact]
+    public async Task ServedBuildSwitchQueuesUsageReAnalysis()
+    {
+        var queue = new FakeUsageQueue();
+        var app = NewApp("assetless-queue", "AssetlessQueue", "https://github.com/example/aod");
+        AddDownload(app, SourceKind.GitHub, "https://cdn.example/forge-v1.0.apk",
+            versionCode: 5, sha256: "aa11", size: 100, sourceRef: "example/aod", primary: true,
+            packageName: "com.example.app");
+        app.PackageName = "com.example.app";
+        app.UsageAnalyzedAt = T0;
+        await _db.SaveChangesAsync();
+
+        var iconBytes = TestAssets.SolidPng(256, 256, Color.Purple);
+        var downloads = new StubHandler(request =>
+            request.RequestUri!.ToString().EndsWith(".png")
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(iconBytes) }
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+        var github = new StubHandler(_ => JsonReleases(
+            AssetlessNewestFeed("v2.0", "v1.0", "https://cdn.example/forge-v1.0.apk", 100)));
+        var fdroid = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(FdroidIndexV2Json),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
+        var enricher = BuildEnricher(github, downloads, aapt2, fdroid: fdroid, usageQueue: queue);
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(SourceKind.FDroid, Primary(app).Source);
+        var call = Assert.Single(queue.Calls);
+        Assert.True(call.ArtifactChanged);
+        Assert.False(call.FirstAnalysis);
     }
 
     [Fact]

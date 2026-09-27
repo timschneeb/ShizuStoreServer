@@ -34,7 +34,10 @@ public sealed record SourceAsset(
 /// <c>WebUrl</c> is the browser page of that release (or null when the source
 /// is an index without release pages). <c>IsPrerelease</c> tells whether the
 /// source marked this release as a pre-release; sources without the concept
-/// always report false.
+/// always report false. <c>IsOlderFallback</c> is true when the picked
+/// release is older than the newest non-draft release of its channel because
+/// that newer release ships no installable artifact (for example after
+/// binaries moved to F-Droid).
 /// </summary>
 public sealed record SourceRelease(
     string TagName,
@@ -44,7 +47,8 @@ public sealed record SourceRelease(
     long TotalDownloads = 0,
     string? Changelog = null,
     string? WebUrl = null,
-    bool IsPrerelease = false);
+    bool IsPrerelease = false,
+    bool IsOlderFallback = false);
 
 /// <summary>
 /// Source-scoped app identity. <c>Key</c> is the source's own locator:

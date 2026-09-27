@@ -210,6 +210,14 @@ public sealed class App
     /// </summary>
     public string? EnrichEtag { get; set; }
 
+    /// <summary>
+    /// True when the forge's newest release in the served channel ships no
+    /// installable artifact, so an alternative source with a newer build is
+    /// preferred instead of the older forge APK. Cleared when the forge ships
+    /// assets again.
+    /// </summary>
+    public bool ForgeAssetsStale { get; set; }
+
     public List<AppVersion> Versions { get; } = [];
 
     /// <summary>Installable build candidates: one row per signing identity.</summary>

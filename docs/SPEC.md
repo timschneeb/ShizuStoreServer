@@ -177,7 +177,9 @@ bundle` is rebuilt per deploy, never committed.
     on the detail endpoint), `screenshots_checked_at` (last repo lookup,
     throttles re-verification to
     `Enrichment:RepoScreenshotsRecheckInterval`), `enrich_etag` (conditional-request ETag
-    reuse), `stars` (GitHub stargazers or GitLab star count), `download_total` (popularity, §8), `install_count`
+    reuse), `forge_assets_stale` (set while the newest release of the forge's
+    served channel ships no installable artifact, so a newer F-Droid/Izzy
+    build can lead; cleared when assets ship again), `stars` (GitHub stargazers or GitLab star count), `download_total` (popularity, §8), `install_count`
     (successful installs reported by clients via
     `POST /v1/apps/{slug}/installs`; monotonic, never bumps `updated_at`), `version_updated_at`
     (release date of the currently served APK version; null when the
@@ -511,7 +513,9 @@ key than the developer unless the build is reproducible).
 IzzyOnDroid (`apt.izzysoft.de`) hosts the **developers' own upstream
 builds** (normally crawled from GitHub/GitLab), so Izzy builds are
 signature-compatible with forge releases; `is_primary` preference
-therefore treats Izzy as forge-like.
+therefore treats Izzy as forge-like. A stale forge (its newest release
+ships no installable artifact) loses that precedence, so a newer
+F-Droid/Izzy build can take the primary slot.
 
 - **GitHub** (`GitHubReleaseClient`, raw HttpClient + PAT from
   config or `SHIZU_GITHUB_TOKEN`): newest stable release of the first
@@ -523,6 +527,12 @@ therefore treats Izzy as forge-like.
   Repos in `PrereleasePreferredRepos` (currently Jman-Github /
   Universal-ReVanced-Manager, whose stable builds are rare) flip the
   first two tiers and prefer the newest servable prerelease.
+  When the newest release of the served channel ships no installable
+  artifact (an assetless successor), the repo is treated as no longer
+  distributing binaries: `forge_assets_stale` is set and an F-Droid/Izzy
+  build newer than the served forge build takes the primary slot through
+  the alternative-source path below; forge rows stay as candidates and
+  the flag clears as soon as a release ships assets again.
   `EnrichEtag` drives `If-None-Match`,
   304 → `UpToDate` (only `last_checked_at` touched).
   `ApkAssetSelector` prefers a `release`-named `.apk`, else the

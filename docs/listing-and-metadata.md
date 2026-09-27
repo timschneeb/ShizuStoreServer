@@ -47,6 +47,10 @@ The app store can handle app variants with different signatures automatically (e
   keep a download link. Automatic pre-releases from CI never outrank a
   stable release. Universal ReVanced Manager is the one exception: its stable
   builds are so rare that the newest pre-release is preferred.
+- If the newest GitHub release ships no binary at all (for example the project
+  moved APK distribution to F-Droid), the newer F-Droid build becomes the
+  served build instead of the old GitHub APK. The switch reverses as soon as a
+  release ships assets again.
 - GitLab: newest non-upcoming release.
 - F-Droid and Izzy: the newest package in the index, matched by package name or
   source URL.

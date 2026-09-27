@@ -189,6 +189,15 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
             throw new GitHubApiException(HttpStatusCode.NotFound, $"No release found for {owner}/{repo}.");
         }
 
+        // The picked release can be older than the newest release of its own
+        // channel when the newer ones ship no installable artifact (for
+        // example after binaries moved to F-Droid); callers prefer an
+        // alternative source instead of serving that stale build.
+        var newestInChannel = candidates.FirstOrDefault(c => c.Release.Prerelease == picked.Release.Prerelease);
+        var isOlderFallback = newestInChannel.Release is not null
+            && !ReferenceEquals(newestInChannel.Release, picked.Release)
+            && !Servable(newestInChannel.Assets);
+
         var responseEtag = response.Headers.ETag?.ToString();
         var totalDownloads = releases
             .Where(r => !r.Draft)
@@ -201,7 +210,8 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
             totalDownloads,
             picked.Release.Body,
             picked.Release.HtmlUrl,
-            picked.Release.Prerelease);
+            picked.Release.Prerelease,
+            isOlderFallback);
     }
 
     public async Task<IReadOnlyList<SourceRelease>> GetAllReleasesAsync(

@@ -194,6 +194,7 @@ public sealed class SourcesTests
         // Automatic prereleases must not outrank the newest stable release.
         Assert.Equal("v1.0", release.TagName);
         Assert.False(release.IsPrerelease);
+        Assert.False(release.IsOlderFallback);
         var asset = Assert.Single(release.Assets);
         Assert.Equal("app-release.apk", asset.Name);
         Assert.Equal("https://github.com/o/r/releases/download/v1.0/app.apk", asset.Url);
@@ -216,6 +217,7 @@ public sealed class SourcesTests
         // actually ships an APK wins over both it and the newer prerelease.
         Assert.Equal("v1.0", release.TagName);
         Assert.False(release.IsPrerelease);
+        Assert.True(release.IsOlderFallback);
         Assert.Single(release.Assets);
     }
 
@@ -233,6 +235,7 @@ public sealed class SourcesTests
         // Repos that only ship binaries on prereleases keep their download.
         Assert.Equal("v2.0-beta", release.TagName);
         Assert.True(release.IsPrerelease);
+        Assert.False(release.IsOlderFallback);
         Assert.Single(release.Assets);
     }
 
