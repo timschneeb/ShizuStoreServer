@@ -520,6 +520,9 @@ therefore treats Izzy as forge-like.
   stable (else the newest non-draft) so the changelog still resolves.
   Automatic CI prereleases therefore never outrank a stable release,
   while repos that only tag prereleases keep a download link.
+  Repos in `PrereleasePreferredRepos` (currently Jman-Github /
+  Universal-ReVanced-Manager, whose stable builds are rare) flip the
+  first two tiers and prefer the newest servable prerelease.
   `EnrichEtag` drives `If-None-Match`,
   304 → `UpToDate` (only `last_checked_at` touched).
   `ApkAssetSelector` prefers a `release`-named `.apk`, else the

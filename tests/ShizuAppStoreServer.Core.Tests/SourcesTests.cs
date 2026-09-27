@@ -237,6 +237,38 @@ public sealed class SourcesTests
     }
 
     [Fact]
+    public async Task PreferPrereleaseRepoPicksNewestServablePrereleaseOverStable()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonArray(
+                Release("v2.0-beta", prerelease: true, ApkAsset("v2.0-beta")),
+                Release("v1.0", prerelease: false, ApkAsset("v1.0"))).ToJsonString()),
+        });
+        var release = (await Client(stub).GetLatestReleaseAsync(
+            "Jman-Github", "Universal-ReVanced-Manager", null))!;
+
+        // Stable builds are rare for this repo, so the newest prerelease wins.
+        Assert.Equal("v2.0-beta", release.TagName);
+        Assert.True(release.IsPrerelease);
+    }
+
+    [Fact]
+    public async Task PreferPrereleaseRepoFallsBackToStableWithoutPrereleases()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                new JsonArray(Release("v1.0", prerelease: false, ApkAsset("v1.0"))).ToJsonString()),
+        });
+        var release = (await Client(stub).GetLatestReleaseAsync(
+            "Jman-Github", "Universal-ReVanced-Manager", null))!;
+
+        Assert.Equal("v1.0", release.TagName);
+        Assert.False(release.IsPrerelease);
+    }
+
+    [Fact]
     public async Task MapsSha256DigestAndIgnoresOtherAlgorithms()
     {
         var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)

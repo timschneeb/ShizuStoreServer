@@ -88,6 +88,15 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         PropertyNameCaseInsensitive = false,
     };
 
+    // Stable releases are so rare for these repos that users are better served
+    // by the newest prerelease: a prerelease-only repo would otherwise sit on a
+    // months-old build between tagged releases.
+    private static readonly HashSet<string> PrereleasePreferredRepos =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Jman-Github/Universal-ReVanced-Manager",
+        };
+
     private readonly HttpClient _http;
 
     public GitHubReleaseClient(HttpClient http, string? token = null)
@@ -142,7 +151,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         // pipeline) on a release-per-commit treadmill. A repo without a
         // servable stable on the first page falls back to its newest servable
         // prerelease, and a release without assets is only used as a last
-        // resort so the existing index/Play fallbacks still run.
+        // resort so the existing index/Play fallbacks still run. Repos in
+        // PrereleasePreferredRepos flip the first two tiers.
+        var preferPrerelease = PrereleasePreferredRepos.Contains($"{owner}/{repo}");
         var candidates = releases
             .Where(r => !r.Draft)
             .Select(r => (Release: r, Assets: r.Assets
@@ -153,7 +164,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
             .ToList();
         static bool Servable(IReadOnlyList<SourceAsset> assets) =>
             ApkAssetSelector.PickApk(assets) is not null || ApkAssetSelector.PickZip(assets) is not null;
-        var picked = candidates.FirstOrDefault(c => !c.Release.Prerelease && Servable(c.Assets));
+        var picked = preferPrerelease
+            ? candidates.FirstOrDefault(c => c.Release.Prerelease && Servable(c.Assets))
+            : candidates.FirstOrDefault(c => !c.Release.Prerelease && Servable(c.Assets));
         if (picked.Release is null)
         {
             picked = candidates.FirstOrDefault(c => Servable(c.Assets));
@@ -161,7 +174,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
 
         if (picked.Release is null)
         {
-            picked = candidates.FirstOrDefault(c => !c.Release.Prerelease);
+            picked = preferPrerelease
+                ? candidates.FirstOrDefault(c => c.Release.Prerelease)
+                : candidates.FirstOrDefault(c => !c.Release.Prerelease);
         }
 
         if (picked.Release is null)
