@@ -103,6 +103,12 @@ public sealed class AppEnricher(
     private const string HlbmergeGitCodeOwner = "bigmolihuan";
     private const string HlbmergeGitCodeRepo = "hlbmerge_flutter";
 
+    // LinkSheet stopped publishing releases from its source repo; the nightly
+    // repo carries them. The source repo stays the analysis target.
+    private const string LinkSheetListOwner = "LinkSheet";
+    private const string LinkSheetListRepo = "LinkSheet";
+    private const string LinkSheetNightlyRepo = "nightly";
+
     // One repo, several distinct apps, each in its own GitHub release; the
     // newest release only carries one of them, so scan them all.
     private const string SmartspacerOwner = "KieronQuinn";
@@ -534,6 +540,13 @@ public sealed class AppEnricher(
             {
                 owner = InstafelUpdaterOwner;
                 repo = InstafelUpdaterRepo;
+            }
+
+            // LinkSheet publishes from a nightly release repo; the source repo
+            // is still the analysis target for usage and screenshots.
+            if (owner == LinkSheetListOwner && repo == LinkSheetListRepo)
+            {
+                repo = LinkSheetNightlyRepo;
             }
 
             EnrichResult result;

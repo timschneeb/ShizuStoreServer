@@ -3401,6 +3401,45 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task EnrichesLinksheetFromTheNightlyRepo()
+    {
+        const string assetUrl =
+            "https://github.com/LinkSheet/nightly/releases/download/nightly-2026091203/LinkSheet-2026-09-12T08_25_09-nightly-2026091203-foss-nightly.apk";
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var requested = new List<string>();
+        var github = new StubHandler(request =>
+        {
+            var uri = request.RequestUri!.ToString();
+            requested.Add(uri);
+
+            // The list links LinkSheet/LinkSheet; releases live in the nightly repo.
+            return uri.Contains("/releases", StringComparison.Ordinal)
+                ? JsonReleases(ReleaseJson("nightly-2026091203", "nightly.apk", assetUrl, zip.Length))
+                : new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+        var downloads = new StubHandler(request =>
+        {
+            Assert.Equal(assetUrl, request.RequestUri!.ToString());
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) };
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "141"));
+        var app = NewApp("linksheet", "LinkSheet", "https://github.com/LinkSheet/LinkSheet");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Contains(requested,
+            u => u == "https://api.github.com/repos/LinkSheet/nightly/releases?per_page=100");
+        Assert.DoesNotContain(requested, u => u.Contains("/repos/LinkSheet/LinkSheet", StringComparison.Ordinal));
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.GitHub, primary.Source);
+        Assert.Equal(assetUrl, primary.ApkUrl);
+        Assert.Equal("nightly-2026091203", primary.ReleaseTag);
+    }
+
+    [Fact]
     public async Task EnrichesHlbmergeFromGitCode()
     {
         var zip = TestAssets.BuildApk(

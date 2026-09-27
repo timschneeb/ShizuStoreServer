@@ -87,6 +87,39 @@ public sealed class RepoSnapshotProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task ClonesTheDefaultBranchWhenTheArtifactComesFromAnotherRepo()
+    {
+        // The nightly release repo versions independently; its version name
+        // must not pin a tag in the analysis repo.
+        var git = new FakeGit(["refs/tags/v1.0.3"]);
+        var provider = NewProvider(git);
+
+        using var snapshot = await provider.CreateAsync(
+            NewApp(), "1.0.3", releaseTag: null,
+            artifactUrl: "https://github.com/other/nightly/releases/download/nightly-1/app.apk");
+
+        Assert.NotNull(snapshot);
+        Assert.Null(snapshot!.Ref);
+        Assert.DoesNotContain("--branch", git.LastCloneArgs);
+    }
+
+    [Fact]
+    public async Task PinsTheRecordedTagWhenTheArtifactComesFromAnotherRepo()
+    {
+        // The external repo's recorded tag still wins when the analysis repo
+        // carries it; only the version-name guess is skipped.
+        var git = new FakeGit(["refs/tags/nightly-1"]);
+        var provider = NewProvider(git);
+
+        using var snapshot = await provider.CreateAsync(
+            NewApp(), "1.0.3", releaseTag: "nightly-1",
+            artifactUrl: "https://github.com/other/nightly/releases/download/nightly-1/app.apk");
+
+        Assert.NotNull(snapshot);
+        Assert.Equal("nightly-1", snapshot!.Ref);
+    }
+
+    [Fact]
     public async Task ClonesTheDefaultBranchWhenNoTagMatches()
     {
         var git = new FakeGit(["refs/tags/other"]);

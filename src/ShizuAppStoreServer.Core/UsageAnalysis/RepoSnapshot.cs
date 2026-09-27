@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.UsageAnalysis;
 
@@ -109,7 +110,11 @@ public sealed class GitRepoSnapshotProvider(
         }
 
         var pinned = string.IsNullOrWhiteSpace(releaseTag) ? ReleaseTagParser.FromArtifactUrl(artifactUrl) : releaseTag.Trim();
-        var (tag, tags) = await ResolveTagAsync(repo, versionName, pinned, ct);
+        // An artifact from another repo (nightly release repo, release-only
+        // mirror) carries tags that version independently: pin the recorded
+        // tag when the analysis repo knows it, never guess from the version.
+        var versionCandidate = ArtifactComesFromAnotherRepo(repo, artifactUrl) ? null : versionName;
+        var (tag, tags) = await ResolveTagAsync(repo, versionCandidate, pinned, ct);
         var root = string.IsNullOrWhiteSpace(options.SnapshotRoot)
             ? Path.GetTempPath()
             : options.SnapshotRoot!;
@@ -160,6 +165,23 @@ public sealed class GitRepoSnapshotProvider(
             Cleanup(dir);
             return null;
         }
+    }
+
+    /// <summary>
+    /// True when the artifact URL points at a GitHub repo other than the
+    /// analysis repo. A separate release repo versions independently, so its
+    /// version name must not select a tag in the source repo.
+    /// </summary>
+    private static bool ArtifactComesFromAnotherRepo(RepoRef repo, string? artifactUrl)
+    {
+        if (!SourceClassifier.TryParseGitHubRepo(artifactUrl, out var owner, out var name))
+        {
+            return false;
+        }
+
+        return repo.Forge != RepoForge.GitHub
+            || !string.Equals(owner, repo.Owner, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(name, repo.ProjectPath, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

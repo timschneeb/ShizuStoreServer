@@ -965,10 +965,14 @@ marker scanning survives only as internal context extraction.
   artifact URL (`/releases/download/<tag>/`, GitLab
   `/-/releases/<tag>/downloads/` and `/-/archive/<tag>/`), then a tag
   matching the badged version (`v<version>`, `<version>`,
-  `release-<version>`, `V<version>`), else the default branch HEAD. The
-  commit is stored with the report. Version names can lag behind the
-  release (projects that never bump `versionName`), so the release tag
-  wins over the version when both exist.
+  `release-<version>`, `V<version>`), else the default branch HEAD. When
+  the artifact comes from a GitHub repo other than the analysis repo (a
+  nightly release repo or release-only mirror), the version-name step is
+  skipped: the two repos version independently, so only the recorded or
+  URL-parsed tag can pin, else HEAD. The commit is stored with the report.
+  Version names can lag behind the release (projects that never bump
+  `versionName`), so the release tag wins over the version when both
+  exist.
 - Pipeline: shallow `git clone --depth 1` into a temp directory, a
   deterministic pre-scan that builds a privilege surface map (imports of the
   Shizuku packages, declared artifacts, entry points, user services,
@@ -1221,9 +1225,10 @@ and its variants' download URLs, since no single primary represents
 them; F-Droid/Izzy compare the index version code
 and APK URL against the matching download row. Play, link-only,
 Codeberg and the GitCode special case have no cheap signal and
-stay on the due window; instafel's list entry is polled through
-its real release repo (instafel/u-rel), while SmartspacerPlugins is
-skipped (its apps span separate releases, §5.2). Skipped apps (excluded) and
+  stay on the due window; instafel's list entry is polled through
+  its real release repo (instafel/u-rel), LinkSheet through its nightly
+  release repo (LinkSheet/nightly), while SmartspacerPlugins is
+  skipped (its apps span separate releases, §5.2). Skipped apps (excluded) and
 rows without a matching download count as changed, so they enrich
 on the next pass. Poll failures are soft (unchanged): a flapping
 upstream never marks rows failed, and a throwing poller degrades

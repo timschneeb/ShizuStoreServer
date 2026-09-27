@@ -128,7 +128,10 @@ the release tag the served artifact came from: the tag recorded from the forge
 release metadata, else the tag in the artifact URL, and only then a tag
 matching the badged version (falling back to the default branch). That order
 matters because a project can publish a new release without bumping its
-`versionName`; the badged version alone would check out an older tree. The
+`versionName`; the badged version alone would check out an older tree. When
+the release lives in a separate repo (for example an app that publishes only
+nightlies from a `-nightly` repo), the version-name match is skipped: the
+recorded tag is used when the source repo carries it, else the default branch. The
 server pre-scans the checkout into a privilege surface map (Shizuku imports,
 entry points, user services, AIDL members and command helpers with file and
 line, plus bridge call sites and dependency declarations for Flutter/Dart,
