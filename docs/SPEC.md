@@ -307,8 +307,13 @@ bundle` is rebuilt per deploy, never committed.
   until parked. Every attempt is kept so token usage and cost stay
   auditable; failed rows carry no user-visible output.
 - **app_versions** - (`app_id`, `version_code`, `version_name`,
-  `apk_url`, `detected_at`); a row is appended only when the
-  `version_code` is unseen for the app (append-only history). The
+  `apk_url`, `is_prerelease`, `detected_at`); a row is appended only
+  when the `version_code` is unseen for the app (append-only history).
+  `is_prerelease` marks rows recorded from a prerelease selection.
+  When stable preference downgrades an app to an older served code
+  (same source), every history row above that code is flagged as
+  prerelease so the version-anomaly quality rule does not report the
+  intentional downgrade. The
   enricher must consult pending tracked rows, not only the database:
   a multi-ABI release applies one version code once per ABI within a
   single pass, and a duplicate insert would violate
@@ -501,9 +506,13 @@ signature-compatible with forge releases; `is_primary` preference
 therefore treats Izzy as forge-like.
 
 - **GitHub** (`GitHubReleaseClient`, raw HttpClient + PAT from
-  config or `SHIZU_GITHUB_TOKEN`): newest non-draft of the first
-  100 releases (prereleases count: many Shizuku apps ship only
-  prereleases); `EnrichEtag` drives `If-None-Match`,
+  config or `SHIZU_GITHUB_TOKEN`): newest stable release of the first
+  100 that ships a usable `.apk`/`.zip`; if no stable release ships
+  binaries, the newest such prerelease; if no release does, the newest
+  stable (else the newest non-draft) so the changelog still resolves.
+  Automatic CI prereleases therefore never outrank a stable release,
+  while repos that only tag prereleases keep a download link.
+  `EnrichEtag` drives `If-None-Match`,
   304 → `UpToDate` (only `last_checked_at` touched).
   `ApkAssetSelector` prefers a `release`-named `.apk`, else the
   largest `.apk`. If the release ships no `.apk`, a `.zip` asset is
@@ -1162,7 +1171,8 @@ non-excluded row currently carrying `last_error`, quality rows from
 entry or source URL, direct-APK rows without package name or primary
 download, never-checked or twice-window-stale rows, duplicate
 canonical packages across live listings, primary downloads older
-than the newest recorded version; excluded rows are
+than the newest recorded stable version, with prerelease history
+rows ignored; excluded rows are
 never checked, and a variant shares its root's check freshness because
 the root's completed pass stamps the whole variant group). Due-only
 passes (HEAD unchanged) keep the previous

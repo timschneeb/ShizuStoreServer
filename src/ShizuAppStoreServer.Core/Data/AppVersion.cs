@@ -12,5 +12,12 @@ public sealed class AppVersion
     public string? VersionName { get; set; }
     public string? ApkUrl { get; set; }
 
+    /// <summary>
+    /// True when this row is a pre-release build, either published as one or
+    /// superseded by an intentional stable downgrade. Version anomaly checks
+    /// ignore pre-release rows.
+    /// </summary>
+    public bool IsPrerelease { get; set; }
+
     public DateTimeOffset DetectedAt { get; set; }
 }

@@ -337,6 +337,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.VersionCode).HasColumnName("version_code");
             e.Property(x => x.VersionName).HasColumnName("version_name").HasMaxLength(64);
             e.Property(x => x.ApkUrl).HasColumnName("apk_url").HasMaxLength(2000);
+            e.Property(x => x.IsPrerelease).HasColumnName("is_prerelease").HasDefaultValue(false);
             e.Property(x => x.DetectedAt).HasColumnName("detected_at").IsRequired();
             e.HasIndex(x => new { x.AppId, x.VersionCode }).IsUnique();
         });

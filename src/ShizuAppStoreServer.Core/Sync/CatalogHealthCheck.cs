@@ -86,7 +86,11 @@ public static class CatalogHealthCheck
             var primary = app.Downloads.FirstOrDefault(d => d.IsPrimary);
             if (primary?.VersionCode is long primaryCode)
             {
-                var newest = app.Versions.Count == 0 ? null : app.Versions.Max(v => v.VersionCode);
+                // Pre-release rows are channel history, not a skipped stable
+                // release; only stable history can outrank the served build.
+                var newest = app.Versions
+                    .Where(v => !v.IsPrerelease)
+                    .Max(v => v.VersionCode);
                 if (newest > primaryCode)
                 {
                     issues.Add(new QualityIssue(VersionAnomaly, app.Id, app.Slug,

@@ -32,7 +32,9 @@ public sealed record SourceAsset(
 /// build plus any sibling builds (for example one APK per ABI).
 /// <c>Changelog</c> is the release markdown body when the source publishes one;
 /// <c>WebUrl</c> is the browser page of that release (or null when the source
-/// is an index without release pages).
+/// is an index without release pages). <c>IsPrerelease</c> tells whether the
+/// source marked this release as a pre-release; sources without the concept
+/// always report false.
 /// </summary>
 public sealed record SourceRelease(
     string TagName,
@@ -41,7 +43,8 @@ public sealed record SourceRelease(
     IReadOnlyList<SourceAsset> Assets,
     long TotalDownloads = 0,
     string? Changelog = null,
-    string? WebUrl = null);
+    string? WebUrl = null,
+    bool IsPrerelease = false);
 
 /// <summary>
 /// Source-scoped app identity. <c>Key</c> is the source's own locator:

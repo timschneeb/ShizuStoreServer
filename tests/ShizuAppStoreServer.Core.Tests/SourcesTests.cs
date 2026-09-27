@@ -165,8 +165,25 @@ public sealed class SourcesTests
     private static GitHubReleaseClient Client(StubHandler stub, string? token = "test-token") =>
         new(new HttpClient(stub), token);
 
+    private static JsonObject Release(string tag, bool prerelease, params JsonObject[] assets) => new()
+    {
+        ["tag_name"] = tag,
+        ["draft"] = false,
+        ["prerelease"] = prerelease,
+        ["published_at"] = "2024-05-01T00:00:00Z",
+        ["assets"] = new JsonArray(assets),
+    };
+
+    private static JsonObject ApkAsset(string tag) => new()
+    {
+        ["name"] = "app-release.apk",
+        ["browser_download_url"] = $"https://github.com/o/r/releases/download/{tag}/app.apk",
+        ["size"] = 12345678,
+        ["content_type"] = "application/vnd.android.package-archive",
+    };
+
     [Fact]
-    public async Task PicksNewestNonDraftRelease()
+    public async Task PicksNewestServableStableOverNewerPrerelease()
     {
         var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -174,13 +191,49 @@ public sealed class SourcesTests
         });
         var release = (await Client(stub).GetLatestReleaseAsync("o", "r", null))!;
 
-        // Prereleases count: many Shizuku apps ship only prereleases.
-        Assert.Equal("v2.0-beta", release.TagName);
-        Assert.Equal("## 2.0-beta\n- Added thing", release.Changelog);
-        Assert.Equal("https://github.com/o/r/releases/tag/v2.0-beta", release.WebUrl);
+        // Automatic prereleases must not outrank the newest stable release.
+        Assert.Equal("v1.0", release.TagName);
+        Assert.False(release.IsPrerelease);
         var asset = Assert.Single(release.Assets);
         Assert.Equal("app-release.apk", asset.Name);
+        Assert.Equal("https://github.com/o/r/releases/download/v1.0/app.apk", asset.Url);
         Assert.Equal(12345678, asset.Size);
+    }
+
+    [Fact]
+    public async Task PicksServableStableEvenWhenNewerStableHasNoApk()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonArray(
+                Release("v3.0-beta", prerelease: true, ApkAsset("v3.0-beta")),
+                Release("v2.0", prerelease: false),
+                Release("v1.0", prerelease: false, ApkAsset("v1.0"))).ToJsonString()),
+        });
+        var release = (await Client(stub).GetLatestReleaseAsync("o", "r", null))!;
+
+        // An assetless stable is not servable, so the newest stable that
+        // actually ships an APK wins over both it and the newer prerelease.
+        Assert.Equal("v1.0", release.TagName);
+        Assert.False(release.IsPrerelease);
+        Assert.Single(release.Assets);
+    }
+
+    [Fact]
+    public async Task PicksServablePrereleaseWhenNoStableShipsAnApk()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonArray(
+                Release("v2.0-beta", prerelease: true, ApkAsset("v2.0-beta")),
+                Release("v1.0", prerelease: false)).ToJsonString()),
+        });
+        var release = (await Client(stub).GetLatestReleaseAsync("o", "r", null))!;
+
+        // Repos that only ship binaries on prereleases keep their download.
+        Assert.Equal("v2.0-beta", release.TagName);
+        Assert.True(release.IsPrerelease);
+        Assert.Single(release.Assets);
     }
 
     [Fact]
@@ -470,6 +523,7 @@ public sealed class SourcesTests
         var release = (await Client(stub).GetLatestReleaseAsync("o", "r", null))!;
 
         Assert.Equal("v9-beta", release.TagName);
+        Assert.True(release.IsPrerelease);
     }
 
     [Fact]

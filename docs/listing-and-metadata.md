@@ -38,8 +38,11 @@ The app store can handle app variants with different signatures automatically (e
 
 ### Which release is used
 
-- GitHub: the newest non-draft release of the first 100. Pre-releases count,
-  which matters for projects that only ship pre-releases.
+- GitHub: the newest stable release of the first 100 that ships a
+  downloadable `.apk`/`.zip`. If no stable release ships binaries, the newest
+  such pre-release is used instead, so projects that only tag pre-releases
+  keep a download link. Automatic pre-releases from CI never outrank a
+  stable release.
 - GitLab: newest non-upcoming release.
 - F-Droid and Izzy: the newest package in the index, matched by package name or
   source URL.

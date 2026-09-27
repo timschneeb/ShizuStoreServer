@@ -152,7 +152,8 @@ public sealed class AppEnricherTests : IDisposable
 
     private static string ReleaseJson(
         string tag, string assetName, string assetUrl, long size,
-        string? digest = null, string publishedAt = "2024-06-01T00:00:00Z", string? body = null)
+        string? digest = null, string publishedAt = "2024-06-01T00:00:00Z", string? body = null,
+        bool prerelease = false)
     {
         var asset = new JsonObject
         {
@@ -170,7 +171,7 @@ public sealed class AppEnricherTests : IDisposable
         {
             ["tag_name"] = tag,
             ["draft"] = false,
-            ["prerelease"] = false,
+            ["prerelease"] = prerelease,
             ["published_at"] = publishedAt,
             ["html_url"] = $"https://github.com/o/r/releases/tag/{tag}",
             ["assets"] = new JsonArray(asset),
@@ -1275,6 +1276,50 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Enriched, (await Wiring("v1.1-pr1", "1.2.4", Color.Red).EnrichAsync(app, T0)).Outcome);
         await _db.SaveChangesAsync();
         Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task StableDowngradeFlagsSupersededPrereleaseHistory()
+    {
+        // Prerelease-only repos used to serve their prerelease; when a stable
+        // release appears selection moves back to it. History rows above the
+        // newly served code are flagged so version_anomaly stays quiet.
+        AppEnricher Wiring(string tag, bool prerelease, string versionCode, Color iconColor)
+        {
+            var zip = TestAssets.BuildApk(
+                (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, iconColor)));
+            var github = new StubHandler(_ => JsonReleases(
+                ReleaseJson(tag, "app-release.apk", $"https://cdn.example/{tag}/app.apk", zip.Length,
+                    prerelease: prerelease),
+                "\"rel-etag\""));
+            var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(zip),
+            });
+            var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: versionCode));
+            return BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        }
+
+        var app = NewApp("retrograded", "Retrograded", "https://github.com/example/retrograded");
+        Assert.Equal(EnrichOutcome.Enriched,
+            (await Wiring("v2.0-beta", true, "50", Color.Blue).EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(50, Primary(app).VersionCode);
+        Assert.True((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 50)).IsPrerelease);
+
+        // Rows written before the flag existed start out unflagged.
+        var history = await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 50);
+        history.IsPrerelease = false;
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        Assert.Equal(EnrichOutcome.Enriched,
+            (await Wiring("v1.0", false, "40", Color.Red).EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        Assert.Equal(40, Primary(app).VersionCode);
+        Assert.True((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 50)).IsPrerelease);
+        Assert.False((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 40)).IsPrerelease);
     }
 
     [Fact]

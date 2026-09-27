@@ -795,7 +795,7 @@ public sealed class AppEnricher(
         var assets = releases.SelectMany(r => r.Assets).ToList();
         if (await EnrichFromAssetsAsync(
                 app, SourceKind.GitHub, assets, null, releaseReleasedAt: null, releaseTag: null,
-                urlIdentifiesVersion: false, alwaysAnalyzePrimary: false, now, ct) is { } enriched)
+                urlIdentifiesVersion: false, alwaysAnalyzePrimary: false, isPrerelease: false, now, ct) is { } enriched)
         {
             return enriched;
         }
@@ -971,7 +971,7 @@ public sealed class AppEnricher(
         DateTimeOffset now, CancellationToken ct) =>
         await EnrichFromAssetsAsync(
             app, kind, release.Assets, release.Etag, release.ReleasedAt, release.TagName, urlIdentifiesVersion,
-            alwaysAnalyzePrimary: true, now, ct);
+            alwaysAnalyzePrimary: true, isPrerelease: release.IsPrerelease, now, ct);
 
     /// <summary>
     /// Shared forge/index asset pipeline. Artifacts whose checksum matches the
@@ -984,7 +984,7 @@ public sealed class AppEnricher(
     private async Task<EnrichResult?> EnrichFromAssetsAsync(
         App app, SourceKind kind, IReadOnlyList<SourceAsset> assets, string? etag,
         DateTimeOffset? releaseReleasedAt, string? releaseTag, bool urlIdentifiesVersion, bool alwaysAnalyzePrimary,
-        DateTimeOffset now, CancellationToken ct)
+        bool isPrerelease, DateTimeOffset now, CancellationToken ct)
     {
         var downloads = await LoadGroupDownloadsAsync(app, ct);
         var ownerById = new Dictionary<long, App> { [app.Id] = app };
@@ -1123,7 +1123,7 @@ public sealed class AppEnricher(
                 ? null
                 : await ApplyAnalysesAsync(
                     app, kind, [zipResult.Analysis with { ReleaseTag = releaseTag }], etag, null,
-                    permitRemoval: false, now, ct);
+                    false, now, ct, isPrerelease);
         }
 
         // Sources whose asset URLs embed the version (GitHub tags, GitLab,
@@ -1252,7 +1252,7 @@ public sealed class AppEnricher(
         // set still drives variant pruning and display names, so a release
         // that dropped a package prunes its row on the checksum-skip path too.
         var applied = await ApplyAnalysesAsync(
-            app, kind, analyses, etag, assets, permitRemoval: failed == 0, now, ct);
+            app, kind, analyses, etag, assets, failed == 0, now, ct, isPrerelease);
         app.LastCheckedAt = now;
         app.LastError = null;
         if (unchanged && applied.Outcome == EnrichOutcome.UpToDate)
@@ -1272,7 +1272,8 @@ public sealed class AppEnricher(
     /// </summary>
     private async Task<EnrichResult> ApplyAnalysisAsync(
         App target, ArtifactAnalysis analysis, bool asRepresentative, bool recomputePrimary, bool setEtag,
-        DateTimeOffset now, CancellationToken ct, bool recordDownload = true, string? preferredPackage = null)
+        DateTimeOffset now, CancellationToken ct, bool recordDownload = true, string? preferredPackage = null,
+        bool isPrerelease = false)
     {
         // A metadata heal re-analyzes a recorded primary to refill presentation
         // fields; recording it again could rewrite the row's version and flip
@@ -1351,7 +1352,9 @@ public sealed class AppEnricher(
 
         if (recordDownload)
         {
-            await AddVersionRowAsync(target, analysis.Badging.VersionCode, analysis.Badging.VersionName, analysis.ArtifactUrl, now, ct);
+            await AddVersionRowAsync(
+                target, analysis.Badging.VersionCode, analysis.Badging.VersionName, analysis.ArtifactUrl,
+                isPrerelease, now, ct);
         }
 
         // Only a real release date moves the app up "recently updated";
@@ -1382,7 +1385,8 @@ public sealed class AppEnricher(
     /// </summary>
     private async Task<EnrichResult> ApplyAnalysesAsync(
         App root, SourceKind kind, IReadOnlyList<ArtifactAnalysis> analyses, string? etag,
-        IReadOnlyList<SourceAsset>? scannedAssets, bool permitRemoval, DateTimeOffset now, CancellationToken ct)
+        IReadOnlyList<SourceAsset>? scannedAssets, bool permitRemoval, DateTimeOffset now, CancellationToken ct,
+        bool isPrerelease = false)
     {
         var result = new EnrichResult(EnrichOutcome.UpToDate, null);
         var presented = new List<App>();
@@ -1416,7 +1420,7 @@ public sealed class AppEnricher(
                     && string.Equals(analysis.Badging.PackageName, canonical, StringComparison.OrdinalIgnoreCase);
                 var applied = await ApplyAnalysisAsync(
                     target, analysis, asRepresentative: representative, recomputePrimary: true,
-                    setEtag: representative, now, ct, preferredPackage: canonical);
+                    setEtag: representative, now, ct, preferredPackage: canonical, isPrerelease: isPrerelease);
                 if (applied.Outcome == EnrichOutcome.Enriched)
                 {
                     result = applied;
@@ -2496,6 +2500,15 @@ public sealed class AppEnricher(
             }
         }
 
+        // A lower offered version means the app moved from a prerelease track
+        // to an older stable one. History rows above the newly served code came
+        // from that track, so flag them and keep the version anomaly check
+        // focused on skipped releases and failed analyses.
+        if (row.VersionCode is long incumbent && candidate.VersionCode is long incoming && incoming < incumbent)
+        {
+            await FlagSupersededPrereleaseVersionsAsync(app, incoming, ct);
+        }
+
         // A different version invalidates the twin memory of the old release.
         if (candidate.VersionCode is not null && row.VersionCode is not null
             && candidate.VersionCode != row.VersionCode)
@@ -2586,6 +2599,36 @@ public sealed class AppEnricher(
         if (usageQueue is not null && (apkChanged || (firstAnalysis && app.UsageAnalyzedAt is null)))
         {
             await usageQueue.EnqueueAsync(app, apkChanged, firstAnalysis, ct);
+        }
+    }
+
+    /// <summary>
+    /// Flags history rows above the newly served version as pre-releases. An
+    /// intentional downgrade only happens when a stable release replaces the
+    /// prerelease that was served before, so those rows are prerelease
+    /// history, not the skipped release the anomaly check looks for.
+    /// </summary>
+    private async Task FlagSupersededPrereleaseVersionsAsync(App app, long ceiling, CancellationToken ct)
+    {
+        foreach (var version in app.Versions)
+        {
+            if (version.VersionCode > ceiling)
+            {
+                version.IsPrerelease = true;
+            }
+        }
+
+        if (app.Id == 0)
+        {
+            return;
+        }
+
+        var superseded = await db.AppVersions
+            .Where(v => v.AppId == app.Id && v.VersionCode > ceiling && !v.IsPrerelease)
+            .ToListAsync(ct);
+        foreach (var version in superseded)
+        {
+            version.IsPrerelease = true;
         }
     }
 
@@ -3049,7 +3092,7 @@ public sealed class AppEnricher(
         await UpsertFdroidSiblingsAsync(app, kind, repoBase, packageId, packages, package, now, ct);
         await RecomputePrimaryAsync(app, ct, package.PackageName);
 
-        await AddVersionRowAsync(app, versionCode, versionName, apkUrl, now, ct);
+        await AddVersionRowAsync(app, versionCode, versionName, apkUrl, false, now, ct);
 
         // F-Droid publishes no release dates, so VersionUpdatedAt stays unknown
         // and the app sorts last under "recently updated".
@@ -3848,7 +3891,8 @@ public sealed class AppEnricher(
     }
 
     private async Task AddVersionRowAsync(
-        App app, long? versionCode, string? versionName, string apkUrl, DateTimeOffset now, CancellationToken ct)
+        App app, long? versionCode, string? versionName, string apkUrl, bool isPrerelease,
+        DateTimeOffset now, CancellationToken ct)
     {
         // Identity is (app, code), mirroring IX_app_versions_app_id_version_code:
         // upstreams re-tag the same build (vFlow's v1.5.3-pr1 reuses 1.5.2's
@@ -3872,6 +3916,7 @@ public sealed class AppEnricher(
             VersionCode = versionCode,
             VersionName = versionName,
             ApkUrl = apkUrl,
+            IsPrerelease = isPrerelease,
             DetectedAt = now,
         });
     }

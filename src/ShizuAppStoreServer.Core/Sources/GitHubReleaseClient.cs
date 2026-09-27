@@ -136,10 +136,40 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
             await response.Content.ReadAsStreamAsync(ct), Json, ct)
             ?? throw new GitHubApiException(response.StatusCode, $"GitHub API returned no JSON for {owner}/{repo}.");
 
-        // GitHub returns releases newest-first; drafts are unpublished, so the
-        // first non-draft entry is the newest usable release.
-        var release = releases.FirstOrDefault(r => !r.Draft);
-        if (release is null)
+        // GitHub returns releases newest-first. Prefer the newest stable
+        // release that actually ships an installable artifact: repos with
+        // automatic prereleases would otherwise keep users (and the AI
+        // pipeline) on a release-per-commit treadmill. A repo without a
+        // servable stable on the first page falls back to its newest servable
+        // prerelease, and a release without assets is only used as a last
+        // resort so the existing index/Play fallbacks still run.
+        var candidates = releases
+            .Where(r => !r.Draft)
+            .Select(r => (Release: r, Assets: r.Assets
+                .Select(a => new SourceAsset(
+                    a.Name, a.BrowserDownloadUrl, Size: a.Size,
+                    Sha256: NormalizeDigest(a.Digest), ReleasedAt: r.PublishedAt))
+                .ToList()))
+            .ToList();
+        static bool Servable(IReadOnlyList<SourceAsset> assets) =>
+            ApkAssetSelector.PickApk(assets) is not null || ApkAssetSelector.PickZip(assets) is not null;
+        var picked = candidates.FirstOrDefault(c => !c.Release.Prerelease && Servable(c.Assets));
+        if (picked.Release is null)
+        {
+            picked = candidates.FirstOrDefault(c => Servable(c.Assets));
+        }
+
+        if (picked.Release is null)
+        {
+            picked = candidates.FirstOrDefault(c => !c.Release.Prerelease);
+        }
+
+        if (picked.Release is null)
+        {
+            picked = candidates.FirstOrDefault();
+        }
+
+        if (picked.Release is null)
         {
             throw new GitHubApiException(HttpStatusCode.NotFound, $"No release found for {owner}/{repo}.");
         }
@@ -148,19 +178,15 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         var totalDownloads = releases
             .Where(r => !r.Draft)
             .Sum(r => r.Assets.Sum(a => a.DownloadCount));
-        var assets = release.Assets
-            .Select(a => new SourceAsset(
-                a.Name, a.BrowserDownloadUrl, Size: a.Size,
-                Sha256: NormalizeDigest(a.Digest), ReleasedAt: release.PublishedAt))
-            .ToList();
         return new SourceRelease(
-            release.TagName,
-            release.PublishedAt,
+            picked.Release.TagName,
+            picked.Release.PublishedAt,
             responseEtag,
-            ApkAssetSelector.MarkPrimary(assets),
+            ApkAssetSelector.MarkPrimary(picked.Assets),
             totalDownloads,
-            release.Body,
-            release.HtmlUrl);
+            picked.Release.Body,
+            picked.Release.HtmlUrl,
+            picked.Release.Prerelease);
     }
 
     public async Task<IReadOnlyList<SourceRelease>> GetAllReleasesAsync(
@@ -199,7 +225,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
                         a.Name, a.BrowserDownloadUrl, Size: a.Size,
                         Sha256: NormalizeDigest(a.Digest), ReleasedAt: release.PublishedAt))
                     .ToList();
-                result.Add(new SourceRelease(release.TagName, release.PublishedAt, null, assets, Changelog: release.Body, WebUrl: release.HtmlUrl));
+                result.Add(new SourceRelease(release.TagName, release.PublishedAt, null, assets, Changelog: release.Body, WebUrl: release.HtmlUrl, IsPrerelease: release.Prerelease));
             }
 
             if (releases.Count < pageSize)

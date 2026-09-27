@@ -235,6 +235,10 @@ public sealed class CatalogHealthCheckTests : IDisposable
             ResolvedAt = T0,
         });
         clean.Versions.Add(new AppVersion { VersionCode = 7, DetectedAt = T0 });
+
+        // A prerelease history row above the served stable is channel
+        // history, not a skipped stable release.
+        clean.Versions.Add(new AppVersion { VersionCode = 99, IsPrerelease = true, DetectedAt = T0 });
         _db.Apps.AddRange(regressed, clean);
         await _db.SaveChangesAsync();
 

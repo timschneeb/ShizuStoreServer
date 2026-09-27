@@ -205,6 +205,31 @@ public sealed class ReleasePollerTests : IDisposable
     }
 
     [Fact]
+    public async Task GitHubNewerPrereleaseDoesNotDirtyStableApp()
+    {
+        // The feed gained an automatic prerelease above the served stable.
+        // Stable preference keeps selecting the stable asset, so no re-enrich.
+        const string stableUrl = "https://github.com/acme/tuner/releases/download/v1.0/app.apk";
+        var app = SeedApp("tuner", "https://github.com/acme/tuner");
+        SeedDownload(app.Id, stableUrl, SourceKind.GitHub);
+        const string feed = """
+            [
+              {"tag_name":"v1.1-beta","draft":false,"prerelease":true,
+               "assets":[{"name":"app.apk","browser_download_url":"https://github.com/acme/tuner/releases/download/v1.1-beta/app.apk","size":10}]},
+              {"tag_name":"v1.0","draft":false,"prerelease":false,
+               "assets":[{"name":"app.apk","browser_download_url":"https://github.com/acme/tuner/releases/download/v1.0/app.apk","size":10}]}
+            ]
+            """;
+        var poller = Poller(github: new GitHubReleaseClient(
+            new HttpClient(new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(feed),
+            })), "test-token"));
+
+        Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
     public async Task GitHubNotModifiedSkipped()
     {
         var app = SeedApp("tuner", "https://github.com/acme/tuner");
