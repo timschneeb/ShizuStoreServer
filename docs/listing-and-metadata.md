@@ -58,7 +58,7 @@ The app store can handle app variants with different signatures automatically (e
 - Every other `.apk` asset of the release is analyzed as a candidate, so a
   release with one APK per architecture exposes every ABI.
 - If a release contains multiple `.apk` assets with different package names and different app names, the server will create separate app entries for them (see below).
-- APKs that do not declare the Shizuku permission in their manifest are excluded.
+- An app is excluded only when none of its recorded builds declare the Shizuku permission (APK badging or the F-Droid index manifest).
 - GitLab release descriptions can link APKs directly, instead of an attached release asset. Those links are collected as candidates too.
 
 #### Multi-app repos and flavor builds
@@ -94,7 +94,7 @@ factor is the app.
 - required features, used to detect TV and Wear builds
 - signing certificate, its DN, key algorithm and size, and the verified
   signature schemes (v1..v4)
-- the declared Dhizuku permission, if any
+- the declared Dhizuku and Shizuku permissions, if any
 - Exodus tracker code signatures matched in the DEX, with each tracker's
   category tags
 
@@ -115,8 +115,10 @@ an app without matches is not "tracker-free", only "not detected by code
 signature". Each detected tracker keeps its Exodus category tags (Analytics,
 Advertisement, ...), so clients can show which kind of tracking a tracker
 does. The Dhizuku flag means the build declares a
-`com.rosan.dhizuku.permission.*` permission; the Shizuku permission is not
-tracked because nearly every app declares it.
+`com.rosan.dhizuku.permission.*` permission. The Shizuku declaration is
+tracked per build because the availability gate keeps an app when any
+recorded build declares it: the served forge build can predate the app's
+Shizuku support while the F-Droid build already uses it.
 
 ### How the AI usage report is written
 

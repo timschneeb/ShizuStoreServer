@@ -267,6 +267,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             // this must fit several architectures, not just one.
             e.Property(x => x.Abi).HasColumnName("abi").HasMaxLength(128);
             e.Property(x => x.DhizukuDeclared).HasColumnName("dhizuku_declared");
+            e.Property(x => x.ShizukuDeclared).HasColumnName("shizuku_declared");
             // Signal lists share the Locales encoding: newline-joined.
             MapNewlineList(e, x => x.Trackers, "trackers");
             MapNewlineList(e, x => x.TrackerSignatures, "tracker_signatures");

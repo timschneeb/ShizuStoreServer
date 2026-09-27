@@ -81,10 +81,17 @@ public sealed class AppDownload
 
     /// <summary>
     /// True when the build declares a <c>com.rosan.dhizuku.permission.*</c>
-    /// permission. The Shizuku permission itself is not tracked: almost every
-    /// app in the catalog declares it, so it carries no signal.
+    /// permission.
     /// </summary>
     public bool DhizukuDeclared { get; set; }
+
+    /// <summary>
+    /// True when the build declares a permission whose name contains
+    /// <c>shizuku</c> (moe.shizuku, rikka.shizuku and forks). Recorded per
+    /// source so the availability gate can accept an app whose forge build
+    /// predates its Shizuku support while another recorded build declares it.
+    /// </summary>
+    public bool ShizukuDeclared { get; set; }
 
     /// <summary>Names of the Exodus trackers detected in the DEX code.</summary>
     public List<string> Trackers { get; set; } = [];

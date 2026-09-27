@@ -2111,7 +2111,7 @@ public sealed class AppEnricher(
     /// analysis gains a persisted field: rows older than this are re-analyzed
     /// once so the new field backfills (see <see cref="NeedsAnalysisHeal"/>).
     /// </summary>
-    public const int CurrentAnalysisVersion = 1;
+    public const int CurrentAnalysisVersion = 2;
 
     /// <summary>
     /// Pre-versioning rows recorded a fully analyzed build but predate one or
@@ -2305,7 +2305,8 @@ public sealed class AppEnricher(
         string? SignerKeyAlgorithm = null,
         int AnalysisVersion = 0,
         ApkInspection? Inspection = null,
-        string? ReleaseTag = null);
+        string? ReleaseTag = null,
+        bool ShizukuDeclared = false);
 
     /// <summary>
     /// Signing identity of a candidate: the first SHA-256 token, else the
@@ -2594,6 +2595,7 @@ public sealed class AppEnricher(
         {
             row.Inspected = true;
             row.DhizukuDeclared = candidate.Inspection.Signals.DhizukuDeclared;
+            row.ShizukuDeclared = row.ShizukuDeclared || candidate.Inspection.Signals.ShizukuDeclared;
             row.Trackers = candidate.Inspection.Trackers
                 .Select(t => t.Name).Distinct(StringComparer.Ordinal).ToList();
             row.TrackerSignatures = candidate.Inspection.Trackers
@@ -2602,6 +2604,11 @@ public sealed class AppEnricher(
                 .SelectMany(t => t.Tags.Select(tag => $"{t.Name}:{tag}"))
                 .Distinct(StringComparer.Ordinal).ToList();
         }
+
+        // An index-only update can carry the signal parsed from the F-Droid
+        // index; an analyzed row keeps it true once any recorded build
+        // declared Shizuku (the gate accepts the app on a single witness).
+        row.ShizukuDeclared = row.ShizukuDeclared || candidate.ShizukuDeclared;
 
         row.Abi = candidate.Abi;
         row.ResolvedAt = now;
@@ -2907,7 +2914,8 @@ public sealed class AppEnricher(
                 null,
                 sibling.MinSdk,
                 sibling.Abi,
-                PackageName: packageId), now, ct);
+                PackageName: packageId,
+                ShizukuDeclared: ShizukuPermission.IsDeclared(sibling.Permissions ?? [])), now, ct);
         }
 
         var keep = siblings.Select(s => s.ApkName).Append(primary.ApkName).ToHashSet(StringComparer.Ordinal);
@@ -3093,7 +3101,8 @@ public sealed class AppEnricher(
             SignerKeyAlgorithm: analyzed?.Signers.KeyAlgorithm,
             AnalysisVersion: analyzed is null ? 0 : CurrentAnalysisVersion,
             Inspection: analyzed?.Inspection,
-            PackageName: package.PackageName, Analyzed: analyzed is not null), now, ct);
+            PackageName: package.PackageName, Analyzed: analyzed is not null,
+            ShizukuDeclared: ShizukuPermission.IsDeclared(package.Permissions ?? [])), now, ct);
         await RecomputePrimaryAsync(app, ct, package.PackageName);
 
         app.PackageName = package.PackageName;
@@ -3191,6 +3200,14 @@ public sealed class AppEnricher(
                 existing.ResolvedAt = now;
             }
 
+            // The index knows the declared permissions even for builds the
+            // analyzer never downloaded; use it as a second witness.
+            if (!existing.ShizukuDeclared && ShizukuPermission.IsDeclared(package.Permissions ?? []))
+            {
+                existing.ShizukuDeclared = true;
+                existing.ResolvedAt = now;
+            }
+
             await RecomputePrimaryAfterCandidateAsync(app, ct);
             return;
         }
@@ -3220,7 +3237,8 @@ public sealed class AppEnricher(
                 SignerKeyAlgorithm: analyzed.Signers.KeyAlgorithm,
                 AnalysisVersion: CurrentAnalysisVersion,
                 Inspection: analyzed.Inspection,
-                PackageName: package.PackageName, Analyzed: true)
+                PackageName: package.PackageName, Analyzed: true,
+                ShizukuDeclared: ShizukuPermission.IsDeclared(package.Permissions ?? []))
             : new DownloadCandidate(
                 SourceKind.FDroid,
                 package.PackageName,
@@ -3234,7 +3252,8 @@ public sealed class AppEnricher(
                 null,
                 package.MinSdk,
                 package.Abi,
-                PackageName: package.PackageName);
+                PackageName: package.PackageName,
+                ShizukuDeclared: ShizukuPermission.IsDeclared(package.Permissions ?? []));
         await UpsertDownloadAsync(app, candidate, now, ct);
         await RecomputePrimaryAfterCandidateAsync(app, ct);
     }
@@ -3528,7 +3547,7 @@ public sealed class AppEnricher(
         }
 
         JobContext.Current?.Analyze($"inspect {Path.GetFileName(apkPath)} dhizuku={signals.DhizukuDeclared} "
-            + $"trackers={hits.Count} in {Elapsed(started)}ms");
+            + $"shizuku={signals.ShizukuDeclared} trackers={hits.Count} in {Elapsed(started)}ms");
         return new ApkInspection(signals, hits);
     }
 

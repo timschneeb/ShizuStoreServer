@@ -556,6 +556,15 @@ public sealed class SyncService(
                     || (a.Availability == Availability.Excluded
                         && a.ExcludedReason == ShizukuPermission.Reason)))
             .ToListAsync(ct);
+        // A single recorded build declaring Shizuku is enough: the forge
+        // primary can predate the app's Shizuku support while another
+        // source's build already uses it.
+        var shizukuApps = (await db.Downloads.AsNoTracking()
+            .Where(d => d.ShizukuDeclared)
+            .Select(d => d.AppId)
+            .Distinct()
+            .ToListAsync(ct))
+            .ToHashSet();
 
         var session = JobContext.Current;
         var changed = 0;
@@ -563,6 +572,7 @@ public sealed class SyncService(
         foreach (var app in apps)
         {
             var allowed = ShizukuPermission.IsDeclared(app.Permissions)
+                || shizukuApps.Contains(app.Id)
                 || app.ExcludeOverride
                 || (exceptions.TryGetValue(app.PackageName!, out var action)
                     && action == PackageExceptionAction.Allow);
@@ -1026,6 +1036,14 @@ public sealed class SyncService(
             .Select(e => e.PackageName)
             .ToListAsync(ct);
         var exceptionSet = new HashSet<string>(exceptionPackages, StringComparer.Ordinal);
+        // A recorded build on any source can be the Shizuku witness; keep the
+        // gate and the report in agreement.
+        var shizukuApps = (await db.Downloads.AsNoTracking()
+            .Where(d => d.ShizukuDeclared)
+            .Select(d => d.AppId)
+            .Distinct()
+            .ToListAsync(ct))
+            .ToHashSet();
         var shizukuCandidates = await db.Apps.AsNoTracking()
             .Where(a => a.PackageName != null
                 && (a.Availability == Availability.DirectApk
@@ -1034,7 +1052,9 @@ public sealed class SyncService(
             .ToListAsync(ct);
         foreach (var row in shizukuCandidates)
         {
-            if (ShizukuPermission.IsDeclared(row.Permissions) || exceptionSet.Contains(row.PackageName!))
+            if (ShizukuPermission.IsDeclared(row.Permissions)
+                || shizukuApps.Contains(row.Id)
+                || exceptionSet.Contains(row.PackageName!))
             {
                 continue;
             }

@@ -535,6 +535,40 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ShizukuGateKeepsDirectApkWhenAnyRecordedBuildDeclaresShizuku()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var tuner = await SeedDirectApkAsync();
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+
+        // The served forge build predates the app's Shizuku support, but an
+        // analyzed F-Droid twin declares it; one witness is enough.
+        _db.Downloads.Add(new AppDownload
+        {
+            AppId = tuner.Id,
+            Source = SourceKind.FDroid,
+            PackageName = "com.acme.tuner",
+            ApkUrl = "https://f-droid.org/repo/com.acme.tuner_2.apk",
+            VersionCode = 2,
+            SigKey = "url:https://f-droid.org/repo/com.acme.tuner_2.apk",
+            ShizukuDeclared = true,
+            ResolvedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(32));
+
+        Assert.Equal(Availability.DirectApk, tuner.Availability);
+        Assert.Null(tuner.ExcludedReason);
+        Assert.DoesNotContain(_db.SyncIssues.ToList(), i => i.Rule == ShizukuPermission.Rule);
+    }
+
+    [Fact]
     public async Task ShizukuGateExclusionWritesRemovedTombstoneOnce()
     {
         if (!InitRepo())

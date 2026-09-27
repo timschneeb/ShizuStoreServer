@@ -68,4 +68,6 @@ public sealed record FdroidPackageInfo(
     /// Signing-cert SHA-256 from <c>manifest.signer.sha256</c>, the
     /// authoritative fingerprint; null when the index did not carry it.
     /// </summary>
-    string? SigSha256 = null);
+    string? SigSha256 = null,
+    /// <summary>Declared permission names from <c>manifest.usesPermission</c>.</summary>
+    IReadOnlyList<string>? Permissions = null);

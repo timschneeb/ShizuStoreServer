@@ -68,6 +68,10 @@ public sealed class FdroidTests
                     "versionName": "2.0",
                     "nativecode": [ "arm64-v8a" ],
                     "usesSdk": { "minSdkVersion": 26 },
+                    "usesPermission": [
+                      { "name": "android.permission.INTERNET" },
+                      { "name": "moe.shizuku.manager.permission.API_V23" }
+                    ],
                     "signer": {
                       "sha256": [ "980CEB20FD248B13EB6E224D73B3DFCD722AB120DFA6632AE8528E7BE1CFD6C9" ]
                     }
@@ -160,6 +164,11 @@ public sealed class FdroidTests
         Assert.Equal("arm64-v8a", app.Abi);
         Assert.Equal("An <b>example</b> long description", app.LongDescription);
         Assert.Equal("980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9", app.SigSha256);
+        // The index manifest carries the declared permissions; the Shizuku
+        // gate reads them for index-only rows.
+        Assert.Equal(
+            ["android.permission.INTERNET", "moe.shizuku.manager.permission.API_V23"],
+            app.Permissions);
 
         Assert.Equal(1, data.Packages["com.example.old"][0].VersionCode);
         Assert.DoesNotContain("com.example.bare", data.Packages);

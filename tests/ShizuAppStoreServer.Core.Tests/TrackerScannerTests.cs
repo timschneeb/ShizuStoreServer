@@ -134,12 +134,14 @@ public sealed class ShizukuSignalScannerTests
     }
 
     [Fact]
-    public void IgnoresTheShizukuPermission()
+    public void DetectsTheShizukuPermission()
     {
-        // Almost every Shizuku app declares this, so it carries no signal.
+        // The availability gate accepts an app when any recorded build
+        // declares Shizuku, so the per-row signal must track it.
         var signals = ShizukuSignalScanner.Scan(["moe.shizuku.manager.permission.API_V23"]);
 
-        Assert.Equal(ApkSignals.None, signals);
+        Assert.True(signals.ShizukuDeclared);
+        Assert.False(signals.DhizukuDeclared);
     }
 
     [Fact]

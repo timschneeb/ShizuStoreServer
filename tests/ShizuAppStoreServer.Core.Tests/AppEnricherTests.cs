@@ -668,8 +668,32 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         var primary = Primary(app);
         Assert.True(primary.DhizukuDeclared);
+        Assert.False(primary.ShizukuDeclared);
         // No catalog is injected in tests by default, so no DEX scan runs.
         Assert.Empty(primary.Trackers);
+    }
+
+    [Fact]
+    public async Task EnrichmentRecordsDeclaredShizukuPermission()
+    {
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJson(
+            "v1.0", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ =>
+            TestAssets.CannedBadging() + "\nuses-permission: name='moe.shizuku.manager.permission.API_V23'\n");
+        var enricher = BuildEnricher(github, downloads, aapt2);
+        var app = NewApp("shizukuapp", "ShizukuApp", "https://github.com/example/shizukuapp");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var primary = Primary(app);
+        Assert.True(primary.ShizukuDeclared);
+        Assert.False(primary.DhizukuDeclared);
     }
 
     [Fact]
@@ -703,6 +727,7 @@ public sealed class AppEnricherTests : IDisposable
         // Each tag stays associated with its tracker, multiple tags included.
         Assert.Equal(["AppLovin:Analytics", "AppLovin:Advertisement"], primary.TrackerTags);
         Assert.False(primary.DhizukuDeclared);
+        Assert.False(primary.ShizukuDeclared);
     }
 
     [Fact]

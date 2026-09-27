@@ -217,7 +217,8 @@ bundle` is rebuilt per deploy, never committed.
   `size_bytes`, `sha256`, `sig_sha256`, `sig_md5`, `analyzed`, `min_sdk`,
   `target_sdk`, `compile_sdk`, `locales`, `abis`, `localized_labels`,
   `signer_dn`, `signer_scheme`, `signer_key_algorithm`, `dhizuku_declared`,
-  `trackers`, `tracker_signatures`, `tracker_tags`, `inspected`, `abi`,
+  `shizuku_declared`, `trackers`, `tracker_signatures`, `tracker_tags`,
+  `inspected`, `abi`,
   `sig_key`, `analysis_version`, `is_primary`, `resolved_at`.
   - `sig_key` = lowercased first space-token of `sig_sha256`, else of
     `sig_md5`, else `url:<apk_url>`; `abi` = the analyzed APK's
@@ -260,15 +261,20 @@ bundle` is rebuilt per deploy, never committed.
     re-downloading index-only rows.
   - Analysis signals (analyzed rows only, empty elsewhere):
     `dhizuku_declared` = the build declares a
-    `com.rosan.dhizuku.permission.*` permission; `trackers` = names and
+    `com.rosan.dhizuku.permission.*` permission; `shizuku_declared` = the
+    build declares a permission whose name contains `shizuku` (also
+    parsed from the F-Droid index manifest for index-only rows);
+    `trackers` = names and
     `tracker_signatures` = the matched code signatures of the Exodus
     trackers found in the DEX, and `tracker_tags` = their category tags
     as `tracker:tag` pairs (one entry per tag, newline-joined) so each
     tag stays associated with its tracker. Only code signatures are
     matched (the server does no network analysis), so an empty tracker
     list means "not detected by code signature", never "tracker-free".
-    The Shizuku permission is intentionally not tracked: nearly every
-    app in the catalog declares it, so it separates nothing.
+    The per-build Shizuku declaration is tracked because the availability
+    gate (§5.3) accepts an app when any recorded build declares it: the
+    served forge build can predate the app's Shizuku support while another
+    source's build already uses it.
   - `inspected` = true once the recorded build was scanned for the
     analysis signals; never downgraded. Rows analyzed before the scan
     existed are false, so the next pass re-analyzes them once to
@@ -890,13 +896,16 @@ phone build never suppresses another package's watch-only variant.
 
 ### 5.3 Shizuku-permission gate
 
-A repo can also ship APKs that do not need Shizuku at all, so every
-`DirectApk` row must prove it declares a Shizuku permission. After
-enrichment each pass, `SyncService.ApplyShizukuFilterAsync` looks at the
-rows whose analyzed `permissions` are known: a row whose permissions
-contain `shizuku` (case-insensitive, covering `moe.shizuku`,
-`rikka.shizuku`, `dev.rikka.shizuku`, `af.shizuku`, `moe.shizuku.api`)
-stays available. AndroidX
+A repo can also ship APKs that do not need Shizuku at all, so a
+`DirectApk` app must prove it declares a Shizuku permission. After
+enrichment each pass, `SyncService.ApplyShizukuFilterAsync` checks the
+app's analyzed `permissions` and its download rows: an app stays
+available when any recorded build declares a permission containing
+`shizuku` (case-insensitive, covering `moe.shizuku`, `rikka.shizuku`,
+`dev.rikka.shizuku`, `af.shizuku`, `moe.shizuku.api`), either from APK
+badging or from the F-Droid index manifest (`usesPermission`). A single
+witness is enough because the served forge primary can predate the app's
+Shizuku support while an F-Droid build already declares it. AndroidX
 `*.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` entries are artifacts and
 never match.
 
@@ -929,10 +938,11 @@ permission auto-heals them (the checksum short-circuit keeps the repeat
 check cheap).
 
 `GET /v1/issues` reports a `shizuku_permission_missing` quality issue
-for every gated row that lacks the permission and has no
-`package_exceptions` row, whichever action; the message is the exclusion
-reason above. This check runs in `CollectIssuesAsync` rather than
-`CatalogHealthCheck` because the latter ignores excluded rows.
+for every gated app whose recorded builds declare no Shizuku permission
+and that has no `package_exceptions` row, whichever action; the message
+is the exclusion reason above. This check runs in `CollectIssuesAsync`
+rather than `CatalogHealthCheck` because the latter ignores excluded
+rows.
 
 ### 5.4 AI source analysis ("How this app uses Shizuku")
 

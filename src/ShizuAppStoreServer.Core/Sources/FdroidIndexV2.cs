@@ -97,6 +97,11 @@ public static class FdroidIndexV2Parser
 
             var manifest = version?.Manifest;
             var certificates = NormalizeSigners(manifest?.Signer?.Sha256);
+            var permissions = manifest?.UsesPermission?
+                .Select(permission => permission.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name!)
+                .ToList();
             releases.Add(new FdroidPackageInfo(
                 id,
                 manifest?.VersionCode ?? 0,
@@ -109,7 +114,8 @@ public static class FdroidIndexV2Parser
                 sourceUrl,
                 manifest?.NativeCode?.FirstOrDefault(),
                 description,
-                certificates.Count > 0 ? CertFingerprint.Join(certificates) : null));
+                certificates.Count > 0 ? CertFingerprint.Join(certificates) : null,
+                permissions is { Count: > 0 } ? permissions : null));
         }
 
         return releases
@@ -202,8 +208,10 @@ public static class FdroidIndexV2Parser
         [JsonPropertyName("nativecode")] public List<string>? NativeCode { get; set; }
         [JsonPropertyName("usesSdk")] public UsesSdkDto? UsesSdk { get; set; }
         [JsonPropertyName("signer")] public SignerDto? Signer { get; set; }
+        [JsonPropertyName("usesPermission")] public List<PermissionDto>? UsesPermission { get; set; }
     }
     private sealed class UsesSdkDto { [JsonPropertyName("minSdkVersion")] public int? MinSdkVersion { get; set; } }
     private sealed class SignerDto { [JsonPropertyName("sha256")] public List<string>? Sha256 { get; set; } }
+    private sealed class PermissionDto { [JsonPropertyName("name")] public string? Name { get; set; } }
     private sealed class ShotDto { [JsonPropertyName("name")] public string? Name { get; set; } }
 }
