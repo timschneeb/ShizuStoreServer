@@ -1217,7 +1217,8 @@ entry or source URL, direct-APK rows without package name or primary
 download, never-checked or twice-window-stale rows, duplicate
 canonical packages across live listings, primary downloads older
 than the newest recorded stable version, with prerelease history
-rows ignored; excluded rows are
+and same-version-name (multi-ABI) rows ignored; the encoding has so
+far only been seen in some Flutter apps; excluded rows are
 never checked, and a variant shares its root's check freshness because
 the root's completed pass stamps the whole variant group). Due-only
 passes (HEAD unchanged) keep the previous

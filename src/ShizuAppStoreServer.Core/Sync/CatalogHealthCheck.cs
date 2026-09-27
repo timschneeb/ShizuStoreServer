@@ -88,8 +88,13 @@ public static class CatalogHealthCheck
             {
                 // Pre-release rows are channel history, not a skipped stable
                 // release; only stable history can outrank the served build.
+                // Same version names are one release: multi-ABI artifacts
+                // encode the ABI in the version code (obtainium's 2356
+                // universal vs 23563 arm64; seen so far only in some Flutter
+                // apps), so those rows are flavors of the served build, not
+                // a skipped release.
                 var newest = app.Versions
-                    .Where(v => !v.IsPrerelease)
+                    .Where(v => !v.IsPrerelease && !SharesVersionName(v.VersionName, primary.VersionName))
                     .Max(v => v.VersionCode);
                 if (newest > primaryCode)
                 {
@@ -103,6 +108,18 @@ public static class CatalogHealthCheck
         AddDuplicatePackageIssues(apps, issues);
 
         return issues;
+    }
+
+    /// <summary>
+    /// Version names identify a release across its per-ABI artifacts. Both
+    /// missing names compare equal: an unlabeled history row cannot prove a
+    /// skipped release against an unlabeled served build.
+    /// </summary>
+    private static bool SharesVersionName(string? left, string? right)
+    {
+        var a = left?.Trim() ?? string.Empty;
+        var b = right?.Trim() ?? string.Empty;
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

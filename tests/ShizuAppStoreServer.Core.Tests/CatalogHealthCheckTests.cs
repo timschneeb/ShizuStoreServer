@@ -219,9 +219,10 @@ public sealed class CatalogHealthCheckTests : IDisposable
             SigKey = "abc",
             IsPrimary = true,
             VersionCode = 42,
+            VersionName = "1.0",
             ResolvedAt = T0,
         });
-        regressed.Versions.Add(new AppVersion { VersionCode = 2032, DetectedAt = T0 });
+        regressed.Versions.Add(new AppVersion { VersionCode = 2032, VersionName = "2.0", DetectedAt = T0 });
         var clean = HealthyApp(category, "clean");
         clean.Availability = Availability.DirectApk;
         clean.PackageName = "com.example.clean";
@@ -232,13 +233,18 @@ public sealed class CatalogHealthCheckTests : IDisposable
             SigKey = "abc",
             IsPrimary = true,
             VersionCode = 7,
+            VersionName = "1.0",
             ResolvedAt = T0,
         });
-        clean.Versions.Add(new AppVersion { VersionCode = 7, DetectedAt = T0 });
+        clean.Versions.Add(new AppVersion { VersionCode = 7, VersionName = "1.0", DetectedAt = T0 });
 
         // A prerelease history row above the served stable is channel
         // history, not a skipped stable release.
-        clean.Versions.Add(new AppVersion { VersionCode = 99, IsPrerelease = true, DetectedAt = T0 });
+        clean.Versions.Add(new AppVersion { VersionCode = 99, VersionName = "2.0-beta", IsPrerelease = true, DetectedAt = T0 });
+
+        // Multi-ABI artifacts encode the ABI in the version code (an arm64
+        // 4017 of the same 1.0 release); the same name is not a skip.
+        clean.Versions.Add(new AppVersion { VersionCode = 4017, VersionName = "1.0", DetectedAt = T0 });
         _db.Apps.AddRange(regressed, clean);
         await _db.SaveChangesAsync();
 
