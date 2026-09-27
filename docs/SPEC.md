@@ -287,7 +287,9 @@ bundle` is rebuilt per deploy, never committed.
     update.
   - `is_primary` = fresh-install/no-match default. Selection prefers
     non-F-Droid sources (GitHub/GitLab/Izzy/Codeberg/Other count as
-    forge-like), then higher `version_code`, then ABI (`null` universal
+    forge-like), then a row carrying the `release_tag` of the release
+    just scanned (so a stable release takes over from older prerelease
+    rows), then higher `version_code`, then ABI (`null` universal
     first, then `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then
     others), then a non-null `sig_sha256` (an analyzed identity beats an
     index-only twin), then a fixed source order. Exactly one primary per
@@ -1108,12 +1110,16 @@ claimed by the matching candidate instead of spawning a twin.
 
 `is_primary` marks the default candidate for fresh installs / clients
 with no fingerprint match. Selection: non-F-Droid sources first
-(GitHub/GitLab/Izzy/Codeberg/Other all count as forge-like), then
+(GitHub/GitLab/Izzy/Codeberg/Other all count as forge-like), then a
+row carrying the `release_tag` of the release just scanned, then
 higher `version_code`, then ABI (`null` universal first, then
 `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then others), then a
 non-null `sig_sha256` (an analyzed identity beats an index-only
 twin), then a fixed source order. Exactly one primary per app
-(partial unique index on `app_id` where `is_primary`). Primary changes
+(partial unique index on `app_id` where `is_primary`). The finalizer
+re-asserts the scanned tag after a pass where every asset was skipped
+(checksum or URL match), so a stable switch still takes the primary
+away from legacy prerelease rows. Primary changes
 are persisted demote-first so the non-deferrable partial unique index
 never observes two primaries at once, and a row set that lost the flag
 is rebuilt from the stored rows on the next pass without downloading
@@ -1451,9 +1457,9 @@ all environments; Scalar UI is development-only.
   sig_key, abi)` is unique; a candidate never creates a second row for
   the same package and signature.
 - Candidates never alter which source is primary other than through
-  the `is_primary` rule (forge-like first, then higher
-  `version_code`, then fixed source order); exactly one primary per
-  app.
+  the `is_primary` rule (forge-like first, then the `release_tag` of
+  the release just scanned, then higher `version_code`, then fixed
+  source order); exactly one primary per app.
 - Signatures govern client choice: clients filter `downloads[]` by
   the installed cert's fingerprint, compare that candingerprint, compare that candidate's version,
   and never switch a user between signatures.

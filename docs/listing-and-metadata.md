@@ -24,7 +24,10 @@ The client has a setting to show these entries which is off by default.
 
 Source selection: an entry can end up with
 candidates from more than one source, but a forge link always wins the primary
-slot. F-Droid is never primary while a usable forge source exists.
+slot. F-Droid is never primary while a usable forge source exists. The primary
+build follows the release that was just scanned: after a switch from
+pre-releases to a stable release, the stable build takes the primary slot even
+if older pre-release rows carry higher version codes.
 
 Order of resolution:
 

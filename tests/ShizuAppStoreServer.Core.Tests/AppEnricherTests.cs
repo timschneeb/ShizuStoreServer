@@ -184,7 +184,11 @@ public sealed class AppEnricherTests : IDisposable
         return new JsonArray(release).ToJsonString();
     }
 
-    private static string ReleaseJsonMultiAssets(params (string Name, string Url, long Size)[] assets)
+    private static string ReleaseJsonMultiAssets(params (string Name, string Url, long Size)[] assets) =>
+        ReleaseJsonWithAssets("v1.0", false, assets);
+
+    private static string ReleaseJsonWithAssets(
+        string tag, bool prerelease, params (string Name, string Url, long Size)[] assets)
     {
         var array = new JsonArray();
         foreach (var asset in assets)
@@ -200,9 +204,9 @@ public sealed class AppEnricherTests : IDisposable
 
         return new JsonArray(new JsonObject
         {
-            ["tag_name"] = "v1.0",
+            ["tag_name"] = tag,
             ["draft"] = false,
-            ["prerelease"] = false,
+            ["prerelease"] = prerelease,
             ["published_at"] = "2024-06-01T00:00:00Z",
             ["assets"] = array,
         }).ToJsonString();
@@ -1320,6 +1324,149 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(40, Primary(app).VersionCode);
         Assert.True((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 50)).IsPrerelease);
         Assert.False((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 40)).IsPrerelease);
+    }
+
+    [Fact]
+    public async Task StableSwitchOutranksLegacyPerAbiPrereleaseRows()
+    {
+        // universal-revanced-manager case: the prerelease shipped one APK per
+        // ABI, so its higher-coded rows outlived the switch to a stable
+        // universal build. The release just scanned must own the primary.
+        var arm64 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(128, 128, Color.Blue)));
+        var armeabi = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Green)));
+        var x86 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var universal = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(1024, 1024, Color.Yellow)));
+        var abiByLength = new Dictionary<long, string>
+        {
+            [arm64.Length] = "arm64-v8a",
+            [armeabi.Length] = "armeabi-v7a",
+            [x86.Length] = "x86",
+        };
+        var betaGithub = new StubHandler(_ => JsonReleases(ReleaseJsonWithAssets(
+            "v2.0-beta", true,
+            ("app-arm64-v8a-release.apk", "https://cdn.example/beta/app-arm64-v8a-release.apk", arm64.Length),
+            ("app-armeabi-v7a-release.apk", "https://cdn.example/beta/app-armeabi-v7a-release.apk", armeabi.Length),
+            ("app-x86-release.apk", "https://cdn.example/beta/app-x86-release.apk", x86.Length)), "\"rel-etag\""));
+        var betaDownloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("arm64", StringComparison.Ordinal) ? arm64
+                : path.Contains("armeabi", StringComparison.Ordinal) ? armeabi
+                : x86;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var betaAapt2 = new FakeAapt2Runner(apkPath =>
+            TestAssets.CannedBadging(versionCode: "1004", abi: abiByLength[new FileInfo(apkPath).Length]));
+        var app = NewApp("universalish", "Universalish", "https://github.com/example/universalish");
+
+        var beta = BuildEnricher(betaGithub, betaDownloads, betaAapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        Assert.Equal(EnrichOutcome.Enriched, (await beta.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(1004, Primary(app).VersionCode);
+        Assert.Equal("v2.0-beta", Primary(app).ReleaseTag);
+        Assert.True((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 1004)).IsPrerelease);
+
+        // Stable ships only a universal build, so it cannot reuse the per-ABI
+        // rows recorded from the prerelease.
+        var stableUrl = "https://cdn.example/stable/app-release.apk";
+        var stableGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", stableUrl, universal.Length), "\"rel-etag\""));
+        var stableDownloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(universal),
+        });
+        var stableAapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42"));
+
+        Age(app);
+        var stable = BuildEnricher(stableGithub, stableDownloads, stableAapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        Assert.Equal(EnrichOutcome.Enriched, (await stable.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        Assert.Equal(4, _db.Downloads.Local.Count(d => d.AppId == app.Id));
+
+        var primary = Primary(app);
+        Assert.Equal(42, primary.VersionCode);
+        Assert.Equal("v1.0", primary.ReleaseTag);
+        Assert.Equal(stableUrl, primary.ApkUrl);
+        Assert.Null(primary.Abi);
+        Assert.False((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 42)).IsPrerelease);
+        Assert.True((await _db.AppVersions.SingleAsync(v => v.AppId == app.Id && v.VersionCode == 1004)).IsPrerelease);
+    }
+
+    [Fact]
+    public async Task StableSwitchHealsPrimaryWhenArtifactIsSkippedByChecksum()
+    {
+        // A declared digest lets the stable artifact skip its download, so no
+        // analysis runs; the finalizer alone must pull the primary away from
+        // the legacy prerelease rows (the prod re-enrichment path).
+        var arm64 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(128, 128, Color.Blue)));
+        var armeabi = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(256, 256, Color.Green)));
+        var x86 = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        var universal = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(1024, 1024, Color.Yellow)));
+        var abiByLength = new Dictionary<long, string>
+        {
+            [arm64.Length] = "arm64-v8a",
+            [armeabi.Length] = "armeabi-v7a",
+            [x86.Length] = "x86",
+        };
+        var betaGithub = new StubHandler(_ => JsonReleases(ReleaseJsonWithAssets(
+            "v2.0-beta", true,
+            ("app-arm64-v8a-release.apk", "https://cdn.example/beta/app-arm64-v8a-release.apk", arm64.Length),
+            ("app-armeabi-v7a-release.apk", "https://cdn.example/beta/app-armeabi-v7a-release.apk", armeabi.Length),
+            ("app-x86-release.apk", "https://cdn.example/beta/app-x86-release.apk", x86.Length)), "\"rel-etag\""));
+        var betaDownloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("arm64", StringComparison.Ordinal) ? arm64
+                : path.Contains("armeabi", StringComparison.Ordinal) ? armeabi
+                : x86;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var betaAapt2 = new FakeAapt2Runner(apkPath =>
+            TestAssets.CannedBadging(versionCode: "1004", abi: abiByLength[new FileInfo(apkPath).Length]));
+        var app = NewApp("universalish", "Universalish", "https://github.com/example/universalish");
+
+        var beta = BuildEnricher(betaGithub, betaDownloads, betaAapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        await beta.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        var stableUrl = "https://cdn.example/stable/app-release.apk";
+        var stableGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", stableUrl, universal.Length), "\"rel-etag\""));
+        var stableDownloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(universal),
+        });
+        var stable = BuildEnricher(stableGithub, stableDownloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            signer: new FakeSignerRunner(_ => SignerOutputA));
+        Age(app);
+        await stable.EnrichAsync(app, T0);
+        await _db.SaveChangesAsync();
+
+        // Legacy state: the prerelease row is primary again and carries no tag.
+        var stableRow = _db.Downloads.Single(d => d.AppId == app.Id && d.ApkUrl == stableUrl);
+        var legacy = _db.Downloads.Single(d => d.AppId == app.Id && d.Abi == "arm64-v8a");
+        stableRow.IsPrimary = false;
+        await _db.SaveChangesAsync();
+        legacy.IsPrimary = true;
+        legacy.ReleaseTag = null;
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        var skipGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", stableUrl, universal.Length,
+                digest: $"sha256:{Sha256(universal)}"), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => throw new InvalidOperationException("checksum skip must not download"));
+        var skip = BuildEnricher(skipGithub, downloads,
+            new FakeAapt2Runner(_ => throw new InvalidOperationException("checksum skip must not analyze")));
+
+        var result = await skip.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(0, downloads.Calls);
+        Assert.Equal(42, Primary(app).VersionCode);
+        Assert.Equal("v1.0", Primary(app).ReleaseTag);
     }
 
     [Fact]
@@ -3098,9 +3245,14 @@ public sealed class AppEnricherTests : IDisposable
         // Live 2026-09-15: two rows sat at null LastCheckedAt forever (caught
         // by the never_checked report) because the analyzed-but-not-primary
         // return left no stamp, so every pass re-downloaded them.
+        // Both rows carry the scanned tag, so the release-tag preference ties
+        // and the higher version code keeps the primary; the analyzed build
+        // must still stamp the check on its way out.
         var (enricher, _, _, _, _) = HappyPath(versionCode: "42");
         var app = NewApp("loser", "Loser", "https://github.com/example/loser");
-        AddDownload(app, SourceKind.GitHub, "https://example.com/newer.apk", versionCode: 100);
+        var incumbent = AddDownload(app, SourceKind.GitHub, "https://example.com/newer.apk", versionCode: 100);
+        incumbent.ReleaseTag = "v1.0";
+        await _db.SaveChangesAsync();
 
         var result = await enricher.EnrichAsync(app, T0);
 

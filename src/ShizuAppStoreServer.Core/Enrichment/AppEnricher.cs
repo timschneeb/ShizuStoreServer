@@ -1123,7 +1123,7 @@ public sealed class AppEnricher(
                 ? null
                 : await ApplyAnalysesAsync(
                     app, kind, [zipResult.Analysis with { ReleaseTag = releaseTag }], etag, null,
-                    false, now, ct, isPrerelease);
+                    false, now, ct, isPrerelease, releaseTag);
         }
 
         // Sources whose asset URLs embed the version (GitHub tags, GitLab,
@@ -1146,7 +1146,7 @@ public sealed class AppEnricher(
                 Stamp(app);
                 // The finalizer still runs: the scanned asset set drives
                 // variant pruning and display names even on a skipped pass.
-                await ApplyAnalysesAsync(app, kind, [], etag, assets, permitRemoval: true, now, ct);
+                await ApplyAnalysesAsync(app, kind, [], etag, assets, permitRemoval: true, now, ct, isPrerelease, releaseTag);
                 return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "asset URL unchanged" };
             }
         }
@@ -1252,7 +1252,7 @@ public sealed class AppEnricher(
         // set still drives variant pruning and display names, so a release
         // that dropped a package prunes its row on the checksum-skip path too.
         var applied = await ApplyAnalysesAsync(
-            app, kind, analyses, etag, assets, failed == 0, now, ct, isPrerelease);
+            app, kind, analyses, etag, assets, failed == 0, now, ct, isPrerelease, releaseTag);
         app.LastCheckedAt = now;
         app.LastError = null;
         if (unchanged && applied.Outcome == EnrichOutcome.UpToDate)
@@ -1301,7 +1301,7 @@ public sealed class AppEnricher(
 
         if (recomputePrimary)
         {
-            await RecomputePrimaryAsync(target, ct, preferredPackage);
+            await RecomputePrimaryAsync(target, ct, preferredPackage, analysis.ReleaseTag);
         }
 
         // A completed analysis stamps the check even when it changes nothing
@@ -1386,7 +1386,7 @@ public sealed class AppEnricher(
     private async Task<EnrichResult> ApplyAnalysesAsync(
         App root, SourceKind kind, IReadOnlyList<ArtifactAnalysis> analyses, string? etag,
         IReadOnlyList<SourceAsset>? scannedAssets, bool permitRemoval, DateTimeOffset now, CancellationToken ct,
-        bool isPrerelease = false)
+        bool isPrerelease = false, string? releaseTag = null)
     {
         var result = new EnrichResult(EnrichOutcome.UpToDate, null);
         var presented = new List<App>();
@@ -1440,6 +1440,17 @@ public sealed class AppEnricher(
 
         var members = new List<App> { root };
         members.AddRange(variants);
+        // Skipped artifacts (unchanged URL or declared checksum) apply no
+        // analysis, so the tag preference never ran; reassert it here so a
+        // stable switch still takes the primary from older prerelease rows.
+        if (releaseTag is not null)
+        {
+            foreach (var member in members)
+            {
+                await RecomputePrimaryAsync(member, ct, member.PackageName, releaseTag);
+            }
+        }
+
         await HealRootPresentationAsync(root, kind, analyses, now, ct);
         var multi = members.Count > 1;
         foreach (var member in members)
@@ -2637,7 +2648,8 @@ public sealed class AppEnricher(
     /// then the newest version, then a fixed source order. Exactly one row is
     /// primary per app (invariant enforced here, not by a DB constraint).
     /// </summary>
-    private async Task RecomputePrimaryAsync(App app, CancellationToken ct, string? preferredPackage = null)
+    private async Task RecomputePrimaryAsync(
+        App app, CancellationToken ct, string? preferredPackage = null, string? preferredReleaseTag = null)
     {
         var rows = await LoadDownloadsAsync(app, ct);
         // Flavor packages share one row; the default offer must stay the
@@ -2654,7 +2666,7 @@ public sealed class AppEnricher(
         AppDownload? best = null;
         foreach (var row in candidates)
         {
-            best = best is null ? row : PreferDownload(row, best);
+            best = best is null ? row : PreferDownload(row, best, preferredReleaseTag);
         }
 
         // The partial unique index on (app_id) where is_primary is not
@@ -2765,13 +2777,26 @@ public sealed class AppEnricher(
         await db.SaveChangesAsync(ct);
     }
 
-    private static AppDownload PreferDownload(AppDownload a, AppDownload b)
+    private static AppDownload PreferDownload(AppDownload a, AppDownload b, string? preferredReleaseTag = null)
     {
         var aForge = IsForgeSource(a.Source);
         var bForge = IsForgeSource(b.Source);
         if (aForge != bForge)
         {
             return aForge ? a : b;
+        }
+
+        // The release just scanned owns its tag's rows: when a repo switches
+        // from prereleases to stable, the freshly recorded stable build must
+        // outrank older prerelease rows kept for ABI or signature history.
+        if (preferredReleaseTag is not null)
+        {
+            var aTag = string.Equals(a.ReleaseTag, preferredReleaseTag, StringComparison.Ordinal);
+            var bTag = string.Equals(b.ReleaseTag, preferredReleaseTag, StringComparison.Ordinal);
+            if (aTag != bTag)
+            {
+                return aTag ? a : b;
+            }
         }
 
         var av = a.VersionCode ?? -1;
@@ -3144,7 +3169,7 @@ public sealed class AppEnricher(
         if (package is null)
         {
             await RemoveDownloadAsync(app, SourceKind.FDroid, ct);
-            await RecomputePrimaryAsync(app, ct, app.PackageName);
+            await RecomputePrimaryAfterCandidateAsync(app, ct);
             return;
         }
 
@@ -3166,7 +3191,7 @@ public sealed class AppEnricher(
                 existing.ResolvedAt = now;
             }
 
-            await RecomputePrimaryAsync(app, ct, app.PackageName);
+            await RecomputePrimaryAfterCandidateAsync(app, ct);
             return;
         }
 
@@ -3211,7 +3236,19 @@ public sealed class AppEnricher(
                 package.Abi,
                 PackageName: package.PackageName);
         await UpsertDownloadAsync(app, candidate, now, ct);
-        await RecomputePrimaryAsync(app, ct, app.PackageName);
+        await RecomputePrimaryAfterCandidateAsync(app, ct);
+    }
+
+    /// <summary>
+    /// Recomputes the primary after an F-Droid candidate changed the row set.
+    /// The forge pass just settled the primary with release-tag precedence, so
+    /// the candidate must not undo it: without the tag a higher-coded
+    /// prerelease row would outrank the freshly served stable build.
+    /// </summary>
+    private async Task RecomputePrimaryAfterCandidateAsync(App app, CancellationToken ct)
+    {
+        var primary = await PrimaryDownloadAsync(app, ct);
+        await RecomputePrimaryAsync(app, ct, app.PackageName, primary?.ReleaseTag);
     }
 
     /// <summary>
