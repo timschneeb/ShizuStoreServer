@@ -32,7 +32,7 @@ Order of resolution:
 2. GitLab
 3. F-Droid and IzzyOnDroid, matched by explicit package URL or by the index
    application whose source URL matches the entry's forge repo.
-4. Fallback: Link to the Play Store page or the website. APK downloads are not supported in these cases; Play-only entries are still listed with an open-in-Play action instead of being hidden.
+4. Fallback: Link to the Play Store page or the website. APK downloads are not supported in these cases; Play-only entries are still listed with an open-in-Play action instead of being hidden. When enrichment flips the availability or store URL, `updated_at` is stamped so incremental clients pick the change up.
 
 The app store can handle app variants with different signatures automatically (e.g. F-Droid vs. GitHub releases) and will choose the correct source to install updates from, avoiding signature conflicts.
 

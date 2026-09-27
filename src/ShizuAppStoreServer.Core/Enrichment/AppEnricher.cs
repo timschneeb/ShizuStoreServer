@@ -225,6 +225,9 @@ public sealed class AppEnricher(
 
         try
         {
+            var availabilityBefore = app.Availability;
+            var storeUrlBefore = app.StoreUrl;
+
             var result = await DispatchAsync(app, now, ct);
             await ApplyScreenshotsAsync(app, now, ct);
 
@@ -243,6 +246,15 @@ public sealed class AppEnricher(
             if (result.Outcome != EnrichOutcome.Failed)
             {
                 await StampVariantGroupAsync(app, now, ct);
+            }
+
+            if (app.Availability != availabilityBefore || app.StoreUrl != storeUrlBefore)
+            {
+                // The changes feed only ships rows whose updated_at moved, so an
+                // enrich that flips what the row serves must stamp the commit
+                // time or incremental clients never learn about the flip
+                // (live 2026-09-27: healed Play-only rows stayed invisible).
+                app.UpdatedAt = now;
             }
 
             return result;

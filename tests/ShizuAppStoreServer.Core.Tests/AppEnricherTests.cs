@@ -1522,8 +1522,9 @@ public sealed class AppEnricherTests : IDisposable
         var play = new FakePlayClient(_ => "https://play-lh.googleusercontent.com/icon=s0-br30");
         var app = NewApp("play-only-x", "Play Only",
             "https://play.google.com/store/apps/details?id=com.example.pe");
+        var enricher = BuildEnricher(github, downloads, aapt2, play: play);
 
-        var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
+        var result = await enricher.EnrichAsync(app, T0.AddMinutes(5));
 
         Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
         Assert.Equal(Availability.PlayRedirect, app.Availability);
@@ -1531,6 +1532,13 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Null(app.ExcludedReason);
         Assert.False(HasDownloads(app));
         Assert.Equal(1, play.Calls);
+        // The changes feed only ships rows whose updated_at moved, so the
+        // availability flip has to carry the enrich timestamp.
+        Assert.Equal(T0.AddMinutes(5), app.UpdatedAt);
+
+        // A re-check that flips nothing must not churn the feed.
+        await enricher.EnrichAsync(app, T0.AddMinutes(10), force: true);
+        Assert.Equal(T0.AddMinutes(5), app.UpdatedAt);
     }
 
     [Theory]

@@ -624,6 +624,10 @@ therefore treats Izzy as forge-like.
   Play-sole-source apps (no usable source link) keep their Play
   listing as `PlayRedirect` as well, so entries with no APK source stay
   browsable instead of being hidden.
+  Any enrich that flips the served availability or `StoreUrl` stamps
+  `updated_at` at the same time, so clients on an incremental sync
+  receive the new state instead of holding a cursor past a change they
+  were never sent.
 
 ### 5.1 APK analysis (forge + changed F-Droid builds)
 
