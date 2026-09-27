@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 
 namespace ShizuAppStoreServer.Web.Tests;
 
@@ -13,19 +14,22 @@ public sealed class IssuesTests(ShizuApiFactory factory) : IClassFixture<ShizuAp
 
     private static void SeedRun(ShizuDbContext db, string head, params (IssueKind Kind, string Rule, string? Slug)[] rows)
     {
-        var run = new SyncRun
+        var run = new JobRun
         {
+            Kind = JobKind.Sync,
             StartedAt = T0,
+            StartedDay = DateOnly.FromDateTime(T0.UtcDateTime),
             FinishedAt = T0.AddMinutes(1),
-            Trigger = "scheduled",
-            HeadCommit = head,
+            Trigger = JobTrigger.Scheduled,
+            Status = JobStatus.Succeeded,
+            Reference = head,
         };
-        db.SyncRuns.Add(run);
+        db.JobRuns.Add(run);
         foreach (var (kind, rule, slug) in rows)
         {
             db.SyncIssues.Add(new SyncIssue
             {
-                SyncRun = run,
+                JobRun = run,
                 Kind = kind,
                 Rule = rule,
                 Slug = slug,

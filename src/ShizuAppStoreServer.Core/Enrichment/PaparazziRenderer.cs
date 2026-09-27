@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Core.Enrichment;
@@ -76,16 +77,12 @@ public sealed record RenderScope(
 /// </summary>
 public sealed class PaparazziRenderer(
     string gradlePath, string toolDir, TimeSpan timeout, string? cpuAffinity = null,
-    ILogger<PaparazziRenderer>? log = null, IRunLog? runLog = null, RenderScope? scope = null)
+    ILogger<PaparazziRenderer>? log = null, RenderScope? scope = null)
     : IPaparazziRenderer
 {
     private static readonly byte[] PngMagic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
     private readonly SemaphoreSlim _gate = new(1, 1);
-
-    // Render timings land in the enrichment run log so a slow icon pass is
-    // visible without attaching a profiler.
-    private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
 
     private static long Elapsed(long started) =>
         (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -100,7 +97,7 @@ public sealed class PaparazziRenderer(
         {
             var outPng = Path.Combine(Path.GetTempPath(), $"shizu-icon-{Guid.NewGuid():N}.png");
             var started = Stopwatch.GetTimestamp();
-            _runLog.Detail($"render {drawableName} start");
+            JobContext.Current?.Render($"render {drawableName} start");
             try
             {
                 try
@@ -111,17 +108,21 @@ public sealed class PaparazziRenderer(
                 {
                     if (await ReadSalvagedPngAsync(outPng, ct) is not { } salvaged)
                     {
-                        _runLog.Detail($"render {drawableName} failed after {Elapsed(started)}ms: {ex.Message}");
+                        JobContext.Current?.Render(
+                            $"render {drawableName} failed after {Elapsed(started)}ms: {ex.Message}",
+                            level: JobEventLevel.Warning);
                         throw;
                     }
 
                     log?.LogWarning(ex, "Paparazzi render failed; salvaged the output PNG it left behind.");
-                    _runLog.Detail($"render {drawableName} salvaged after {Elapsed(started)}ms");
+                    JobContext.Current?.Render(
+                        $"render {drawableName} salvaged after {Elapsed(started)}ms",
+                        level: JobEventLevel.Warning);
                     return salvaged;
                 }
 
                 var rendered = await File.ReadAllBytesAsync(outPng, ct);
-                _runLog.Detail($"render {drawableName} done {rendered.Length}B in {Elapsed(started)}ms");
+                JobContext.Current?.Render($"render {drawableName} done {rendered.Length}B in {Elapsed(started)}ms");
                 return rendered;
             }
             finally
@@ -165,7 +166,7 @@ public sealed class PaparazziRenderer(
                 {
                     await File.WriteAllTextAsync(manifestPath, manifest.ToString(), ct);
                     var started = Stopwatch.GetTimestamp();
-                    _runLog.Detail($"batch render {batch.Count} icons start");
+                    JobContext.Current?.Render($"batch render {batch.Count} icons start");
                     // Headroom scales with batch size; the cap is generous
                     // because one slow icon must not kill 200 good ones.
                     var batchTimeout = timeout + TimeSpan.FromMinutes(batch.Count);
@@ -204,11 +205,13 @@ public sealed class PaparazziRenderer(
 
                     if (failure is not null && pngs.All(p => p is null))
                     {
-                        _runLog.Detail($"batch render failed after {Elapsed(started)}ms: {failure.Message}");
+                        JobContext.Current?.Render(
+                            $"batch render failed after {Elapsed(started)}ms: {failure.Message}",
+                            level: JobEventLevel.Warning);
                         throw failure;
                     }
 
-                    _runLog.Detail($"batch render done {pngs.Count(p => p is not null)}/{batch.Count} icons in {Elapsed(started)}ms");
+                    JobContext.Current?.Render($"batch render done {pngs.Count(p => p is not null)}/{batch.Count} icons in {Elapsed(started)}ms");
                     return pngs;
                 }
                 finally
@@ -272,7 +275,7 @@ public sealed class PaparazziRenderer(
                 process.ErrorDataReceived += (_, _) => { };
                 process.BeginErrorReadLine();
                 await process.WaitForExitAsync(cts.Token);
-                _runLog.Detail($"gradle --stop done (exit {process.ExitCode})");
+                JobContext.Current?.Detail($"gradle --stop done (exit {process.ExitCode})");
             }
             catch (OperationCanceledException)
             {

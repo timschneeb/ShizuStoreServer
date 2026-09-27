@@ -12,7 +12,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<AppVersion> AppVersions => Set<AppVersion>();
     public DbSet<AppDownload> Downloads => Set<AppDownload>();
     public DbSet<UsageAnalysisRun> UsageAnalysisRuns => Set<UsageAnalysisRun>();
-    public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
+    public DbSet<JobRun> JobRuns => Set<JobRun>();
+    public DbSet<JobEvent> JobEvents => Set<JobEvent>();
     public DbSet<SyncIssue> SyncIssues => Set<SyncIssue>();
     public DbSet<SyncRequest> SyncRequests => Set<SyncRequest>();
     public DbSet<RemovedApp> RemovedApps => Set<RemovedApp>();
@@ -274,6 +275,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             // Localized labels are "locale=label" entries: the first '='
             // separates, so a label containing '=' survives intact.
             MapNewlineList(e, x => x.LocalizedLabels, "localized_labels");
+            // "sha256 url" entries; see the property comment.
+            MapNewlineList(e, x => x.AnalyzedArtifacts, "analyzed_artifacts");
             e.Property(x => x.SignerDn).HasColumnName("signer_dn");
             e.Property(x => x.SignerScheme).HasColumnName("signer_scheme").HasMaxLength(64);
             e.Property(x => x.SignerKeyAlgorithm).HasColumnName("signer_key_algorithm").HasMaxLength(64);
@@ -299,6 +302,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.AppId).HasColumnName("app_id");
             e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
             e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.Trigger).HasColumnName("trigger").HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.Attempts).HasColumnName("attempts");
             e.Property(x => x.RepoForge).HasColumnName("repo_forge").HasMaxLength(16);
             e.Property(x => x.RepoCommit).HasColumnName("repo_commit").HasMaxLength(64);
@@ -337,21 +341,55 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.HasIndex(x => new { x.AppId, x.VersionCode }).IsUnique();
         });
 
-        b.Entity<SyncRun>(e =>
+        b.Entity<JobRun>(e =>
         {
-            e.ToTable("sync_runs");
+            e.ToTable("job_runs");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>().HasMaxLength(32).IsRequired();
+            e.Property(x => x.Trigger).HasColumnName("trigger").HasConversion<string>().HasMaxLength(32).IsRequired();
+            e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.StartedAt).HasColumnName("started_at").IsRequired();
+            e.Property(x => x.StartedDay).HasColumnName("started_day").HasColumnType("date");
             e.Property(x => x.FinishedAt).HasColumnName("finished_at");
-            e.Property(x => x.Trigger).HasColumnName("trigger").HasMaxLength(32).IsRequired();
-            e.Property(x => x.HeadCommit).HasColumnName("head_commit").HasMaxLength(64);
-            e.Property(x => x.Added).HasColumnName("added");
-            e.Property(x => x.Updated).HasColumnName("updated");
-            e.Property(x => x.Removed).HasColumnName("removed");
-            e.Property(x => x.Failed).HasColumnName("failed");
-            e.Property(x => x.IssueCount).HasColumnName("issue_count");
+            e.Property(x => x.DurationMs).HasColumnName("duration_ms");
+            e.Property(x => x.Reference).HasColumnName("reference").HasMaxLength(128);
+            e.Property(x => x.ItemsTotal).HasColumnName("items_total");
+            e.Property(x => x.ItemsOk).HasColumnName("items_ok");
+            e.Property(x => x.ItemsSkipped).HasColumnName("items_skipped");
+            e.Property(x => x.ItemsFailed).HasColumnName("items_failed");
+            e.Property(x => x.EventsCount).HasColumnName("events_count");
+            e.Property(x => x.EventsDropped).HasColumnName("events_dropped");
+            e.Property(x => x.Summary).HasColumnName("summary");
             e.Property(x => x.Error).HasColumnName("error");
+            e.Property(x => x.Metadata).HasColumnName("metadata").HasColumnType("jsonb");
+            e.Property(x => x.UsageAnalysisRunId).HasColumnName("usage_analysis_run_id");
+            e.HasOne(x => x.UsageAnalysisRun).WithMany().HasForeignKey(x => x.UsageAnalysisRunId).OnDelete(DeleteBehavior.SetNull);
+            e.HasIndex(x => x.StartedDay);
+            e.HasIndex(x => new { x.Kind, x.StartedDay });
+        });
+
+        b.Entity<JobEvent>(e =>
+        {
+            e.ToTable("job_events");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.JobRunId).HasColumnName("job_run_id");
+            e.HasOne(x => x.JobRun).WithMany().HasForeignKey(x => x.JobRunId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Seq).HasColumnName("seq");
+            e.Property(x => x.At).HasColumnName("at").IsRequired();
+            e.Property(x => x.Level).HasColumnName("level").HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.Type).HasColumnName("type").HasConversion<string>().HasMaxLength(32).IsRequired();
+            e.Property(x => x.Phase).HasColumnName("phase").HasMaxLength(64);
+            e.Property(x => x.AppId).HasColumnName("app_id");
+            e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.SetNull);
+            e.Property(x => x.Slug).HasColumnName("slug").HasMaxLength(200);
+            e.Property(x => x.Message).HasColumnName("message").IsRequired();
+            e.Property(x => x.Data).HasColumnName("data").HasColumnType("jsonb");
+            e.Property(x => x.DurationMs).HasColumnName("duration_ms");
+            e.HasIndex(x => new { x.JobRunId, x.Seq }).IsUnique();
+            e.HasIndex(x => new { x.JobRunId, x.Type });
+            e.HasIndex(x => x.AppId);
         });
 
         b.Entity<SyncIssue>(e =>
@@ -359,8 +397,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.ToTable("sync_issues");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
-            e.Property(x => x.SyncRunId).HasColumnName("sync_run_id");
-            e.HasOne(x => x.SyncRun).WithMany().HasForeignKey(x => x.SyncRunId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.JobRunId).HasColumnName("job_run_id");
+            e.HasOne(x => x.JobRun).WithMany().HasForeignKey(x => x.JobRunId).OnDelete(DeleteBehavior.Cascade);
             e.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.Rule).HasColumnName("rule").HasMaxLength(64).IsRequired();
             e.Property(x => x.AppId).HasColumnName("app_id");
@@ -369,7 +407,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Message).HasColumnName("message").IsRequired();
             e.Property(x => x.Location).HasColumnName("location");
             e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
-            e.HasIndex(x => x.SyncRunId);
+            e.HasIndex(x => x.JobRunId);
             e.HasIndex(x => x.Kind);
             e.HasIndex(x => x.Rule);
             e.HasIndex(x => x.Slug);

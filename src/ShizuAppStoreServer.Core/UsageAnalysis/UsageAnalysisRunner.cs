@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 
 namespace ShizuAppStoreServer.Core.UsageAnalysis;
 
@@ -31,8 +32,11 @@ public sealed class UsageAnalysisRunner(
     IRepoSnapshotProvider snapshots,
     IUsageAnalysisAgent agent,
     ILogger<UsageAnalysisRunner>? log = null,
-    IUsageAnalysisLogWriter? logs = null) : IUsageAnalysisRunner
+    IUsageAnalysisLogWriter? logs = null,
+    IJobLog? jobLog = null) : IUsageAnalysisRunner
 {
+    private readonly IJobLog _jobs = jobLog ?? NullJobLog.Instance;
+
     public async Task<int> RecoverInterruptedAsync(CancellationToken ct = default)
     {
         var interrupted = await db.UsageAnalysisRuns
@@ -133,6 +137,15 @@ public sealed class UsageAnalysisRunner(
             .FirstOrDefaultAsync(ct);
         var version = primary?.VersionName;
 
+        await using var session = _jobs.Begin(new JobStart(
+            JobKind.UsageAnalysis,
+            run.Trigger ?? JobTrigger.Auto,
+            now,
+            Metadata: new { slug = app.Slug, appId = app.Id, version, attempt = run.Attempts },
+            UsageAnalysisRunId: run.Id));
+        session.Phase("analyze", $"analyzing {app.Slug}",
+            new { app = app.Slug, package = app.PackageName, version, url = app.Url });
+
         // The agent enforces RunTimeout on itself and returns a timed-out
         // result with its partial transcript; this outer budget only guards a
         // stuck snapshot and adds the clone allowance.
@@ -150,9 +163,12 @@ public sealed class UsageAnalysisRunner(
             if (snapshot is null)
             {
                 error = "no analyzable GitHub/GitLab repository, or the checkout failed";
+                session.Decision(error, level: JobEventLevel.Warning);
             }
             else
             {
+                session.Phase("snapshot", $"cloned {snapshot.ForgeName} {snapshot.Ref} ({snapshot.Commit})",
+                    new { forge = snapshot.ForgeName, @ref = snapshot.Ref, commit = snapshot.Commit });
                 var context = new UsageContextBuilder(options).Build(app, snapshot, version ?? app.VersionName);
                 var search = new RepoSearch(snapshot, options);
                 result = await agent.AnalyzeAsync(app, context, search, budget.Token);
@@ -248,6 +264,61 @@ public sealed class UsageAnalysisRunner(
         }
 
         await db.SaveChangesAsync(ct);
+
+        var succeeded = run.Status == UsageAnalysisStatus.Succeeded;
+        session.Event(
+            succeeded ? JobEventLevel.Info : JobEventLevel.Warning,
+            JobEventType.AiResult,
+            succeeded
+                ? $"usage report ready for {app.Slug}"
+                : $"usage analysis attempt {run.Attempts} failed: {run.Error}",
+            data: new
+            {
+                slug = app.Slug,
+                attempt = run.Attempts,
+                retrying = run.Status == UsageAnalysisStatus.Pending,
+                turns = result?.Turns,
+                toolCalls = result?.ToolCalls,
+                inputTokens = input,
+                cachedInputTokens = cached,
+                outputTokens = output,
+                costUsd = run.CostUsd,
+                surface = result?.Coverage?.SurfaceInspected,
+                surfaceTotal = result?.Coverage?.SurfaceEntries,
+                callSitesRead = result?.Coverage?.TracedCallSitesRead,
+                callSites = result?.Coverage?.TracedCallSites,
+                rounds = result?.Coverage?.Rounds,
+            });
+
+        await session.FinishAsync(new JobFinish(
+            succeeded ? JobStatus.Succeeded : JobStatus.Failed,
+            Summary: succeeded
+                ? $"usage analysis for {app.Slug}: {result?.Turns} turns, ${run.CostUsd:F4}"
+                : $"attempt {run.Attempts} for {app.Slug} failed: {run.Error}",
+            Error: succeeded ? null : run.Error,
+            ItemsTotal: 1,
+            ItemsOk: succeeded ? 1 : 0,
+            ItemsFailed: succeeded ? 0 : 1,
+            Reference: run.RepoCommit,
+            Metadata: new
+            {
+                slug = app.Slug,
+                appId = app.Id,
+                attempt = run.Attempts,
+                retrying = run.Status == UsageAnalysisStatus.Pending,
+                model = options.Model,
+                promptVersion = options.PromptVersion,
+                turns = result?.Turns,
+                toolCalls = run.ToolCalls,
+                inputTokens = input,
+                cachedInputTokens = cached,
+                outputTokens = output,
+                costUsd = run.CostUsd,
+                forge = run.RepoForge,
+                commit = run.RepoCommit,
+                @ref = run.RepoRef,
+                logFile = run.LogFile,
+            }));
         return true;
     }
 

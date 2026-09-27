@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 
 namespace ShizuAppStoreServer.Controllers;
 
@@ -19,9 +20,10 @@ public sealed class MetaController(ShizuDbContext db) : ControllerBase
     [ProducesResponseType<MetaDto>(StatusCodes.Status200OK)]
     public async Task<ActionResult<MetaDto>> Get(CancellationToken ct = default)
     {
-        var listCommit = await db.SyncRuns.AsNoTracking()
+        var listCommit = await db.JobRuns.AsNoTracking()
+            .Where(r => r.Kind == JobKind.Sync)
             .OrderByDescending(r => r.Id)
-            .Select(r => r.HeadCommit)
+            .Select(r => r.Reference)
             .FirstOrDefaultAsync(ct);
 
         var appCount = await db.Apps.AsNoTracking()

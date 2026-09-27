@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Core.Sources;
@@ -38,7 +39,7 @@ public interface ITrackerCatalog
 /// fresh analyses. Detection is skipped entirely when
 /// <see cref="EnrichmentOptions.ExodusTrackerUrl"/> is null.
 /// </summary>
-public sealed class ExodusTrackerCatalog(HttpClient http, EnrichmentOptions options, IRunLog? runLog = null) : ITrackerCatalog
+public sealed class ExodusTrackerCatalog(HttpClient http, EnrichmentOptions options) : ITrackerCatalog
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private IReadOnlyList<TrackerSignature>? _catalog;
@@ -91,12 +92,14 @@ public sealed class ExodusTrackerCatalog(HttpClient http, EnrichmentOptions opti
             var json = await http.GetByteArrayAsync(options.ExodusTrackerUrl, ct);
             var catalog = ExodusTrackerParser.Parse(json);
             WriteCache(json);
-            runLog?.Detail($"exodus catalog: {catalog.Count} tracker signatures");
+            JobContext.Current?.Release($"exodus catalog: {catalog.Count} tracker signatures");
             return catalog;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            runLog?.Detail($"exodus catalog fetch failed ({ex.Message}), using cache");
+            JobContext.Current?.Decision(
+                $"exodus catalog fetch failed ({ex.Message}), using cache",
+                new { error = ex.Message }, JobEventLevel.Warning);
             return null;
         }
     }
@@ -120,7 +123,7 @@ public sealed class ExodusTrackerCatalog(HttpClient http, EnrichmentOptions opti
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            runLog?.Detail($"exodus catalog cache write failed ({ex.Message})");
+            JobContext.Current?.Detail($"exodus catalog cache write failed ({ex.Message})");
         }
     }
 
@@ -139,7 +142,7 @@ public sealed class ExodusTrackerCatalog(HttpClient http, EnrichmentOptions opti
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            runLog?.Detail($"exodus catalog cache read failed ({ex.Message})");
+            JobContext.Current?.Detail($"exodus catalog cache read failed ({ex.Message})");
             return null;
         }
     }

@@ -367,14 +367,19 @@ repo URLs are re-verified at most that often),
 `RepoScreenshotsMaxParallelism` (2). Clones land in `TMPDIR`
 (`/opt/shizuappstore/tmp`), which the unit keeps writable.
 
-`RunLogPath` (default null) appends a human-readable section per sync
-pass: a header, one line per scanned app as it finishes
-(`[ 12/315] slug (Display Name)  OK|ok|skip|excluded|FAIL  detail`), a
-totals footer, then the same catalog health snapshot as `GET /v1/issues`.
-Runs are separated by a blank line. The log rotates at run boundaries
-once it reaches 1 MiB, keeping exactly two files (`<path>` and
-`<path>.1`, the previous `.1` overwritten), so no external logrotate is
-needed. Example: `Enrichment__RunLogPath=/var/log/shizu/enrichment-runs.log`.
+`RunLogPath` (default null) enables the optional file sink of the job
+log: a human-readable mirror of the same events the database sink
+stores in `job_runs`/`job_events` (browsable in ShizuAppStoreStats).
+Every job (sync pass, icon or screenshot refresh, usage analysis) gets
+one section: a header, one line per scanned app as it finishes
+(`[ 12/315] slug (Display Name)  OK|ok|skip|excluded|FAIL  detail`),
+timestamped detail lines for slow actions, and a totals footer; a
+skipped pass writes a single `skipped: <reason>` line. Runs are
+separated by a blank line. The log rotates at run boundaries once it
+reaches 1 MiB, keeping exactly two files (`<path>` and `<path>.1`, the
+previous `.1` overwritten), so no external logrotate is needed. The
+database sink is always on; this file is only a secondary mirror.
+Example: `Enrichment__RunLogPath=/var/log/shizu/enrichment-runs.log`.
 
 Smoke test from the repo root:
 
@@ -424,7 +429,7 @@ sudo -u shizu git clone https://github.com/timschneeb/awesome-shizuku /opt/shizu
 
 The fast loop `git fetch`es before each pass, fast-forwards the local
 branch to its upstream (`git merge --ff-only`), and records the HEAD in
-`sync_runs.head_commit`. The clone is never edited locally; if a
+`job_runs.reference` (the latest `kind=Sync` row). The clone is never edited locally; if a
 fast-forward cannot apply (diverged history or a dirty tree) the worker
 deletes the clone and re-clones it from origin.
 

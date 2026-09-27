@@ -4890,6 +4890,182 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("com.example.app", app.PackageName);
         Assert.Contains(_db.Downloads.Local, d => d.AppId == app.Id && d.PackageName == "com.example.app");
     }
+
+    [Fact]
+    public async Task SameVersionTwinsAreAnalyzedOnceAndRemembered()
+    {
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        const string releaseUrl = "https://cdn.example/app-release.apk";
+        const string debugUrl = "https://cdn.example/app-debug.apk";
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJsonMultiAssets(("app-release.apk", releaseUrl, zip.Length), ("app-debug.apk", debugUrl, zip.Length)),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42"));
+        var queue = new FakeUsageQueue();
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+        var app = NewApp("twins", "Twins", "https://github.com/example/twins");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(2, downloads.Calls);
+        Assert.Equal(2, aapt2.Calls);
+        var row = Assert.Single(_db.Downloads.Local.Where(d => d.AppId == app.Id).ToList());
+        Assert.Equal(releaseUrl, row.ApkUrl);
+        Assert.Contains(row.AnalyzedArtifacts, entry => entry.EndsWith($" {debugUrl}", StringComparison.Ordinal));
+        var call = Assert.Single(queue.Calls);
+        Assert.True(call.FirstAnalysis);
+        Assert.False(call.ArtifactChanged);
+
+        Age(app);
+        var downloadsSecond = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2Second = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42"));
+        var second = BuildEnricher(github, downloadsSecond, aapt2Second, signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+
+        var secondResult = await second.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.UpToDate, secondResult.Outcome);
+        Assert.Equal(0, downloadsSecond.Calls);
+        Assert.Equal(0, aapt2Second.Calls);
+        Assert.Single(queue.Calls);
+    }
+
+    [Fact]
+    public async Task ReleaseLikeTwinHealsADebugIncumbent()
+    {
+        var releaseZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var debugZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        const string releaseUrl = "https://cdn.example/app-release.apk";
+        const string debugUrl = "https://cdn.example/app-debug.apk";
+        var app = NewApp("heal", "Heal", "https://github.com/example/heal");
+
+        var firstGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-debug.apk", debugUrl, debugZip.Length), "\"rel-etag\""));
+        var firstDownloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(debugZip),
+        });
+        var queue = new FakeUsageQueue();
+        var first = BuildEnricher(firstGithub, firstDownloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(debugUrl, Primary(app).ApkUrl);
+
+        Age(app);
+        var secondGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJsonMultiAssets(("app-release.apk", releaseUrl, releaseZip.Length), ("app-debug.apk", debugUrl, debugZip.Length)),
+            "\"rel-etag\""));
+        var secondDownloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("release") ? releaseZip : debugZip;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var second = BuildEnricher(secondGithub, secondDownloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+
+        var secondResult = await second.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, secondResult.Outcome);
+        Assert.Equal(1, secondDownloads.Calls);
+        var healed = Primary(app);
+        Assert.Equal(releaseUrl, healed.ApkUrl);
+        Assert.Contains(healed.AnalyzedArtifacts, entry => entry.EndsWith($" {debugUrl}", StringComparison.Ordinal));
+        Assert.Equal(2, queue.Calls.Count);
+        Assert.True(queue.Calls[1].ArtifactChanged);
+    }
+
+    [Fact]
+    public async Task SameUrlReuploadReanalyzesAndQueues()
+    {
+        var firstZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var secondZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        const string url = "https://cdn.example/app.apk";
+        var app = NewApp("reupload", "Reupload", "https://github.com/example/reupload");
+
+        var firstGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app.apk", url, firstZip.Length, digest: $"sha256:{Sha256(firstZip)}"), "\"rel-etag\""));
+        var firstDownloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(firstZip),
+        });
+        var queue = new FakeUsageQueue();
+        var first = BuildEnricher(firstGithub, firstDownloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+
+        Age(app);
+        var secondGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app.apk", url, secondZip.Length, digest: $"sha256:{Sha256(secondZip)}"), "\"rel-etag\""));
+        var secondDownloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(secondZip),
+        });
+        var second = BuildEnricher(secondGithub, secondDownloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+
+        var result = await second.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(1, secondDownloads.Calls);
+        Assert.Equal(2, queue.Calls.Count);
+        Assert.True(queue.Calls[1].ArtifactChanged);
+    }
+
+    [Fact]
+    public async Task VersionBumpClearsTwinMemory()
+    {
+        var firstZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var secondZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        const string url = "https://cdn.example/app.apk";
+        const string twinUrl = "https://cdn.example/app-debug.apk";
+        var app = NewApp("bump", "Bump", "https://github.com/example/bump");
+
+        var firstGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app.apk", url, firstZip.Length, digest: $"sha256:{Sha256(firstZip)}"), "\"rel-etag\""));
+        var firstDownloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(firstZip),
+        });
+        var queue = new FakeUsageQueue();
+        var first = BuildEnricher(firstGithub, firstDownloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42")),
+            signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        var row = Primary(app);
+        row.AnalyzedArtifacts.Add($"{new string('0', 64)} {twinUrl}");
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        var secondGithub = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app.apk", url, secondZip.Length, digest: $"sha256:{Sha256(secondZip)}"), "\"rel-etag\""));
+        var secondDownloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(secondZip),
+        });
+        var second = BuildEnricher(secondGithub, secondDownloads,
+            new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "43")),
+            signer: new FakeSignerRunner(_ => SignerOutputA), usageQueue: queue);
+
+        var result = await second.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        var bumped = Primary(app);
+        Assert.Equal(43L, bumped.VersionCode);
+        Assert.DoesNotContain(bumped.AnalyzedArtifacts, entry => entry.EndsWith($" {twinUrl}", StringComparison.Ordinal));
+        Assert.Single(queue.Calls, c => c.ArtifactChanged);
+    }
 }
 
 public sealed class BulkEnricherTests

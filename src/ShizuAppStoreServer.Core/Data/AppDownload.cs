@@ -154,4 +154,13 @@ public sealed class AppDownload
     public bool IsPrimary { get; set; }
 
     public DateTimeOffset ResolvedAt { get; set; }
+
+    /// <summary>
+    /// Artifacts already analyzed for the row's current version, as
+    /// <c>sha256 url</c> entries. Flavor twins (debug vs release, terminal vs
+    /// full) share the (package, signature, ABI) row, so without this memory
+    /// each pass would re-analyze whichever twin is not currently recorded and
+    /// flip the row. The list resets when the version code changes.
+    /// </summary>
+    public List<string> AnalyzedArtifacts { get; set; } = [];
 }

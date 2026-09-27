@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 
 namespace ShizuAppStoreServer.Web.Tests;
 
@@ -307,9 +308,25 @@ public sealed class MetaTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
             db.Apps.AddRange(
                 Seeds.NewApp("micup", audio),
                 Seeds.NewApp("hidden", audio, availability: Availability.Excluded));
-            db.SyncRuns.AddRange(
-                new SyncRun { StartedAt = DateTimeOffset.UtcNow, Trigger = "backfill", HeadCommit = "abc123" },
-                new SyncRun { StartedAt = DateTimeOffset.UtcNow, Trigger = "scheduled", HeadCommit = "def456" });
+            db.JobRuns.AddRange(
+                new JobRun
+                {
+                    Kind = JobKind.Sync,
+                    StartedAt = DateTimeOffset.UtcNow,
+                    StartedDay = DateOnly.FromDateTime(DateTime.UtcNow),
+                    Trigger = JobTrigger.Backfill,
+                    Status = JobStatus.Succeeded,
+                    Reference = "abc123",
+                },
+                new JobRun
+                {
+                    Kind = JobKind.Sync,
+                    StartedAt = DateTimeOffset.UtcNow,
+                    StartedDay = DateOnly.FromDateTime(DateTime.UtcNow),
+                    Trigger = JobTrigger.Scheduled,
+                    Status = JobStatus.Succeeded,
+                    Reference = "def456",
+                });
         });
 
         var response = await factory.NewClient().GetAsync("/v1/meta");

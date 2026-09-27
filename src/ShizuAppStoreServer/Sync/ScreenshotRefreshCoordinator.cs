@@ -1,3 +1,4 @@
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Sync;
@@ -28,6 +29,7 @@ public sealed record ScreenshotRefreshStatus(
 public sealed class ScreenshotRefreshCoordinator(
     IServiceScopeFactory scopes,
     SyncGate gate,
+    IJobLog jobLog,
     IHostApplicationLifetime lifetime,
     ILogger<ScreenshotRefreshCoordinator> logger)
 {
@@ -93,8 +95,11 @@ public sealed class ScreenshotRefreshCoordinator(
 
     private async Task RunAsync(DateTimeOffset startedAt, CancellationTokenSource cts)
     {
+        await using var session = jobLog.Begin(new JobStart(
+            JobKind.ScreenshotRefresh, JobTrigger.Manual, startedAt));
         ScreenshotRefreshResult? result = null;
         string? error = null;
+        var cancelled = false;
         try
         {
             using var scope = scopes.CreateScope();
@@ -103,6 +108,7 @@ public sealed class ScreenshotRefreshCoordinator(
         }
         catch (OperationCanceledException)
         {
+            cancelled = true;
             error = "Screenshots refresh was cancelled.";
         }
         catch (Exception ex)
@@ -136,5 +142,19 @@ public sealed class ScreenshotRefreshCoordinator(
         logger.LogInformation(
             "Screenshots refresh {State}: checked={Checked} updated={Updated} current={Current} failed={Failed}",
             finished.State, finished.Checked, finished.Updated, finished.Current, finished.Failed);
+
+        var status = cancelled ? JobStatus.Cancelled : error is not null ? JobStatus.Failed : JobStatus.Succeeded;
+        await session.FinishAsync(
+            new JobFinish(
+                status,
+                Summary: $"{finished.Checked} checked, {finished.Updated} updated, "
+                    + $"{finished.Current} current, {finished.Failed} failed",
+                Error: error,
+                ItemsTotal: finished.Checked,
+                ItemsOk: finished.Updated,
+                ItemsSkipped: finished.Current,
+                ItemsFailed: finished.Failed,
+                Metadata: new { errors = finished.Errors.Count }),
+            CancellationToken.None);
     }
 }

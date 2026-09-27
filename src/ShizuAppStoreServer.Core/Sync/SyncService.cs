@@ -3,12 +3,13 @@ using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.History;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Parsing;
 using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Sync;
 
-/// <summary>Outcome of one sync pass (the <c>sync_runs</c> row carries the subset that has columns).</summary>
+/// <summary>Outcome of one sync pass (the <c>job_runs</c> row carries the subset that has columns).</summary>
 public sealed record SyncPassResult(
     string Trigger,
     string? HeadCommit,
@@ -32,7 +33,10 @@ public sealed record SyncPassResult(
     public IReadOnlyList<string> FailedMessages { get; init; } = [];
 }
 
-/// <summary>Outcome of a <c>--refresh-icons</c> run (console only, no <c>sync_runs</c> row).</summary>
+/// <summary>
+/// Outcome of an icon refresh. The caller owns the job run row: the admin
+/// coordinator and the CLI open one, a full sync pass logs into its own run.
+/// </summary>
 public sealed record IconRefreshResult(
     int Checked,
     int Refreshed,
@@ -42,7 +46,7 @@ public sealed record IconRefreshResult(
     public IReadOnlyList<string> Errors { get; init; } = [];
 }
 
-/// <summary>Outcome of the screenshots-only admin refresh (no <c>sync_runs</c> row).</summary>
+/// <summary>Outcome of the screenshots-only admin refresh (the coordinator owns the job run row).</summary>
 public sealed record ScreenshotRefreshResult(
     int Checked,
     int Updated,
@@ -65,17 +69,17 @@ public sealed record ScreenshotRefreshResult(
 /// <item>Best-effort <c>git fetch</c> (offline/timeout → continue off local
 /// clone state; enrichment failures will still surface).</item>
 /// <item>HEAD unchanged + no requests + not a full re-check → enrich due
-/// apps plus poll-changed apps (force), or skip entirely (no
-/// <c>sync_runs</c> row) when neither has anything.</item>
+/// apps plus poll-changed apps (force), or record a skipped run when neither
+/// has anything.</item>
 /// <item>Otherwise parse README plus CLOSED_SOURCE, merge git history,
 /// upsert, apply ARCHIVED.md exclusions, then enrich.</item>
 /// </list>
 /// Invariant: this scope makes no app mutations after the upserter saves, so
 /// the final bookkeeping <c>SaveChanges</c> only writes request flags + the
-/// <c>sync_runs</c> row (enrichment runs in per-app scopes via
-/// <see cref="IEnrichmentRunner"/>). Never throws except on
-/// <c>OperationCanceledException</c> or an unwritable DB, failures become
-/// error results + error run rows.
+/// issue snapshot (enrichment runs in per-app scopes via
+/// <see cref="IEnrichmentRunner"/>); the job run row is owned by the job log
+/// sink. Never throws except on <c>OperationCanceledException</c> or an
+/// unwritable DB, failures become failed run rows.
 /// </remarks>
 public sealed class SyncService(
     ShizuDbContext db,
@@ -86,11 +90,11 @@ public sealed class SyncService(
     IPaparazziRenderer renderer,
     SyncOptions options,
     EnrichmentOptions enrichment,
-    IRunLog? runLog = null,
+    IJobLog? jobLog = null,
     ILogger<SyncService>? log = null,
     FdroidIndexProvider? fdroid = null)
 {
-    private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
+    private readonly IJobLog _jobs = jobLog ?? NullJobLog.Instance;
     private readonly ILogger<SyncService>? _log = log;
     private readonly FdroidIndexProvider? _fdroid = fdroid;
 
@@ -113,21 +117,19 @@ public sealed class SyncService(
         // shutdown, and must not escape to stop the host.
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            // The error row keeps only the message; the journal keeps the stack.
-            _log?.LogError(ex, "Sync pass failed; writing an error run row.");
-            // The upserter may already have saved; discard any half-tracked
-            // state so the error row below is the only thing written.
+            // Reached only when the pass crashed before opening a run session
+            // (request drain, git fetch); record a failed run so the failure
+            // stays visible next to the passes that got further.
+            _log?.LogError(ex, "Sync pass failed before it opened a run session.");
             db.ChangeTracker.Clear();
             var error = $"Sync pass failed: {ex.Message}";
-            db.SyncRuns.Add(new SyncRun
+            await using (var session = _jobs.Begin(new JobStart(JobKind.Sync, ParseTrigger(trigger), now)))
             {
-                StartedAt = now,
-                FinishedAt = DateTimeOffset.UtcNow,
-                Trigger = trigger,
-                Error = error,
-            });
-            await db.SaveChangesAsync(ct);
-            _runLog.Skip(trigger, DateTimeOffset.UtcNow, $"pass failed: {ex.Message}");
+                await session.FinishAsync(
+                    new JobFinish(JobStatus.Failed, Summary: "pass failed", Error: error),
+                    CancellationToken.None);
+            }
+
             return new SyncPassResult(trigger, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, error);
         }
     }
@@ -150,6 +152,8 @@ public sealed class SyncService(
         fullRecheck |= pending.Exists(r => r.Full);
 
         var effectiveTrigger = pending.Count > 0 ? "webhook" : trigger;
+        var start = new JobStart(
+            JobKind.Sync, ParseTrigger(effectiveTrigger), now, Metadata: new { fullRecheck });
 
         // Best-effort fetch with its own timeout: a stuck network must not
         // wedge the loop (the git process itself may linger; it exits alone).
@@ -171,9 +175,10 @@ public sealed class SyncService(
         }
 
         var head = await git.GetHeadCommitAsync(options.ListPath, ct);
-        var lastHead = await db.SyncRuns
+        var lastHead = await db.JobRuns
+            .Where(r => r.Kind == JobKind.Sync)
             .OrderByDescending(r => r.Id)
-            .Select(r => r.HeadCommit)
+            .Select(r => r.Reference)
             .FirstOrDefaultAsync(ct);
 
         if (!fullRecheck && pending.Count == 0 && head is not null && head == lastHead)
@@ -182,94 +187,147 @@ public sealed class SyncService(
             var freshIds = (await PollChangedAsync(ct)).Except(dueIds).ToList();
             if (dueIds.Count == 0 && freshIds.Count == 0)
             {
-                _runLog.Skip(effectiveTrigger, now, "nothing due");
+                _jobs.Skipped(start, "nothing due");
                 return new SyncPassResult(
                     effectiveTrigger, head, 0, 0, 0, 0, 0, 0, 0, 0, 0, true, null);
             }
 
-            _runLog.Begin(effectiveTrigger, fullRecheck, now, dueIds.Count + freshIds.Count);
-            var (enriched, upToDate, failed, failedMessages) =
-                await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
-            await ApplyShizukuFilterAsync(ct);
-            return await FinishRunAsync(effectiveTrigger, head,
-                0, 0, 0, enriched, upToDate, failed,
-                [], [], false, 0, now, ct, failedMessages);
-        }
-
-        var readme = await File.ReadAllTextAsync(Path.Combine(options.ListPath, ReadmePath), ct);
-        var parser = new AwesomeListParser();
-        var mainDoc = parser.Parse(readme, "main");
-
-        // The closed list is optional: a mirror without it serves main only.
-        var closedSourcePath = Path.Combine(options.ListPath, ClosedSourcePath);
-        var closedSource = File.Exists(closedSourcePath)
-            ? await File.ReadAllTextAsync(closedSourcePath, ct)
-            : string.Empty;
-        var closedDoc = parser.Parse(closedSource, "closed-source");
-
-        var history = await git.GetHistoryAsync(options.ListPath, ReadmePath, ct);
-        if (File.Exists(closedSourcePath))
-        {
-            foreach (var (url, entry) in await git.GetHistoryAsync(options.ListPath, ClosedSourcePath, ct))
+            await using var dueSession = _jobs.Begin(start with { ItemCount = dueIds.Count + freshIds.Count });
+            dueSession.Phase("enrich", $"enriching {dueIds.Count + freshIds.Count} apps",
+                new { due = dueIds.Count, polled = freshIds.Count, fullRecheck });
+            try
             {
-                // The main list is the primary source of list-change dates; a URL
-                // that appears in both lists keeps its main-list history.
-                history.TryAdd(url, entry);
+                var (enriched, upToDate, failed, failedMessages) =
+                    await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
+                await ApplyShizukuFilterAsync(ct);
+                return await FinishRunAsync(dueSession, effectiveTrigger, head,
+                    0, 0, 0, enriched, upToDate, failed,
+                    [], [], false, 0, now, ct, failedMessages);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                return await FailRunAsync(dueSession, effectiveTrigger, ex);
             }
         }
 
-        var counts = await upserter.UpsertAsync([mainDoc, closedDoc], history, now, ct);
-        var (archivedChanged, archivedWarnings) = await ApplyArchivedAsync(ct);
-        var parseWarnings = mainDoc.Warnings
-            .Concat(closedDoc.Warnings)
-            .Concat(archivedWarnings)
-            .ToList();
-
-        var ids = fullRecheck
-            ? await db.Apps.AsNoTracking()
-                // Rows excluded by the Shizuku gate stay selected so a later
-                // APK that declares the permission auto-heals them.
-                .Where(a => (a.Availability != Availability.Excluded
-                        || a.ExcludedReason == ShizukuPermission.Reason)
-                    && a.RootAppId == null)
-                .Select(a => a.Id)
-                .ToListAsync(ct)
-            : await SelectDueAppIdsAsync(now, ct);
-        // The nightly force-enriches everything already; polling would only
-        // re-list what the pass enriches anyway.
-        var extraIds = fullRecheck ? [] : (await PollChangedAsync(ct)).Except(ids).ToList();
-        _runLog.Begin(effectiveTrigger, fullRecheck, now, ids.Count + extraIds.Count);
-        var batchIcons = fullRecheck && enrichment.BatchIconsOnFullPass;
-        if (batchIcons)
-        {
-            // Full passes batch their icon renders after enrichment (see
-            // RefreshIconsAsync); during enrichment only rasters resolve, so
-            // no per-icon Gradle invocation can stall the pass.
-            enrichment.DeferXmlIconRenders = true;
-        }
-
-        (int Enriched, int UpToDate, int Failed, List<string> FailedMessages) full;
+        await using var session = _jobs.Begin(start);
         try
         {
-            full = await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
+            session.Phase("list", "parsing upstream list",
+                new { head = ShortCommit(head), previous = ShortCommit(lastHead) });
+
+            var readme = await File.ReadAllTextAsync(Path.Combine(options.ListPath, ReadmePath), ct);
+            var parser = new AwesomeListParser();
+            var mainDoc = parser.Parse(readme, "main");
+
+            // The closed list is optional: a mirror without it serves main only.
+            var closedSourcePath = Path.Combine(options.ListPath, ClosedSourcePath);
+            var closedSource = File.Exists(closedSourcePath)
+                ? await File.ReadAllTextAsync(closedSourcePath, ct)
+                : string.Empty;
+            var closedDoc = parser.Parse(closedSource, "closed-source");
+
+            var history = await git.GetHistoryAsync(options.ListPath, ReadmePath, ct);
+            if (File.Exists(closedSourcePath))
+            {
+                foreach (var (url, entry) in await git.GetHistoryAsync(options.ListPath, ClosedSourcePath, ct))
+                {
+                    // The main list is the primary source of list-change dates; a URL
+                    // that appears in both lists keeps its main-list history.
+                    history.TryAdd(url, entry);
+                }
+            }
+
+            var counts = await upserter.UpsertAsync([mainDoc, closedDoc], history, now, ct);
+            var (archivedChanged, archivedWarnings) = await ApplyArchivedAsync(ct);
+            var parseWarnings = mainDoc.Warnings
+                .Concat(closedDoc.Warnings)
+                .Concat(archivedWarnings)
+                .ToList();
+
+            var ids = fullRecheck
+                ? await db.Apps.AsNoTracking()
+                    // Rows excluded by the Shizuku gate stay selected so a later
+                    // APK that declares the permission auto-heals them.
+                    .Where(a => (a.Availability != Availability.Excluded
+                            || a.ExcludedReason == ShizukuPermission.Reason)
+                        && a.RootAppId == null)
+                    .Select(a => a.Id)
+                    .ToListAsync(ct)
+                : await SelectDueAppIdsAsync(now, ct);
+            // The nightly force-enriches everything already; polling would only
+            // re-list what the pass enriches anyway.
+            var extraIds = fullRecheck ? [] : (await PollChangedAsync(ct)).Except(ids).ToList();
+            session.SetItemCount(ids.Count + extraIds.Count);
+            session.Phase("enrich", $"enriching {ids.Count + extraIds.Count} apps",
+                new { asserted = ids.Count, polled = extraIds.Count, fullRecheck });
+
+            var batchIcons = fullRecheck && enrichment.BatchIconsOnFullPass;
+            if (batchIcons)
+            {
+                // Full passes batch their icon renders after enrichment (see
+                // RefreshIconsAsync); during enrichment only rasters resolve, so
+                // no per-icon Gradle invocation can stall the pass.
+                enrichment.DeferXmlIconRenders = true;
+            }
+
+            (int Enriched, int UpToDate, int Failed, List<string> FailedMessages) full;
+            try
+            {
+                full = await EnrichWithFreshAsync(ids, fullRecheck, extraIds, now, ct);
+            }
+            finally
+            {
+                enrichment.DeferXmlIconRenders = false;
+            }
+
+            await ApplyShizukuFilterAsync(ct);
+
+            if (batchIcons)
+            {
+                await BatchRenderIconsAsync(ct);
+            }
+
+            return await FinishRunAsync(session, effectiveTrigger, head,
+                counts.Added, counts.Updated, counts.Removed,
+                full.Enriched, full.UpToDate, full.Failed,
+                pendingIds, parseWarnings, true, archivedChanged, now, ct, full.FailedMessages);
         }
-        finally
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            enrichment.DeferXmlIconRenders = false;
+            return await FailRunAsync(session, effectiveTrigger, ex);
         }
-
-        await ApplyShizukuFilterAsync(ct);
-
-        if (batchIcons)
-        {
-            await BatchRenderIconsAsync(ct);
-        }
-
-        return await FinishRunAsync(effectiveTrigger, head,
-            counts.Added, counts.Updated, counts.Removed,
-            full.Enriched, full.UpToDate, full.Failed,
-            pendingIds, parseWarnings, true, archivedChanged, now, ct, full.FailedMessages);
     }
+
+    /// <summary>Records a crashed pass on its run row and returns the error result.</summary>
+    private async Task<SyncPassResult> FailRunAsync(JobSession session, string trigger, Exception ex)
+    {
+        // The message goes on the run row; the journal keeps the stack.
+        _log?.LogError(ex, "Sync pass failed; recording the failed job run.");
+        // The upserter may already have saved; discard any half-tracked state
+        // so the failure bookkeeping below is the only thing written.
+        db.ChangeTracker.Clear();
+        var error = $"Sync pass failed: {ex.Message}";
+        await session.FinishAsync(
+            new JobFinish(JobStatus.Failed, Summary: "pass failed", Error: error),
+            CancellationToken.None);
+        return new SyncPassResult(trigger, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, error);
+    }
+
+    private static JobTrigger ParseTrigger(string trigger) => trigger.ToLowerInvariant() switch
+    {
+        "startup" => JobTrigger.Startup,
+        "scheduled" => JobTrigger.Scheduled,
+        "nightly" => JobTrigger.Nightly,
+        "webhook" => JobTrigger.Webhook,
+        "cli" => JobTrigger.Cli,
+        "backfill" => JobTrigger.Backfill,
+        "auto" => JobTrigger.Auto,
+        _ => JobTrigger.Manual,
+    };
+
+    private static string? ShortCommit(string? commit) =>
+        string.IsNullOrEmpty(commit) ? null : commit[..Math.Min(8, commit.Length)];
 
     /// <summary>IDs due for enrichment (never-checked, or outside the success/failure window).</summary>
     /// <remarks>
@@ -335,7 +393,7 @@ public sealed class SyncService(
         var failed = 0;
         var failedMessages = new List<string>();
 
-        // Loaded before the batch so the run log can stream a line per app as
+        // Loaded before the batch so the job log can stream a line per app as
         // it finishes; a row deleted mid-pass falls back to its id.
         var meta = (await db.Apps.AsNoTracking()
                 .Where(a => ids.Contains(a.Id))
@@ -343,17 +401,18 @@ public sealed class SyncService(
                 .ToListAsync(ct))
             .ToDictionary(a => a.Id);
 
+        var session = JobContext.Current;
         var results = await BulkEnricher.EnrichManyAsync(
             ids, (id, c) => enrich.EnrichAsync(id, force, now, c), enrichment.MaxParallelism, ct,
             onResult: (id, r) =>
             {
                 if (meta.TryGetValue(id, out var m))
                 {
-                    _runLog.App(m.Slug, m.DisplayName ?? m.Name, r);
+                    session.App(m.Slug, m.DisplayName ?? m.Name, r, id);
                 }
                 else
                 {
-                    _runLog.App($"[{id}]", null, r);
+                    session.App($"[{id}]", null, r, id);
                 }
             });
         foreach (var (id, r) in results)
@@ -408,6 +467,7 @@ public sealed class SyncService(
         // No early return on an empty set: an emptied ARCHIVED.md must still
         // clear previously archived rows below.
 
+        var session = JobContext.Current;
         var changed = 0;
         var apps = await db.Apps.ToListAsync(ct);
         foreach (var app in apps)
@@ -419,6 +479,8 @@ public sealed class SyncService(
                 app.Availability = Availability.Excluded;
                 app.ExcludedReason = ArchivedReason;
                 changed++;
+                session.Decision($"archived: excluded '{app.Slug}'",
+                    new { app.PackageName, app.Url }, appId: app.Id, slug: app.Slug);
             }
             else if (!isArchived && app.ExcludedReason == ArchivedReason)
             {
@@ -426,6 +488,8 @@ public sealed class SyncService(
                 app.LastCheckedAt = null; // force re-enrichment (re-classifies availability)
                 app.LastError = null;
                 changed++;
+                session.Decision($"archived: restored '{app.Slug}'",
+                    new { app.PackageName, app.Url }, appId: app.Id, slug: app.Slug);
             }
         }
 
@@ -493,6 +557,7 @@ public sealed class SyncService(
                         && a.ExcludedReason == ShizukuPermission.Reason)))
             .ToListAsync(ct);
 
+        var session = JobContext.Current;
         var changed = 0;
         var tombstonesChanged = false;
         foreach (var app in apps)
@@ -513,6 +578,8 @@ public sealed class SyncService(
                 }
 
                 changed++;
+                session.Decision($"shizuku gate: healed '{app.Slug}'",
+                    new { package = app.PackageName }, JobEventLevel.Info, appId: app.Id, slug: app.Slug);
             }
             else if (!allowed)
             {
@@ -521,6 +588,9 @@ public sealed class SyncService(
                     app.Availability = Availability.Excluded;
                     app.ExcludedReason = ShizukuPermission.Reason;
                     changed++;
+                    session.Decision($"shizuku gate: excluded '{app.Slug}'",
+                        new { package = app.PackageName, reason = ShizukuPermission.Reason },
+                        JobEventLevel.Info, appId: app.Id, slug: app.Slug);
                 }
 
                 // One tombstone per gated slug; re-excluding after a heal
@@ -560,15 +630,16 @@ public sealed class SyncService(
     /// test JVM per icon costs minutes; shared, seconds per icon). Every
     /// chunk runs isolated so its JVMs exit before the next one, and a
     /// failed chunk only fails its own apps; the refresh continues. The warm
-    /// daemon is stopped once, after the last chunk. Writes no
-    /// <c>sync_runs</c> row: a row would poison HEAD
-    /// tracking (null head forces a full re-parse next loop).
+    /// daemon is stopped once, after the last chunk. The caller owns the job
+    /// run row (kind <c>icon_refresh</c>, which HEAD tracking ignores); this
+    /// method only streams events into the ambient session.
     /// Force re-renders and rewrites every icon (equal bytes count as
     /// refreshed): the only way to catch self-consistent wrong files
     /// (e.g. a swapped pair whose hashes match their rows).
     /// </summary>
     public async Task<IconRefreshResult> RefreshIconsAsync(CancellationToken ct = default, bool force = false)
     {
+        var session = JobContext.Current;
         _fdroid?.BeginRun();
         if (enrichment.SkipApkAnalysis)
         {
@@ -580,6 +651,7 @@ public sealed class SyncService(
             .Where(a => a.Availability == Availability.DirectApk && a.Downloads.Any(d => d.IsPrimary))
             .Select(a => a.Id)
             .ToListAsync(ct);
+        session?.Phase("icons", $"refreshing icons for {ids.Count} apps", new { force });
 
         var refreshed = 0;
         var current = 0;
@@ -587,6 +659,7 @@ public sealed class SyncService(
         var errors = new List<string>();
         void Tally(long id, EnrichResult r)
         {
+            JobContext.Current?.App($"[{id}]", null, r, id);
             switch (r.Outcome)
             {
                 case EnrichOutcome.Enriched:
@@ -631,6 +704,8 @@ public sealed class SyncService(
                 }
             }
 
+            session?.Phase("icons", $"staged {prepared.Count} apps, {pending.Count} XML icons to render");
+
             // Phase B: chunked Gradle invocations over everything staged.
             // Each chunk isolates its JVMs (the renderer passes
             // --no-daemon) so memory cannot accumulate across a backfill,
@@ -641,6 +716,7 @@ public sealed class SyncService(
             for (var offset = 0; offset < pending.Count; offset += chunkSize)
             {
                 var chunk = pending.GetRange(offset, Math.Min(chunkSize, pending.Count - offset));
+                session?.Render($"render chunk {offset + 1}-{offset + chunk.Count} of {pending.Count} icons");
                 byte[]?[] rendered;
                 try
                 {
@@ -654,6 +730,9 @@ public sealed class SyncService(
                     _log?.LogWarning(
                         ex, "Icon batch chunk {Offset}-{End} of {Total} failed; continuing.",
                         offset, offset + chunk.Count, pending.Count);
+                    session?.Render(
+                        $"render chunk {offset + 1}-{offset + chunk.Count} failed: {ex.Message}",
+                        level: JobEventLevel.Warning);
                     foreach (var (id, _) in chunk)
                     {
                         failed++;
@@ -695,23 +774,28 @@ public sealed class SyncService(
             await renderer.StopGradleDaemonsAsync();
         }
 
+        session?.Phase("icons", "icon refresh complete",
+            new { refreshed, current, failed, errors = errors.Count });
         return new IconRefreshResult(ids.Count, refreshed, current, failed) { Errors = errors };
     }
 
     /// <summary>
     /// Screenshots-only maintenance pass over every served app (the admin
     /// trigger): re-resolves F-Droid/Izzy and forces the repo fallback past
-    /// its recheck window. No APK work and no <c>sync_runs</c> row. Errors
-    /// per app are tallied and returned, never thrown.
+    /// its recheck window. No APK work; the caller owns the job run row
+    /// (kind <c>screenshot_refresh</c>). Errors per app are tallied and
+    /// returned, never thrown.
     /// </summary>
     public async Task<ScreenshotRefreshResult> RefreshScreenshotsAsync(CancellationToken ct = default)
     {
+        var session = JobContext.Current;
         _fdroid?.BeginRun();
 
         var ids = await db.Apps.AsNoTracking()
             .Where(a => a.Availability != Availability.Excluded)
             .Select(a => a.Id)
             .ToListAsync(ct);
+        session?.Phase("screenshots", $"refreshing screenshots for {ids.Count} apps");
 
         var updated = 0;
         var current = 0;
@@ -719,7 +803,8 @@ public sealed class SyncService(
         var errors = new List<string>();
         var results = await BulkEnricher.EnrichManyAsync(
             ids, (id, c) => enrich.RefreshScreenshotsAsync(id, c),
-            enrichment.MaxParallelism, ct);
+            enrichment.MaxParallelism, ct,
+            onResult: (id, r) => JobContext.Current?.App($"[{id}]", null, r, id));
         foreach (var (id, r) in results)
         {
             switch (r.Outcome)
@@ -763,6 +848,14 @@ public sealed class SyncService(
             _log?.LogInformation(
                 "Full-pass icon batch: {Checked} apps, {Refreshed} refreshed, {Current} already current, {Failed} failed.",
                 result.Checked, result.Refreshed, result.AlreadyCurrent, result.Failed);
+            JobContext.Current?.Phase("icons", "full-pass icon batch complete",
+                new
+                {
+                    checkedApps = result.Checked,
+                    refreshed = result.Refreshed,
+                    alreadyCurrent = result.AlreadyCurrent,
+                    failed = result.Failed,
+                });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -771,7 +864,7 @@ public sealed class SyncService(
     }
 
     private async Task<SyncPassResult> FinishRunAsync(
-        string trigger, string? head,
+        JobSession session, string trigger, string? head,
         int added, int updated, int removed,
         int enriched, int upToDate, int failed,
         IReadOnlyList<long> drainedIds, IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse,
@@ -795,48 +888,75 @@ public sealed class SyncService(
         // finished time: they differ only by the pass duration in production,
         // but tests run passes with a fixed historical clock.
         var issues = await CollectIssuesAsync(parseWarnings, refreshParse, started, now, ct);
+        var parseIssues = issues.Count(i => i.Kind == IssueKind.Parse);
+        var enrichIssues = issues.Count(i => i.Kind == IssueKind.Enrich);
+        var qualityIssues = issues.Count(i => i.Kind == IssueKind.Quality);
 
         // The snapshot holds only the latest completed run: successful passes
         // replace it wholesale (due-only passes keep the parse rows, whose
         // source list did not change). Failed passes never reach here, so a
-        // crashed pass keeps the previous good snapshot.
-        if (refreshParse)
+        // crashed pass keeps the previous good snapshot. Without a run row
+        // (sink unavailable) the replace is skipped too: the old snapshot
+        // stays valid and no issue needs the run FK.
+        if (session.RunId is { } jobRunId)
         {
-            await db.SyncIssues.ExecuteDeleteAsync(ct);
-        }
-        else
-        {
-            await db.SyncIssues.Where(i => i.Kind != IssueKind.Parse).ExecuteDeleteAsync(ct);
+            if (refreshParse)
+            {
+                await db.SyncIssues.ExecuteDeleteAsync(ct);
+            }
+            else
+            {
+                await db.SyncIssues.Where(i => i.Kind != IssueKind.Parse).ExecuteDeleteAsync(ct);
+            }
+
+            foreach (var issue in issues)
+            {
+                issue.JobRunId = jobRunId;
+            }
+
+            db.SyncIssues.AddRange(issues);
+            await db.SaveChangesAsync(ct);
         }
 
-        var run = new SyncRun
-        {
-            StartedAt = started,
-            FinishedAt = now,
-            Trigger = trigger,
-            HeadCommit = head,
-            Added = added,
-            Updated = updated,
-            Removed = removed,
-            Failed = failed,
-            IssueCount = issues.Count,
-        };
-        db.SyncRuns.Add(run);
+        // Mirror the snapshot into the job event stream: one event per issue
+        // makes GET /v1/issues reconstructable from the run detail page.
         foreach (var issue in issues)
         {
-            issue.SyncRun = run;
+            session.Event(
+                issue.Kind == IssueKind.Enrich ? JobEventLevel.Warning : JobEventLevel.Info,
+                JobEventType.Issue,
+                issue.Message,
+                appId: issue.AppId,
+                slug: issue.Slug,
+                data: new { kind = issue.Kind.ToString(), rule = issue.Rule, location = issue.Location });
         }
 
-        db.SyncIssues.AddRange(issues);
-        await db.SaveChangesAsync(ct);
-
-        // Close the run log section, then mirror GET /v1/issues so the file
-        // carries the same post-run health snapshot.
-        _runLog.End(now, enriched, upToDate, failed);
-        _runLog.Issues(run.Id, head, issues);
+        await session.FinishAsync(
+            new JobFinish(
+                JobStatus.Succeeded,
+                Summary: $"+{added} ~{updated} -{removed}, {enriched} enriched, {upToDate} current, {failed} failed, {issues.Count} issues",
+                ItemsTotal: enriched + upToDate + failed,
+                ItemsOk: enriched,
+                ItemsSkipped: upToDate,
+                ItemsFailed: failed,
+                Reference: head,
+                Metadata: new
+                {
+                    added,
+                    updated,
+                    removed,
+                    drained = drainedIds.Count,
+                    parseWarnings = parseWarnings.Count,
+                    archivedChanged,
+                    issueCount = issues.Count,
+                    parse = parseIssues,
+                    enrich = enrichIssues,
+                    quality = qualityIssues,
+                }),
+            ct);
 
         return new SyncPassResult(trigger, head, added, updated, removed,
-            enriched, upToDate, failed, drainedIds.Count, issues.Count(i => i.Kind == IssueKind.Parse),
+            enriched, upToDate, failed, drainedIds.Count, parseIssues,
             archivedChanged, false, null)
         {
             FailedMessages = failedMessages ?? [],

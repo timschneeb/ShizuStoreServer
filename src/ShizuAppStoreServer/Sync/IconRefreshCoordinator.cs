@@ -1,4 +1,5 @@
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Sync;
@@ -31,6 +32,7 @@ public sealed class IconRefreshCoordinator(
     IServiceScopeFactory scopes,
     SyncGate gate,
     EnrichmentOptions enrichment,
+    IJobLog jobLog,
     IHostApplicationLifetime lifetime,
     ILogger<IconRefreshCoordinator> logger)
 {
@@ -103,8 +105,11 @@ public sealed class IconRefreshCoordinator(
 
     private async Task RunAsync(bool force, DateTimeOffset startedAt, CancellationTokenSource cts)
     {
+        await using var session = jobLog.Begin(new JobStart(
+            JobKind.IconRefresh, JobTrigger.Manual, startedAt, Metadata: new { force }));
         IconRefreshResult? result = null;
         string? error = null;
+        var cancelled = false;
         try
         {
             using var scope = scopes.CreateScope();
@@ -113,6 +118,7 @@ public sealed class IconRefreshCoordinator(
         }
         catch (OperationCanceledException)
         {
+            cancelled = true;
             error = "Icon refresh was cancelled.";
         }
         catch (Exception ex)
@@ -146,5 +152,19 @@ public sealed class IconRefreshCoordinator(
         logger.LogInformation(
             "Icon refresh {State}: checked={Checked} refreshed={Refreshed} current={Current} failed={Failed}",
             finished.State, finished.Checked, finished.Refreshed, finished.AlreadyCurrent, finished.Failed);
+
+        var status = cancelled ? JobStatus.Cancelled : error is not null ? JobStatus.Failed : JobStatus.Succeeded;
+        await session.FinishAsync(
+            new JobFinish(
+                status,
+                Summary: $"{finished.Checked} checked, {finished.Refreshed} refreshed, "
+                    + $"{finished.AlreadyCurrent} current, {finished.Failed} failed",
+                Error: error,
+                ItemsTotal: finished.Checked,
+                ItemsOk: finished.Refreshed,
+                ItemsSkipped: finished.AlreadyCurrent,
+                ItemsFailed: finished.Failed,
+                Metadata: new { force, errors = finished.Errors.Count }),
+            CancellationToken.None);
     }
 }

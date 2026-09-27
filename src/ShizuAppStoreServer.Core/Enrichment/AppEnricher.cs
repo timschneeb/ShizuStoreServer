@@ -9,6 +9,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Parsing;
 using ShizuAppStoreServer.Core.Sources;
 using ShizuAppStoreServer.Core.Sync;
@@ -88,15 +89,10 @@ public sealed class AppEnricher(
     IPlayStoreClient? play = null,
     IzzyStatsProvider? izzyStats = null,
     ILogger<AppEnricher>? log = null,
-    IRunLog? runLog = null,
     IRepoScreenshotResolver? repoScreenshots = null,
     ITrackerCatalog? trackers = null,
     IUsageAnalysisQueue? usageQueue = null)
 {
-    // Runtime progress lines land in the enrichment run log; without one
-    // configured the no-op instance keeps tests and library use silent.
-    private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
-
     // Special-case release homes (user calls): the GitHub projects below
     // publish no usable release assets on GitHub itself. The list links the
     // instafel source monorepo, but the updater APK ships from u-rel.
@@ -132,8 +128,8 @@ public sealed class AppEnricher(
         (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
     /// <summary>
-    /// Times an upstream feed fetch into the run log; without these lines a
-    /// stalled API call is indistinguishable from a slow download.
+    /// Times an upstream feed fetch into the job event stream; without these
+    /// lines a stalled API call is indistinguishable from a slow download.
     /// </summary>
     private async Task<T> TimedAsync<T>(string label, Func<Task<T>> action)
     {
@@ -141,12 +137,13 @@ public sealed class AppEnricher(
         try
         {
             var result = await action();
-            _runLog.Detail($"{label} {(result is null ? "304" : "ok")} in {Elapsed(started)}ms");
+            JobContext.Current?.Release($"{label} {(result is null ? "304" : "ok")} in {Elapsed(started)}ms");
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _runLog.Detail($"{label} failed after {Elapsed(started)}ms: {ex.Message}");
+            JobContext.Current?.Release(
+                $"{label} failed after {Elapsed(started)}ms: {ex.Message}", level: JobEventLevel.Warning);
             throw;
         }
     }
@@ -986,13 +983,32 @@ public sealed class AppEnricher(
             ownerById[variant.Id] = variant;
         }
 
-        var storedByUrl = new Dictionary<string, AppDownload>(StringComparer.Ordinal);
+        // Record every artifact already analyzed for this group, including twins
+        // remembered on the row's current version, so repeats never re-download.
+        var recordedByUrl = new Dictionary<string, AppDownload>(StringComparer.Ordinal);
+        var recordedShaByUrl = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var download in downloads)
         {
-            storedByUrl[download.ApkUrl] = download;
+            recordedByUrl[download.ApkUrl] = download;
+            if (download.Sha256 is { Length: > 0 } storedSha)
+            {
+                recordedShaByUrl[download.ApkUrl] = storedSha;
+            }
+
+            foreach (var entry in download.AnalyzedArtifacts)
+            {
+                var parsed = ParseArtifactEntry(entry);
+                if (parsed is null)
+                {
+                    continue;
+                }
+
+                recordedByUrl.TryAdd(parsed.Value.Url, download);
+                recordedShaByUrl.TryAdd(parsed.Value.Url, parsed.Value.Sha256);
+            }
         }
 
-        var known = storedByUrl.Keys.ToHashSet(StringComparer.Ordinal);
+        var known = recordedByUrl.Keys.ToHashSet(StringComparer.Ordinal);
 
         // The row that owns a recorded artifact, so a skipped file stamps the
         // right row (the list row or one of its variants).
@@ -1026,11 +1042,12 @@ public sealed class AppEnricher(
         // Source-declared digest match: skip the download entirely.
         bool TrySkipByChecksum(SourceAsset candidate, DateTimeOffset? releasedAt)
         {
-            if (candidate.Sha256 is not { Length: > 0 }
-                || !storedByUrl.TryGetValue(candidate.Url, out var download)
+            if (candidate.Sha256 is not { Length: > 0 } declared
+                || !recordedByUrl.TryGetValue(candidate.Url, out var download)
                 || OwnerOf(download) is not { } owner
                 || !Complete(owner, download, releasedAt)
-                || !HashMatches(download.Sha256, candidate.Sha256))
+                || !recordedShaByUrl.TryGetValue(candidate.Url, out var recordedSha)
+                || !HashMatches(recordedSha, declared))
             {
                 return false;
             }
@@ -1040,15 +1057,16 @@ public sealed class AppEnricher(
         }
 
         string? ExpectedFor(SourceAsset candidate, DateTimeOffset? releasedAt) =>
-            storedByUrl.TryGetValue(candidate.Url, out var download)
+            recordedByUrl.TryGetValue(candidate.Url, out var download)
             && OwnerOf(download) is { } owner
             && Complete(owner, download, releasedAt)
-                ? download.Sha256
+            && recordedShaByUrl.TryGetValue(candidate.Url, out var recordedSha)
+                ? recordedSha
                 : null;
 
         void StampUrl(string url, DateTimeOffset? releasedAt)
         {
-            if (storedByUrl.TryGetValue(url, out var download) && OwnerOf(download) is { } owner)
+            if (recordedByUrl.TryGetValue(url, out var download) && OwnerOf(download) is { } owner)
             {
                 Stamp(owner);
             }
@@ -1181,9 +1199,9 @@ public sealed class AppEnricher(
             var releasedAt = extra.ReleasedAt ?? releaseReleasedAt;
             if (known.Contains(extra.Url))
             {
-                var reuploaded = extra.Sha256 is { Length: > 0 }
-                    && storedByUrl.TryGetValue(extra.Url, out var recorded)
-                    && !HashMatches(recorded.Sha256, extra.Sha256);
+                var reuploaded = extra.Sha256 is { Length: > 0 } declared
+                    && recordedShaByUrl.TryGetValue(extra.Url, out var recorded)
+                    && !HashMatches(recorded, declared);
                 if (!reuploaded)
                 {
                     continue;
@@ -2314,6 +2332,56 @@ public sealed class AppEnricher(
     }
 
     /// <summary>
+    /// Records an analyzed artifact on the row so flavor twins of the same
+    /// version are skipped without another download or AI analysis. Entries are
+    /// <c>sha256 url</c>; a repeated URL replaces its checksum.
+    /// </summary>
+    private static void RememberArtifact(AppDownload row, DownloadCandidate candidate) =>
+        RememberArtifact(row, candidate.Sha256, candidate.ApkUrl);
+
+    private static void RememberArtifact(AppDownload row, string? sha, string url)
+    {
+        if (sha is not { Length: > 0 })
+        {
+            return;
+        }
+
+        row.AnalyzedArtifacts.RemoveAll(entry =>
+            ParseArtifactEntry(entry) is { } parsed && string.Equals(parsed.Url, url, StringComparison.Ordinal));
+        row.AnalyzedArtifacts.Add($"{sha} {url}");
+    }
+
+    private static (string Sha256, string Url)? ParseArtifactEntry(string entry)
+    {
+        var split = entry.IndexOf(' ');
+        return split > 0 && split < entry.Length - 1 ? (entry[..split], entry[(split + 1)..]) : null;
+    }
+
+    /// <summary>
+    /// Rank for same-version flavor twins: stable release builds beat debug,
+    /// test, beta and terminal builds; equal rank keeps the incumbent.
+    /// </summary>
+    private static int ArtifactRank(string url)
+    {
+        var name = url[(url.LastIndexOf('/') + 1)..];
+        var rank = 0;
+        if (name.Contains("release", StringComparison.OrdinalIgnoreCase))
+        {
+            rank += 2;
+        }
+
+        if (name.Contains("debug", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("test", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("beta", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("terminal", StringComparison.OrdinalIgnoreCase))
+        {
+            rank -= 2;
+        }
+
+        return rank;
+    }
+
+    /// <summary>
     /// A release newer than the one already recorded means a version bump may
     /// still be pending even when the artifact bytes match, so the checksum
     /// short-circuits must not fire.
@@ -2402,6 +2470,27 @@ public sealed class AppEnricher(
             {
                 return;
             }
+
+            // Same source and version: flavor twins (debug vs release, terminal
+            // vs full, fdroid vs plain) share the identity row. Keep the row
+            // holding the higher-ranked artifact and only remember the twin, so
+            // later passes skip it without re-downloading or re-queueing AI.
+            if (candidate.Source == row.Source
+                && candidate.VersionCode is not null
+                && candidate.VersionCode == row.VersionCode
+                && !string.Equals(candidate.ApkUrl, row.ApkUrl, StringComparison.Ordinal)
+                && ArtifactRank(candidate.ApkUrl) <= ArtifactRank(row.ApkUrl))
+            {
+                RememberArtifact(row, candidate);
+                return;
+            }
+        }
+
+        // A different version invalidates the twin memory of the old release.
+        if (candidate.VersionCode is not null && row.VersionCode is not null
+            && candidate.VersionCode != row.VersionCode)
+        {
+            row.AnalyzedArtifacts.Clear();
         }
 
         row.Source = candidate.Source;
@@ -2414,6 +2503,9 @@ public sealed class AppEnricher(
             row.PackageName = candidate.PackageName;
         }
 
+        // Keep the incumbent artifact in the memory so a heal (debug replaced
+        // by release) does not make the old twin look unanalyzed next pass.
+        RememberArtifact(row, row.Sha256, row.ApkUrl);
         row.ApkUrl = candidate.ApkUrl;
         row.ArchiveEntry = candidate.ArchiveEntry;
         row.VersionCode = candidate.VersionCode;
@@ -2479,6 +2571,7 @@ public sealed class AppEnricher(
 
         row.Abi = candidate.Abi;
         row.ResolvedAt = now;
+        RememberArtifact(row, candidate);
 
         if (usageQueue is not null && (apkChanged || (firstAnalysis && app.UsageAnalyzedAt is null)))
         {
@@ -3286,7 +3379,7 @@ public sealed class AppEnricher(
 
         if (expectedSha256 is not null && HashMatches(artifactSha256, expectedSha256))
         {
-            _runLog.Detail($"analyze {label} unchanged, hashed {artifactSize}B in {Elapsed(started)}ms");
+            JobContext.Current?.Analyze($"analyze {label} unchanged, hashed {artifactSize}B in {Elapsed(started)}ms");
             return new ArtifactResult(null, true, null);
         }
 
@@ -3309,7 +3402,7 @@ public sealed class AppEnricher(
         var inspection = await InspectApkAsync(apkPath, badging, ct);
         var iconStarted = Stopwatch.GetTimestamp();
         var icon = await ResolveIconAsync(badging, apkPath, ct);
-        _runLog.Detail($"analyze {label} badging {Elapsed(badgingStarted)}ms, "
+        JobContext.Current?.Analyze($"analyze {label} badging {Elapsed(badgingStarted)}ms, "
             + $"signers {Elapsed(signerStarted)}ms, signals {Elapsed(signalsStarted)}ms, "
             + $"icon {Elapsed(iconStarted)}ms, total {Elapsed(started)}ms");
 
@@ -3344,7 +3437,7 @@ public sealed class AppEnricher(
             }
         }
 
-        _runLog.Detail($"inspect {Path.GetFileName(apkPath)} dhizuku={signals.DhizukuDeclared} "
+        JobContext.Current?.Analyze($"inspect {Path.GetFileName(apkPath)} dhizuku={signals.DhizukuDeclared} "
             + $"trackers={hits.Count} in {Elapsed(started)}ms");
         return new ApkInspection(signals, hits);
     }
@@ -3789,17 +3882,20 @@ public sealed class AppEnricher(
     private async Task DownloadAsync(string url, string tempApk, CancellationToken ct)
     {
         var started = Stopwatch.GetTimestamp();
-        _runLog.Detail($"download start {url}");
+        JobContext.Current?.Download($"download start {url}", new { url });
         using var response = await downloads.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!response.IsSuccessStatusCode)
         {
-            _runLog.Detail($"download failed HTTP {(int)response.StatusCode} after {Elapsed(started)}ms");
+            JobContext.Current?.Download(
+                $"download failed HTTP {(int)response.StatusCode} after {Elapsed(started)}ms",
+                new { url, status = (int)response.StatusCode }, JobEventLevel.Warning);
             throw new HttpRequestException($"HTTP {(int)response.StatusCode} for {url}.");
         }
 
         await using var file = File.Create(tempApk);
         await response.Content.CopyToAsync(file, ct);
-        _runLog.Detail($"download done {file.Length}B in {Elapsed(started)}ms");
+        JobContext.Current?.Download(
+            $"download done {file.Length}B in {Elapsed(started)}ms", new { url, bytes = file.Length });
     }
 
     /// <summary>

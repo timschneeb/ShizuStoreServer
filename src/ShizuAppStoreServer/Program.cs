@@ -11,9 +11,11 @@ using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.History;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sources;
 using ShizuAppStoreServer.Core.Sync;
 using ShizuAppStoreServer.Core.UsageAnalysis;
+using ShizuAppStoreServer.Jobs;
 using ShizuAppStoreServer.Sync;
 using ShizuAppStoreServer.Tracking;
 
@@ -142,8 +144,7 @@ builder.Services.AddSingleton<IzzyStatsProvider>();
 builder.Services.AddHttpClient("exodus-trackers", client => client.Timeout = TimeSpan.FromSeconds(60));
 builder.Services.AddSingleton<ITrackerCatalog>(sp => new ExodusTrackerCatalog(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("exodus-trackers"),
-    enrichment,
-    sp.GetRequiredService<IRunLog>()));
+    enrichment));
 builder.Services.AddHttpClient("apk-download", client =>
 {
     client.Timeout = enrichment.DownloadTimeout;
@@ -169,7 +170,7 @@ var renderScope = enrichment.IconRenderScope
 builder.Services.AddSingleton<IPaparazziRenderer>(sp => new PaparazziRenderer(
     enrichment.GradlePath, enrichment.IconToolDir, enrichment.PaparazziTimeout,
     enrichment.IconRenderCpuAffinity, sp.GetRequiredService<ILogger<PaparazziRenderer>>(),
-    sp.GetRequiredService<IRunLog>(), renderScope));
+    renderScope));
 builder.Services.AddSingleton<ILauncherIconService, LauncherIconService>();
 builder.Services.AddSingleton<IGitRunner>(_ => new GitProcessRunner(enrichment.GitPath));
 builder.Services.AddSingleton<IRepoScreenshotResolver>(sp => new RepoScreenshotResolver(
@@ -204,7 +205,6 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IPlayStoreClient>(),
     sp.GetRequiredService<IzzyStatsProvider>(),
     sp.GetRequiredService<ILogger<AppEnricher>>(),
-    sp.GetRequiredService<IRunLog>(),
     sp.GetRequiredService<IRepoScreenshotResolver>(),
     sp.GetRequiredService<ITrackerCatalog>(),
     sp.GetRequiredService<IUsageAnalysisQueue>()));
@@ -216,10 +216,21 @@ builder.Services.AddSingleton(syncOptions);
 builder.Services.AddSingleton<GitHistoryService>();
 builder.Services.AddScoped<CatalogUpserter>();
 builder.Services.AddScoped<IReleasePoller, ReleasePoller>();
-// Opt-in human-readable run log (one section per pass, one line per app).
-builder.Services.AddSingleton<IRunLog>(sp => string.IsNullOrWhiteSpace(enrichment.RunLogPath)
-    ? NullRunLog.Instance
-    : new FileRunLog(enrichment.RunLogPath, sp.GetRequiredService<ILogger<FileRunLog>>()));
+// Job log: run rows plus the ordered event stream in Postgres (the stats
+// dashboard reads both). The optional file sink writes the same stream as a
+// human-readable second copy; the DB sink is first so run ids come from it.
+var jobLogOptions = builder.Configuration.GetSection("Jobs").Get<JobLogOptions>() ?? new();
+builder.Services.AddSingleton(jobLogOptions);
+builder.Services.AddSingleton<DbJobSink>();
+builder.Services.AddSingleton<IJobSink>(sp => sp.GetRequiredService<DbJobSink>());
+if (!string.IsNullOrWhiteSpace(enrichment.RunLogPath))
+{
+    builder.Services.AddSingleton<IJobSink>(sp => new FileJobSink(
+        enrichment.RunLogPath, sp.GetRequiredService<ILogger<FileJobSink>>()));
+}
+
+builder.Services.AddSingleton<IJobLog>(sp => new JobLog([.. sp.GetServices<IJobSink>()]));
+builder.Services.AddHostedService<JobLogWorker>();
 builder.Services.AddScoped<SyncService>();
 builder.Services.AddScoped<IEnrichmentRunner, EnrichmentRunner>();
 builder.Services.AddSingleton<SyncGate>();
@@ -344,17 +355,45 @@ if (args.Contains("--refresh-icons"))
     using var refreshScope = app.Services.CreateScope();
     var refresher = refreshScope.ServiceProvider.GetRequiredService<SyncService>();
     var refreshForce = args.Contains("--force");
-    var refresh = await refresher.RefreshIconsAsync(app.Lifetime.ApplicationStopping, refreshForce);
-    app.Logger.LogInformation(
-        "Icon refresh done{Force}: {Checked} checked, {Refreshed} refreshed, {Current} already current, {Failed} failed.",
-        refreshForce ? " (forced)" : "",
-        refresh.Checked, refresh.Refreshed, refresh.AlreadyCurrent, refresh.Failed);
-    foreach (var error in refresh.Errors.Take(20))
-    {
-        app.Logger.LogWarning("Icon refresh failure: {Error}", error);
-    }
 
-    return refresh.Failed > 0 ? 1 : 0;
+    // One-shots exit before the workers start, so the hosted flush worker is
+    // not running: pump the DB sink here or events would never be persisted.
+    // The session wraps the call so this run gets its own job row.
+    var refreshPumpCts = CancellationTokenSource.CreateLinkedTokenSource(app.Lifetime.ApplicationStopping);
+    var refreshPump = app.Services.GetRequiredService<DbJobSink>().RunAsync(refreshPumpCts.Token);
+    try
+    {
+        await using var refreshSession = app.Services.GetRequiredService<IJobLog>().Begin(new JobStart(
+            JobKind.IconRefresh, JobTrigger.Cli, DateTimeOffset.UtcNow, Metadata: new { force = refreshForce }));
+        var refresh = await refresher.RefreshIconsAsync(app.Lifetime.ApplicationStopping, refreshForce);
+        app.Logger.LogInformation(
+            "Icon refresh done{Force}: {Checked} checked, {Refreshed} refreshed, {Current} already current, {Failed} failed.",
+            refreshForce ? " (forced)" : "",
+            refresh.Checked, refresh.Refreshed, refresh.AlreadyCurrent, refresh.Failed);
+        foreach (var error in refresh.Errors.Take(20))
+        {
+            app.Logger.LogWarning("Icon refresh failure: {Error}", error);
+        }
+
+        await refreshSession.FinishAsync(new JobFinish(
+            JobStatus.Succeeded,
+            Summary: $"{refresh.Checked} checked, {refresh.Refreshed} refreshed, "
+                + $"{refresh.AlreadyCurrent} current, {refresh.Failed} failed",
+            ItemsTotal: refresh.Checked,
+            ItemsOk: refresh.Refreshed,
+            ItemsSkipped: refresh.AlreadyCurrent,
+            ItemsFailed: refresh.Failed,
+            Metadata: new { force = refreshForce, errors = refresh.Errors.Count }),
+            CancellationToken.None);
+
+        return refresh.Failed > 0 ? 1 : 0;
+    }
+    finally
+    {
+        refreshPumpCts.Cancel();
+        await refreshPump;
+        refreshPumpCts.Dispose();
+    }
 }
 
 // One-shot sync pass, for operator runs that must not wait for the nightly.
@@ -370,23 +409,36 @@ if (args.Contains("--sync-once"))
         enrichment.SkipApkAnalysis = true;
     }
 
-    using var syncScope = app.Services.CreateScope();
-    var sync = syncScope.ServiceProvider.GetRequiredService<SyncService>();
-    var syncResult = await sync.RunAsync(
-        "manual", syncFull, DateTimeOffset.UtcNow, app.Lifetime.ApplicationStopping);
-    app.Logger.LogInformation(
-        "Manual sync done ({Mode}{SkipApk}): added={Added} updated={Updated} removed={Removed} enriched={Enriched} upToDate={UpToDate} failed={Failed} warnings={Warnings} skipped={Skipped} head={Head}",
-        syncFull ? "full" : "fast",
-        enrichment.SkipApkAnalysis ? ", skip-apk" : "",
-        syncResult.Added, syncResult.Updated, syncResult.Removed, syncResult.Enriched,
-        syncResult.UpToDate, syncResult.Failed, syncResult.ParseWarnings, syncResult.Skipped,
-        syncResult.HeadCommit ?? "(none)");
-    foreach (var failure in syncResult.FailedMessages.Take(20))
+    // Pump the job-log sink while this process owns the run; the hosted
+    // flush worker only starts with the web host, which one-shots never run.
+    var syncPumpCts = CancellationTokenSource.CreateLinkedTokenSource(app.Lifetime.ApplicationStopping);
+    var syncPump = app.Services.GetRequiredService<DbJobSink>().RunAsync(syncPumpCts.Token);
+    try
     {
-        app.Logger.LogWarning("Manual sync failure: {Failure}", failure);
-    }
+        using var syncScope = app.Services.CreateScope();
+        var sync = syncScope.ServiceProvider.GetRequiredService<SyncService>();
+        var syncResult = await sync.RunAsync(
+            "cli", syncFull, DateTimeOffset.UtcNow, app.Lifetime.ApplicationStopping);
+        app.Logger.LogInformation(
+            "Manual sync done ({Mode}{SkipApk}): added={Added} updated={Updated} removed={Removed} enriched={Enriched} upToDate={UpToDate} failed={Failed} warnings={Warnings} skipped={Skipped} head={Head}",
+            syncFull ? "full" : "fast",
+            enrichment.SkipApkAnalysis ? ", skip-apk" : "",
+            syncResult.Added, syncResult.Updated, syncResult.Removed, syncResult.Enriched,
+            syncResult.UpToDate, syncResult.Failed, syncResult.ParseWarnings, syncResult.Skipped,
+            syncResult.HeadCommit ?? "(none)");
+        foreach (var failure in syncResult.FailedMessages.Take(20))
+        {
+            app.Logger.LogWarning("Manual sync failure: {Failure}", failure);
+        }
 
-    return syncResult.Failed > 0 ? 1 : 0;
+        return syncResult.Failed > 0 ? 1 : 0;
+    }
+    finally
+    {
+        syncPumpCts.Cancel();
+        await syncPump;
+        syncPumpCts.Dispose();
+    }
 }
 
 // Re-render stored analysis transcripts after a renderer change:

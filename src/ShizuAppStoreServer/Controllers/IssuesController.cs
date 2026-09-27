@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 
 namespace ShizuAppStoreServer.Controllers;
 
@@ -53,7 +54,8 @@ public sealed class IssuesController(ShizuDbContext db) : ControllerBase
 
         pageSize = Math.Clamp(pageSize, 1, MaxPageSize);
 
-        var run = await db.SyncRuns.AsNoTracking()
+        var run = await db.JobRuns.AsNoTracking()
+            .Where(r => r.Kind == JobKind.Sync)
             .OrderByDescending(r => r.Id)
             .FirstOrDefaultAsync(ct);
         var all = await db.SyncIssues.AsNoTracking().ToListAsync(ct);
@@ -105,7 +107,7 @@ public sealed class IssuesController(ShizuDbContext db) : ControllerBase
 
         return Ok(new IssuesDto(
             run?.Id,
-            run?.HeadCommit,
+            run?.Reference,
             DateTimeOffset.UtcNow,
             summary,
             items,

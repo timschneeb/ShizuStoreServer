@@ -170,9 +170,10 @@ Consequences for app developers:
 - A public GitHub or GitLab repository linked from the list entry (or the
   `source_url`) is required. Apps without one show no usage section; there is
   no marker-based fallback text anymore.
-- Only direct-APK entries are analyzed. Play-redirect and link-only entries
-  show no usage report, and a report is kept if an entry stops being
-  direct-APK after it was written.
+- Only direct-APK entries are analyzed, root and variant rows alike: each
+  app row gets its own report, refreshed when its own artifact changes.
+  Play-redirect and link-only entries show no usage report, and a report is
+  kept if an entry stops being direct-APK after it was written.
 - Keep release tags matching the version name (for example `v1.2.3`) so the
   analysis can be pinned to the released code instead of the branch head.
 - The report is generated once per app and then only for new releases, and it

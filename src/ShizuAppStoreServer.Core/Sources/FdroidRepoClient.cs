@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;
 
 namespace ShizuAppStoreServer.Core.Sources;
@@ -11,10 +12,8 @@ namespace ShizuAppStoreServer.Core.Sources;
 /// stub the handler; parsing + caching live in
 /// <see cref="FdroidIndexV2Parser"/> and <see cref="FdroidIndexProvider"/>.
 /// </summary>
-public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
+public sealed class FdroidRepoClient(HttpClient http)
 {
-    private readonly IRunLog _runLog = runLog ?? NullRunLog.Instance;
-
     private static long Elapsed(long started) =>
         (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -52,7 +51,7 @@ public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
                 throw;
             }
 
-            _runLog.Detail($"{label} falling back to {fallback}: {ex.Message}");
+            JobContext.Current?.Release($"{label} falling back to {fallback}: {ex.Message}");
             return await FetchFromBaseAsync(fallback, file, label, errorPrefix, etag, ct);
         }
     }
@@ -63,7 +62,7 @@ public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
     {
         var url = $"{repoBase.TrimEnd('/')}/{file}";
         var started = Stopwatch.GetTimestamp();
-        _runLog.Detail($"{label} start {url}");
+        JobContext.Current?.Release($"{label} start {url}");
         for (var attempt = 1; ; attempt++)
         {
             var last = attempt == MaxAttempts;
@@ -89,7 +88,7 @@ public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
                     request, HttpCompletionOption.ResponseHeadersRead, attemptToken);
                 if (response.StatusCode == HttpStatusCode.NotModified)
                 {
-                    _runLog.Detail($"{label} {url} 304 in {Elapsed(started)}ms");
+                    JobContext.Current?.Release($"{label} {url} 304 in {Elapsed(started)}ms");
                     return null;
                 }
 
@@ -97,20 +96,21 @@ public sealed class FdroidRepoClient(HttpClient http, IRunLog? runLog = null)
                 if (response.IsSuccessStatusCode)
                 {
                     var bytes = await response.Content.ReadAsByteArrayAsync(attemptToken);
-                    _runLog.Detail($"{label} done {bytes.Length}B in {Elapsed(started)}ms");
+                    JobContext.Current?.Release($"{label} done {bytes.Length}B in {Elapsed(started)}ms");
                     return (response.Headers.ETag?.ToString(), bytes);
                 }
             }
             catch (Exception ex) when (!last
                 && ex is (OperationCanceledException or IOException or HttpRequestException))
             {
-                _runLog.Detail($"{label} {url} attempt {attempt}/{MaxAttempts} gave up after "
+                JobContext.Current?.Release($"{label} {url} attempt {attempt}/{MaxAttempts} gave up after "
                     + $"{Elapsed(attemptStarted)}ms, retrying");
                 continue;
             }
 
             // Non-success status: fail fast, a retry cannot fix a 404.
-            _runLog.Detail($"{label} {url} HTTP {statusCode} after {Elapsed(started)}ms");
+            JobContext.Current?.Release(
+                $"{label} {url} HTTP {statusCode} after {Elapsed(started)}ms", level: JobEventLevel.Warning);
             throw new HttpRequestException($"{errorPrefix} {url} answered HTTP {statusCode}.");
         }
     }

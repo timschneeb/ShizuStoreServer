@@ -1,17 +1,16 @@
 <!-- Sync Impact Report (scratch; remove before commit):
-  - Version change: 1.1.0 → 1.2.0 (principle text narrowed; MINOR per semver policy)
-  - Modified principles: V. Simplicity and Explicit Boundaries (removed the
-    "Prefer flat, explicit schema and code over abstraction" clause so shared
-    source abstractions are permitted; degradation clause retained verbatim)
+  - Version change: 1.2.0 → 1.3.0 (principle text narrowed; MINOR per semver policy)
+  - Modified principles: IV. Data Integrity and Closure (a Skipped pass now
+    writes a job-run bookkeeping row; the no-app-mutation guarantee is kept)
   - Added sections: none
   - Removed sections: none
-  - Rationale: enrichment repeated the same release/asset/ABI pipeline per
-    source. A shared source abstraction removes that duplication without
-    changing the boundaries the rest of the principle protects
-    (constructor-injected interfaces, no ASP.NET in `Core`, visible
-    degradation).
-  - Follow-up TODOs: none. Note: pre-existing em-dashes in code/docs outside this file
-    are out of scope for this command and remain for a separate cleanup pass.
+  - Rationale: the job log persists one run row per job (sync pass, icon or
+    screenshot refresh, usage analysis) so operators can browse what happened
+    and why from ShizuAppStoreStats. A skipped pass writing its bookkeeping
+    row keeps the run cadence visible without touching the catalog, which is
+    what the original clause protected; the bookkeeping lives in the job-log
+    sinks' own scope, never in the pass scope's final save.
+  - Follow-up TODOs: none.
 -->
 # ShizuAppStoreServer Constitution
 
@@ -55,8 +54,10 @@ the toolchain must fail.
 is `(listing, url, category)`; `apps.url` is never a key. Every
 delete path writes a tombstone and every re-add path clears it, or
 `/v1/changes removed[]` drifts. The sync worker makes no app
-mutations after the upsert save (final save = requests + run row
-only). A `Skipped` pass writes nothing. Emptiness is meaningful
+mutations after the upsert save (final pass-scope save = requests +
+issues only; job bookkeeping is written by the job-log sinks in their
+own scope). A `Skipped` pass makes no catalog or app mutations and
+writes only its bookkeeping row. Emptiness is meaningful
 (an emptied `ARCHIVED.md` still un-marks). Backfill windows are
 client-side and documented where the provider forces them.
 
@@ -121,4 +122,4 @@ recorded in HANDOFF decisions, not silently adopted. Runtime
 guidance lives in `docs/SPEC.md`; this document governs, it does
 not re-specify.
 
-**Version**: 1.2.0 | **Ratified**: 2026-09-12 | **Last Amended**: 2026-09-15
+**Version**: 1.3.0 | **Ratified**: 2026-09-12 | **Last Amended**: 2026-09-26

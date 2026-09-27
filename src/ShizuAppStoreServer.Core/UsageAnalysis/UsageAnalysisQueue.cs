@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Jobs;
 
 namespace ShizuAppStoreServer.Core.UsageAnalysis;
 
@@ -9,7 +10,9 @@ namespace ShizuAppStoreServer.Core.UsageAnalysis;
 /// Puts AI source analysis on the work queue. Enqueue policy: only apps that
 /// have never been analyzed, or whose artifact changed (new release). Routine
 /// enrichment passes therefore never re-analyze an unchanged app, and the
-/// initial catalog is populated through the explicit admin backfill.
+/// initial catalog is populated through the explicit admin backfill. Root and
+/// variant app rows are analyzed on their own, so a variant release refreshes
+/// the variant report.
 /// </summary>
 public interface IUsageAnalysisQueue
 {
@@ -66,11 +69,15 @@ public sealed class UsageAnalysisQueue(
         {
             AppId = app.Id,
             Status = UsageAnalysisStatus.Pending,
+            Trigger = JobTrigger.Auto,
             PromptVersion = options.PromptVersion,
             CreatedAt = now,
             NextAttemptAt = now,
         });
         _queuedThisScope.Add(app.Id);
+        JobContext.Current?.Decision(
+            $"usage analysis queued for {app.Slug}",
+            new { appId = app.Id, artifactChanged, firstAnalysis });
         log?.LogDebug("Usage analysis queued for {Slug} (artifactChanged={Changed}, firstAnalysis={First}).",
             app.Slug, artifactChanged, firstAnalysis);
         return true;
@@ -85,7 +92,7 @@ public sealed class UsageAnalysisQueue(
         }
 
         var query = db.Apps
-            .Where(a => a.RootAppId == null && a.Availability != Availability.Excluded);
+            .Where(a => a.Availability != Availability.Excluded);
         if (!string.IsNullOrWhiteSpace(slug))
         {
             query = query.Where(a => a.Slug == slug);
@@ -137,6 +144,7 @@ public sealed class UsageAnalysisQueue(
             {
                 AppId = app.Id,
                 Status = UsageAnalysisStatus.Pending,
+                Trigger = JobTrigger.Backfill,
                 PromptVersion = options.PromptVersion,
                 CreatedAt = now,
                 NextAttemptAt = now,
@@ -155,10 +163,9 @@ public sealed class UsageAnalysisQueue(
         return added;
     }
 
-    /// <summary>Root, direct-APK app with a GitHub/GitLab repo to read.</summary>
+    /// <summary>Direct-APK app (root or variant) with a GitHub/GitLab repo to read.</summary>
     private static bool IsEligible(App app) =>
         app.Id != 0
-        && app.RootAppId is null
         && app.Availability == Availability.DirectApk
         && RepoScreenshotResolver.TryParseRepo(app.Url, app.SourceUrl, out _);
 }

@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.UsageAnalysis;
 
 namespace ShizuAppStoreServer.Core.Tests;
@@ -87,7 +88,7 @@ public sealed class UsageAnalysisQueueTests : IDisposable
     }
 
     [Fact]
-    public async Task EnqueueSkipsExcludedAndVariantRows()
+    public async Task EnqueueSkipsExcludedRowsButAllowsVariants()
     {
         var excluded = NewApp("excluded");
         excluded.Availability = Availability.Excluded;
@@ -98,8 +99,44 @@ public sealed class UsageAnalysisQueueTests : IDisposable
         var queue = new UsageAnalysisQueue(_db, _options);
 
         Assert.False(await queue.EnqueueAsync(excluded, artifactChanged: true, firstAnalysis: false));
+        Assert.True(await queue.EnqueueAsync(variant, artifactChanged: true, firstAnalysis: false));
+        await _db.SaveChangesAsync();
+        var run = Assert.Single(_db.UsageAnalysisRuns);
+        Assert.Equal(variant.Id, run.AppId);
+        Assert.Equal(JobTrigger.Auto, run.Trigger);
+    }
+
+    [Fact]
+    public async Task EnqueueSkipsVariantsWithoutAnalyzableRepo()
+    {
+        var root = NewApp("root");
+        var variant = NewApp("variant", "https://example.com/download");
+        variant.RootAppId = root.Id;
+        _db.SaveChanges();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
         Assert.False(await queue.EnqueueAsync(variant, artifactChanged: true, firstAnalysis: false));
         Assert.Empty(_db.UsageAnalysisRuns);
+    }
+
+    [Fact]
+    public async Task BackfillQueuesMissingVariants()
+    {
+        var root = NewApp("root");
+        root.UsageAnalyzedAt = DateTimeOffset.UtcNow;
+        root.UsagePromptVersion = _options.PromptVersion;
+        root.UsageAnalysisVersion = _options.AnalysisVersion;
+        var variant = NewApp("variant");
+        variant.RootAppId = root.Id;
+        _db.SaveChanges();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        var added = await queue.BackfillAsync(onlyMissing: true, includeStale: false, force: false, slug: null, limit: null);
+
+        Assert.Equal(1, added);
+        var run = Assert.Single(_db.UsageAnalysisRuns);
+        Assert.Equal(variant.Id, run.AppId);
+        Assert.Equal(JobTrigger.Backfill, run.Trigger);
     }
 
     [Fact]

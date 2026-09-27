@@ -293,7 +293,8 @@ bundle` is rebuilt per deploy, never committed.
     downloading anything.
 - **usage_analysis_runs** - one row per AI source-analysis attempt and
   the work queue for the analyzer (`app_id` FK cascade, `status`
-  (`Pending|Running|Succeeded|Failed`), `attempts`, `repo_forge`,
+  (`Pending|Running|Succeeded|Failed`), `trigger` (`Auto` on APK
+  change, `Backfill` from the admin API), `attempts`, `repo_forge`,
   `repo_commit`, `repo_ref`, `model`, `prompt_version`, `error`,
   `log_file`, `input_tokens`, `cached_input_tokens`, `output_tokens`,
   `cost_usd`, `tool_calls`, `created_at`, `started_at`, `finished_at`,
@@ -310,18 +311,36 @@ bundle` is rebuilt per deploy, never committed.
   single pass, and a duplicate insert would violate
   `IX_app_versions_app_id_version_code` and roll back the whole
   enrich.
-- **sync_runs** - audit log of passes: `trigger`, `head_commit`,
-  per-bucket counts (added/updated/removed/enriched/up-to-date/
-  failed, drained requests, parse warnings, archived changes),
-  `issue_count` (rows in the health snapshot this pass wrote),
-  `skipped` flag, `error`. A `Skipped` pass
-  writes **no row** (clean audit log, not a heartbeat table).
-- **sync_issues** - current catalog health snapshot: `sync_run_id`
-  (FK cascade), `kind` (`parse|enrich|quality`), `rule`, `app_id`
-  (nullable, set null on delete), `slug`, `message`, `location`
-  (parser context, parse rows only), `created_at`. Holds only the
-  latest completed run: successful passes replace all rows, skipped
-  and failed passes leave the previous good snapshot in place.
+- **job_runs** - one row per job run of any kind: `kind`
+  (`Sync|IconRefresh|ScreenshotRefresh|UsageAnalysis`), `trigger`
+  (`Startup|Scheduled|Nightly|Webhook|Manual|Cli|Backfill|Auto`),
+  `status` (`Running|Succeeded|Failed|Skipped|Cancelled|Interrupted`),
+  `started_at` plus `started_day` (UTC date for SQL-side filters),
+  `finished_at`, `duration_ms`, `reference` (HEAD commit for sync
+  passes, repo commit for analyses), item counts (`items_total`/`ok`/
+  `skipped`/`failed`), `events_count`/`events_dropped`, `summary`,
+  `error`, a `metadata` `jsonb` object (per-bucket counts, parse/
+  enrich/quality issue counts, and similar run-specific values) and
+  an optional `usage_analysis_run_id` (set null on delete). A
+  `Skipped` pass writes a bookkeeping row and nothing else, so the
+  cadence stays visible without a catalog mutation. Rows are kept
+  indefinitely.
+- **job_events** - the per-run event stream behind a `job_run_id`
+  (FK cascade): `seq` (per-run order, unique with the run), `at`,
+  `level` (`Debug|Info|Warning|Error`), `type` (`Phase|App|Decision|
+  Download|Analyze|Release|Render|Poll|Issue|AiSnapshot|AiModelCall|
+  AiToolCall|AiValidation|AiResult|Error`), optional `phase`, `app_id`
+  (nullable, set null on delete), `slug`, `message`, a `data` `jsonb`
+  object and `duration_ms`. Written asynchronously through a bounded
+  buffer (overflow increments `events_dropped`); kept indefinitely.
+  See §7.3 for the writer behavior and the optional file mirror.
+- **sync_issues** - current catalog health snapshot: `job_run_id`
+  (FK cascade to `job_runs`), `kind` (`parse|enrich|quality`), `rule`,
+  `app_id` (nullable, set null on delete), `slug`, `message`,
+  `location` (parser context, parse rows only), `created_at`. Holds
+  only the latest completed run: successful passes replace all rows,
+  skipped and failed passes leave the previous good snapshot in
+  place.
 - **sync_requests** - webhook queue (`reason`, `processed`); rows
   are marked processed only on pass success, so a failed pass never
   loses its trigger.
@@ -727,7 +746,9 @@ stay `UpToDate` (missing files are still rewritten), changed
 renders adopt the new hash. `--force` additionally recounts
 identical renders as refreshed, which surfaces self-consistent
 wrong files (e.g. two swapped icons whose hashes matched their
-rows). It writes no `sync_runs` row. The CLI form runs as a second process
+rows). It records one `job_runs` row (`kind=IconRefresh`, `trigger=Cli`
+for the one-shot, `Manual` for the admin endpoint) with its event stream;
+the catalog cursor ignores it (§7.3). The CLI form runs as a second process
 and must not overlap a live server (both write `apps` and share the Gradle
 tool dir); to heal a running deployment use
 `POST /v1/admin/refresh-icons`, which runs the same work inside the server
@@ -904,9 +925,11 @@ marker scanning survives only as internal context extraction.
 - Queue policy: a run is queued when a build is first analyzed, when a new
   APK artifact appears, or through the admin backfill. Routine fast and
   nightly passes never re-analyze an unchanged app. Only `DirectApk` rows
-  are eligible; Play-redirect, link-only and excluded rows are never
-  analyzed. A row that becomes `DirectApk` later is analyzed on its first
-  checksum, and existing reports are kept, not deleted.
+  are eligible, root and variant alike: each app row carries its own report,
+  and a variant release refreshes the variant's report. Play-redirect,
+  link-only and excluded rows are never analyzed. A row that becomes
+  `DirectApk` later is analyzed on its first checksum, and existing reports
+  are kept, not deleted.
 - Source revision: the repo is resolved from the list URL/source URL. The
   checkout prefers the release the served artifact came from: the
   `release_tag` recorded at enrichment, else the tag parsed from the
@@ -1093,8 +1116,8 @@ different signatures.
 ## 7. Sync engine
 
 `SyncService.RunAsync` wraps everything: any non-cancellation
-exception clears the change tracker and lands as an error `SyncRun`
-row. A pass:
+exception clears the change tracker and closes the run as
+`status=Failed` with the error in `error` (§7.3). A pass:
 
 1. Drains unprocessed `sync_requests` (any rows → trigger
    `"webhook"`; marked processed only on success).
@@ -1106,8 +1129,9 @@ row. A pass:
    dirty tree) deletes the clone and re-clones it from origin.
 3. Compares HEAD against the latest run's commit: unchanged HEAD +
    no requests + no `force` → enrich due-only apps plus
-   poll-changed apps (forced) and write the row, or return
-   `Skipped` (no row) when neither has anything.
+   poll-changed apps (forced) and close the run, or record a
+   `status=Skipped` bookkeeping row (no app mutations) when neither
+   has anything.
 4. Else full pass: read + parse `README.md` (Apps section) →
    history → upsert (the empty closed doc sweeps stale listings) →
    `ARCHIVED.md` → enrich selection (full re-check: all
@@ -1115,9 +1139,11 @@ row. A pass:
    window plus poll-changed extras, forced) fanned out per-app through `BulkEnricher` with
    `IEnrichmentRunner` (fresh scope per app, persists its own
    save; vanished rows count `Failed`) → mark requests processed +
-   write the run row plus the health snapshot (§7.1). No app mutations
-   happen after the upsert save, so the final save writes only
-   requests + run + issues.
+   write the health snapshot (§7.1) and close the run. No app
+   mutations happen after the upsert save, so the final pass-scope
+   save writes only requests + issues; the `job_runs`/`job_events`
+   bookkeeping is written by the job-log sinks in their own scope
+   (§7.3).
 
 ### 7.1 Health snapshot (`sync_issues`, served by `GET /v1/issues`)
 
@@ -1133,9 +1159,10 @@ never checked, and a variant shares its root's check freshness because
 the root's completed pass stamps the whole variant group). Due-only
 passes (HEAD unchanged) keep the previous
 parse rows and refresh only enrich + quality rows. Skipped and failed
-passes write no issues, so a crashed pass keeps the last good snapshot.
-Staleness is evaluated against the pass clock. The run row records the
-snapshot size in `issue_count`.
+passes write no issues (a skipped pass still records its bookkeeping
+row), so a crashed pass keeps the last good snapshot. Staleness is
+evaluated against the pass clock. The run `metadata` records the
+snapshot size and the per-kind counts.
 
 Workers (`Web/Sync/`): `SyncWorker` runs one pass at startup
 (`RunOnStartup`, the first-boot backfill) then ticks on a
@@ -1170,38 +1197,65 @@ the pass to due-only enrichment. The poll needs a GitHub PAT
 (anonymous limits cover 60 calls/hr); without one it stays off
 with a startup warning and fast passes enrich due-only apps.
 
-### 7.3 Enrichment run log (`Core/Sync/RunLog.cs`)
+### 7.3 Job log (`job_runs` + `job_events`, optional file sink)
 
-Opt-in append-only human-readable log (`Enrichment:RunLogPath`;
-null writes nothing, which keeps tests side-effect free). Every
-sync pass writes one clearly separated section: a header
-(`===== run <utc> | trigger=scheduled|nightly|webhook |
-mode=full|due | apps=N =====`), then one line per scanned app as it
-finishes, streamed through `BulkEnricher`'s `onResult` hook, then a
-totals footer (`ok`/`skip`/`fail` plus duration), then the same
-catalog health snapshot that `GET /v1/issues` serves (issue counts
-by kind, then one line per issue). An app line is
-`[ 12/315] slug (Display Name)  OK|ok|skip|excluded|FAIL  detail`;
-the detail carries the failure message or the `EnrichResult.Detail`
-skip reason (for example `APK unchanged, analysis skipped`, `within
-recheck window`, `release feed not modified`, `asset URL
-unchanged`, `index not modified`). Between app lines the log also
-carries timestamped detail lines for slow actions, so a pass that
-stalls can be attributed: `download start <url>` /
-`download done <bytes>B in <ms>ms`, `analyze <apk> unchanged,
-hashed <bytes>B in <ms>ms` or `analyze <apk> badging Xms,
-signers Yms, icon Zms, total Tms`, `github|gitlab|gitcode release
-list <target> ok|304|failed in <ms>ms`, `render <drawable>
-start|done|salvaged|failed in <ms>ms`, `batch render N icons
-start|done x/N in <ms>ms` (once per chunk), and `gradle --stop done
-after refresh (exit N)` when the post-refresh daemon stop ran. A pass that finds nothing due
-writes a single `nothing due` line so the cadence stays visible,
-and a crashed pass writes a `pass failed: <msg>` line. File IO
-failures are warned once and never fail the pass. The log rotates
-at run boundaries once the file reaches `maxBytes` (default 1 MiB):
-the active file is moved to `<path>.1` (overwriting the previous
-`.1`) and a fresh active file starts, so exactly two files are kept
-and every section stays whole.
+Every job opens a session that streams events into the sinks and closes
+the `job_runs` row: sync passes (`Core/Sync/SyncService`), icon and
+screenshot refreshes (the Web coordinators and their CLI one-shots) and
+each usage-analysis attempt (`Core/UsageAnalysis/UsageAnalysisRunner`).
+A skipped sync pass opens no session and writes only its `Skipped`
+bookkeeping row. The session is ambient (an `AsyncLocal` on
+`Core/Jobs/JobContext`), so low-level code logs without threaded
+parameters; the helpers are null-safe, so a job that runs without a
+session (tests, library use) stays silent.
+
+Two sinks fan out in registration order, and the session's `RunId` is
+the first non-null id (the DB sink registers first):
+
+- **DB sink** (`Web/Jobs/DbJobSink` + `JobLogWorker`): inserts the
+  `Running` row when the session opens, buffers events in a bounded
+  channel (`Jobs:ChannelCapacity`; overflow increments
+  `events_dropped`), and the hosted worker flushes them in batches
+  (`Jobs:FlushIntervalSeconds`) and applies the finish update. Events
+  below `Jobs:MinLevel` are dropped before buffering. The finish
+  update merges the start and finish `metadata` objects. Sink failures
+  are best-effort: a session whose row insert failed runs without a
+  run id and drops its events, and a flush failure only logs; a job is
+  never failed by its log. On startup the worker marks orphaned
+  `Running` rows `status=Interrupted` with summary `interrupted by
+  server restart`, so a killed process leaves an explained row instead
+  of a forever-running one. CLI one-shots exit before the hosted
+  worker runs, so their blocks pump the same sink directly and drain it
+  in a `finally`.
+- **File sink** (`Core/Jobs/FileJobSink`, opt-in via
+  `Enrichment:RunLogPath`; null disables it): an append-only
+  human-readable mirror of the same events, one clearly separated
+  section per run. A header (`===== job <utc> | kind=sync|icon-refresh|
+  screenshot-refresh|usage-analysis | trigger=<lowercased> [| items=N]
+  =====`), then one `[ 12/315] slug (Display Name)  OK|ok|skip|
+  excluded|FAIL  detail` line per scanned app as it finishes (streamed
+  through `BulkEnricher`'s `onResult` hook), timestamped
+  `<utc> [level] [phase] message (Nms)` lines between them, and a
+  totals footer (`----- job <status> <utc> | <h:mm:ss> | ok=N skip=N
+  fail=N -----`) followed by a blank line. The detail carries the
+  failure message or the `EnrichResult.Detail` skip reason (for example
+  `APK unchanged, analysis skipped`, `within recheck window`, `release
+  feed not modified`, `asset URL unchanged`, `index not modified`), and
+  the detail lines attribute slow actions (`download start <url>` /
+  `download done <bytes>B in <ms>ms`, `analyze <apk> unchanged, hashed
+  <bytes>B in <ms>ms` or `analyze <apk> badging Xms, signers Yms, icon
+  Zms, total Tms`, `github|gitlab|gitcode release list <target>
+  ok|304|failed in <ms>ms`, `render <drawable>
+  start|done|salvaged|failed in <ms>ms`, `batch render N icons
+  start|done x/N in <ms>ms` once per chunk, and `gradle --stop done
+  (exit N)`). A skipped pass writes a single `===== job <utc> |
+  kind=sync | trigger=.. | skipped: <reason> =====` line, and a failed
+  run writes the error line before the footer. File IO failures are
+  warned once and never fail the job. The log rotates at run boundaries
+  once the file reaches `maxBytes` (default 1 MiB): the active file is
+  moved to `<path>.1` (overwriting the previous `.1`) and a fresh
+  active file starts, so exactly two files are kept and every section
+  stays whole.
 
 ## 8. API behavior (`/v1/*`)
 
@@ -1284,13 +1338,13 @@ rather than persisting them.
 | `GET /` | 302 to the project repo (`https://github.com/timschneeb/ShizuStore`); the bare host is a browser entry point, not part of the API. No rate limit, no cache. |
 | `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
 | `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). The optional JSON body carries a free-form `reason` and a `full` flag: `{"full":true}` upgrades the drained pass to a full-catalog re-check like the nightly. |
-| `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Does not write a `sync_runs` row. |
+| `POST /v1/admin/refresh-icons` | Same token rules. Starts the in-process icon refresh (`RefreshIconsAsync`) and returns 202 with the running status; poll `GET` for progress. The run takes the shared sync gate, so it serializes with the fast and nightly passes (they skip and retry) while the API keeps serving reads; one run at a time, a pass already holding the gate or `Enrichment:SkipApkAnalysis` → 409. Optional body `{"force":true}` recounts byte-identical renders as refreshed (default false). Records one `job_runs` row (`kind=IconRefresh`, `trigger=Manual`) with its event stream; the catalog cursor ignores it (§7.3). |
 | `GET /v1/admin/refresh-icons` | Same token rules. Current refresh status: `state` (`idle\|running\|completed\|failed`), `force`, `startedAt`/`finishedAt`, `checked`/`refreshed`/`alreadyCurrent`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-icons` | Same token rules. Cancels the running refresh → 202, or 409 when nothing is running. |
-| `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy for every served app and forces the repo lookup when the indexes carry nothing, even inside the per-app recheck window; stored repo URLs are dropped when an index supplies shots. Takes the shared sync gate exactly like `refresh-icons`. Does not write a `sync_runs` row. |
+| `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy for every served app and forces the repo lookup when the indexes carry nothing, even inside the per-app recheck window; stored repo URLs are dropped when an index supplies shots. Takes the shared sync gate exactly like `refresh-icons`. Records one `job_runs` row (`kind=ScreenshotRefresh`, `trigger=Manual`) with its event stream. |
 | `GET /v1/admin/refresh-screenshots` | Same token rules. Current status: `state` (`idle\|running\|completed\|failed`), `startedAt`/`finishedAt`, `checked`/`updated`/`current`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-screenshots` | Same token rules. Cancels the running pass → 202, or 409 when nothing is running. |
-| `POST /v1/admin/usage-analysis/queue` | Same token rules. Queues AI source analyses; body `{"onlyMissing":true,"stale":false,"force":false,"slug":null,"limit":null}`. Defaults to apps that have never been analyzed and skips apps with an active run and parked failures (unless `force`); `stale` adds rows whose prompt/analysis generation is older than configured. → 202 `{queued:n}`. |
+| `POST /v1/admin/usage-analysis/queue` | Same token rules. Queues AI source analyses; body `{"onlyMissing":true,"stale":false,"force":false,"slug":null,"limit":null}`. Defaults to apps that have never been analyzed, root and variant rows alike, and skips apps with an active run and parked failures (unless `force`); `stale` adds rows whose prompt/analysis generation is older than configured. → 202 `{queued:n}`. |
 | `GET /v1/admin/usage-analysis/status` | Same token rules. Queue counts per status, runs started today, month-to-date cost, budget and the ten most recent failures. |
 | `GET /v1/admin/usage-analysis/stats?days=30` | Same token rules. Token and cost totals per day and per model for finished runs. |
 | `DELETE /v1/admin/usage-analysis/pending` | Same token rules. Deletes pending queue rows (running rows are untouched). |
@@ -1320,6 +1374,9 @@ all environments; Scalar UI is development-only.
 | `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/` and `/v1/admin/*`, DB-only (§2) |
 | `RequestLog:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `RequestLog:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
+| `Jobs:MinLevel` | `Debug` | Lowest job-event level the DB sink stores; raise it to trim volume |
+| `Jobs:ChannelCapacity` | `20000` | Bounded job-event buffer; overflow increments `events_dropped` |
+| `Jobs:FlushIntervalSeconds` | `1` | DB sink flush period |
 | `Enrichment:Aapt2Path` / `ApksignerPath` | `aapt2` / `apksigner` | Binaries, verified at startup |
 | `Enrichment:GradlePath` | `gradle` | Gradle binary for icon renders, verified at startup |
 | `Enrichment:IconToolDir` | `tools/icon-render` | Paparazzi tool checkout |
@@ -1341,7 +1398,7 @@ all environments; Scalar UI is development-only.
 | `Enrichment:SuccessRecheckInterval` | `24h` | Healthy-app re-check window |
 | `Enrichment:FailedRecheckInterval` | `12h` | Backoff after `last_error` |
 | `Enrichment:DownloadTimeout` | `10min` | APK download HTTP timeout |
-| `Enrichment:RunLogPath` | `null` | Append-only per-pass human-readable log (one line per app, timestamped slow-action details, plus the issues snapshot, §7.3); null disables it |
+| `Enrichment:RunLogPath` | `null` | Optional human-readable file mirror of the job log (§7.3); null disables the file sink, the DB sink is always on |
 | `Enrichment:GitHubToken` / `GitLabToken` | `null` (+ `SHIZU_GITHUB_TOKEN` / `SHIZU_GITLAB_TOKEN` env fallback) | Release-API auth/rate limits |
 | `UsageAnalysis:Enabled` | `false` | Master switch for AI source analysis; off leaves the queue and worker idle |
 | `UsageAnalysis:BaseUrl` | `https://opencode.ai/zen/go/v1` | OpenAI-compatible chat completions base URL |
@@ -1357,7 +1414,7 @@ all environments; Scalar UI is development-only.
 | `UsageAnalysis:MaxParallelism` / `MaxRunsPerDay` / `MonthlyBudgetUsd` | `3` / `100` / `20` | Concurrency and spend guards |
 | `UsageAnalysis:InputPricePerMillion` / `CachedInputPricePerMillion` / `OutputPricePerMillion` | `0.14` / `0.0028` / `0.28` | Cost table for recorded usage |
 | `UsageAnalysis:RetryMaxAttempts` / `RetryBackoff` | `3` / `30min` | Failure retry policy |
-| `UsageAnalysis:SnapshotRoot` / `PollInterval` | `null` (temp) / `30s` | Checkout location and worker idle poll |
+| `UsageAnalysis:SnapshotRoot` / `PollInterval` | `null` (temp) / `10s` | Checkout location and worker idle poll |
 | `UsageAnalysis:LogPath` / `MaxTranscriptToolResultChars` | `usage-logs` / `20000` | Per-run JSON+HTML transcript directory (null disables) and tool-result truncation (0 keeps everything) |
 | `Sync:ListPath` | `/opt/shizuappstore/list` | Local list clone |
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |
@@ -1397,7 +1454,12 @@ all environments; Scalar UI is development-only.
 - Tombstone closure: every stale-delete path must write, every
   re-add path must clear, or `/v1/changes removed[]` drifts.
 - The sync worker scope makes no app mutations after the upsert
-  save (final save = requests + run row only).
+  save (final pass-scope save = requests + issues only; the
+  `job_runs`/`job_events` bookkeeping is written by the job-log sinks
+  in their own scope, §7.3).
+- Job logging is best-effort and can never change a job's outcome:
+  sink failures degrade to a missing run id and dropped events, and a
+  `Skipped` pass writes only its bookkeeping row.
 - File bytes win over index values; package-name mismatch is the
   only file-content hard failure.
 - `Testing` is the only environment that skips the startup tool

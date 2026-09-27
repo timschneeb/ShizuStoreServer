@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.History;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;
 using Xunit;
 
@@ -77,7 +78,9 @@ public sealed class SyncIssueSnapshotTests : IDisposable
         Assert.Equal(2, issues.Count);
         Assert.All(issues, i => Assert.Equal(IssueKind.Quality, i.Kind));
         Assert.All(issues, i => Assert.Equal(CatalogHealthCheck.MissingIcon, i.Rule));
-        Assert.Equal(2, _db.SyncRuns.Single().IssueCount);
+        var run = Assert.Single(_db.JobRuns.ToList());
+        Assert.Equal(JobKind.Sync, run.Kind);
+        Assert.Equal(2, _db.SyncIssues.Count(i => i.JobRunId == run.Id));
     }
 
     [Fact]
@@ -94,7 +97,7 @@ public sealed class SyncIssueSnapshotTests : IDisposable
 
         await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
 
-        Assert.Equal(2, _db.SyncRuns.Count());
+        Assert.Equal(2, _db.JobRuns.Count());
         Assert.Equal(2, _db.SyncIssues.Count());
     }
 
@@ -195,7 +198,8 @@ public sealed class SyncIssueSnapshotTests : IDisposable
         new NoPoll(),
         new ThrowingRenderer(),
         new SyncOptions { ListPath = _repo },
-        new EnrichmentOptions { MaxParallelism = 1 });
+        new EnrichmentOptions { MaxParallelism = 1 },
+        new RecordingJobSink(_db).Log);
 
     /// <summary>Poll stub: the snapshot tests never exercise the fast-path poll.</summary>
     private sealed class NoPoll : IReleasePoller

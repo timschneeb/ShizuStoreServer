@@ -2,15 +2,15 @@ namespace ShizuAppStoreServer.Core.Data;
 
 /// <summary>
 /// One entry of the current catalog health snapshot (table <c>sync_issues</c>).
-/// The table holds only the most recent completed run: every successful pass
-/// replaces all rows, skipped and failed passes leave it untouched.
+/// The table holds only the most recent completed sync run: every successful
+/// pass replaces all rows, skipped and failed passes leave it untouched.
 /// </summary>
 public sealed class SyncIssue
 {
     public long Id { get; set; }
 
-    public long SyncRunId { get; set; }
-    public SyncRun? SyncRun { get; set; }
+    public long JobRunId { get; set; }
+    public JobRun? JobRun { get; set; }
 
     public IssueKind Kind { get; set; }
 

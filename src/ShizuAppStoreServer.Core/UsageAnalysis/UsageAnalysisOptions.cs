@@ -147,7 +147,7 @@ public sealed class UsageAnalysisOptions
     public int MaxTranscriptToolResultChars { get; set; } = 20_000;
 
     /// <summary>Worker poll interval while the queue is empty.</summary>
-    public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(30);
+    public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>True when the analyzer can run at all.</summary>
     public bool IsConfigured =>

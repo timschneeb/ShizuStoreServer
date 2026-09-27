@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using OpenAI;
 using OpenAI.Responses;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Jobs;
 
 namespace ShizuAppStoreServer.Core.UsageAnalysis;
 
@@ -171,13 +172,44 @@ public sealed class UsageTrackingChatClient(
             response.FinishReason?.Value,
             tools));
 
-        if (log is not null)
+        log?.LogInformation(
+            "Usage analysis model call {Call} for {Session} after {Elapsed:F0}s: {Input} in ({Cached} cached), {Output} out, tools: {Tools}.",
+            ModelCalls, session ?? "-", _clock.Elapsed.TotalSeconds,
+            InputTokens, CachedInputTokens, OutputTokens,
+            tools.Length == 0 ? "none" : string.Join(", ", tools));
+        JobContext.Current?.Event(
+            JobEventLevel.Info,
+            JobEventType.AiModelCall,
+            $"model call {ModelCalls} after {_clock.Elapsed.TotalSeconds:F0}s: {callInput} in ({callCached} cached), {callOutput} out",
+            data: new
+            {
+                call = ModelCalls,
+                session,
+                seconds = Math.Round((_clock.Elapsed - started).TotalSeconds, 1),
+                inputTokens = callInput,
+                cachedInputTokens = callCached,
+                outputTokens = callOutput,
+                totalInputTokens = InputTokens,
+                totalOutputTokens = OutputTokens,
+                finishReason = response.FinishReason?.Value,
+                tools,
+            });
+        foreach (var toolCall in response.Messages
+            .SelectMany(m => m.Contents)
+            .OfType<FunctionCallContent>())
         {
-            log.LogInformation(
-                "Usage analysis model call {Call} for {Session} after {Elapsed:F0}s: {Input} in ({Cached} cached), {Output} out, tools: {Tools}.",
-                ModelCalls, session ?? "-", _clock.Elapsed.TotalSeconds,
-                InputTokens, CachedInputTokens, OutputTokens,
-                tools.Length == 0 ? "none" : string.Join(", ", tools));
+            JobContext.Current?.Event(
+                JobEventLevel.Debug,
+                JobEventType.AiToolCall,
+                $"tool {toolCall.Name}",
+                data: new
+                {
+                    tool = toolCall.Name,
+                    callId = toolCall.CallId,
+                    arguments = toolCall.Arguments is null
+                        ? null
+                        : string.Join(", ", toolCall.Arguments.Select(kv => $"{kv.Key}={kv.Value}")),
+                });
         }
 
         return response;
@@ -535,11 +567,20 @@ public sealed class UsageAnalysisAgent(
                 // Only the analysis timeout fired, not a caller or host
                 // cancellation, so the partial transcript can still be logged.
                 log?.LogDebug("Usage analysis for {Slug} exceeded {Timeout}.", app.Slug, options.RunTimeout);
+                JobContext.Current?.Event(
+                    JobEventLevel.Warning,
+                    JobEventType.Error,
+                    $"analysis timed out after {options.RunTimeout}");
                 return Result(null, tracking, turns, search, timedOut: true);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 log?.LogWarning(ex, "Usage analysis model call failed for {Slug}.", app.Slug);
+                JobContext.Current?.Event(
+                    JobEventLevel.Error,
+                    JobEventType.Error,
+                    $"model call failed: {ex.Message}",
+                    data: new { error = ex.Message });
                 return Result(null, tracking, turns, search);
             }
 
@@ -565,14 +606,35 @@ public sealed class UsageAnalysisAgent(
                             truncated = false;
                             messages.Add(new ChatMessage(ChatRole.User,
                                 CoverageNote(uninspected, coverageRounds, options.MaxCoverageRounds)));
+                            JobContext.Current?.Event(
+                                JobEventLevel.Debug,
+                                JobEventType.AiValidation,
+                                $"coverage round {coverageRounds}: {uninspected.Count} uninspected location(s)",
+                                data: new { round = coverageRounds, uninspected = uninspected.Count });
                             continue;
                         }
 
                         log?.LogDebug(
                             "Usage analysis for {Slug} accepted a report with {Count} uninspected location(s) after {Rounds} coverage round(s).",
                             app.Slug, uninspected.Count, coverageRounds);
+                        JobContext.Current?.Event(
+                            JobEventLevel.Debug,
+                            JobEventType.AiValidation,
+                            $"report accepted with {uninspected.Count} uninspected location(s) after {coverageRounds} coverage round(s)",
+                            data: new { rounds = coverageRounds, uninspected = uninspected.Count });
                     }
 
+                    JobContext.Current?.Event(
+                        JobEventLevel.Info,
+                        JobEventType.AiValidation,
+                        $"report validated after {turns} turn(s)",
+                        data: new
+                        {
+                            turns,
+                            coverageRounds,
+                            surface = coverage.SurfaceInspected,
+                            surfaceTotal = coverage.SurfaceEntries,
+                        });
                     return Result(report, tracking, turns, search, coverage: coverage);
                 }
 
@@ -587,6 +649,11 @@ public sealed class UsageAnalysisAgent(
                     : "the answer was empty";
             }
 
+            JobContext.Current?.Event(
+                JobEventLevel.Debug,
+                JobEventType.AiValidation,
+                $"answer rejected: {rejection}",
+                data: new { rejection, truncated });
             corrections++;
             if (corrections > MaxCorrections)
             {

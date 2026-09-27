@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.History;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Parsing;
 using ShizuAppStoreServer.Core.Sync;
 using Xunit;
@@ -119,10 +120,12 @@ public sealed class SyncServiceTests : IDisposable
         Assert.Equal(3, _runner.Calls.Count);
         Assert.All(_runner.Calls, c => Assert.False(c.Force));
 
-        var run = Assert.Single(_db.SyncRuns.ToList());
-        Assert.Equal("scheduled", run.Trigger);
-        Assert.Equal(head, run.HeadCommit);
-        Assert.Equal(3, run.Added);
+        var run = Assert.Single(_db.JobRuns.ToList());
+        Assert.Equal(JobKind.Sync, run.Kind);
+        Assert.Equal(JobTrigger.Scheduled, run.Trigger);
+        Assert.Equal(JobStatus.Succeeded, run.Status);
+        Assert.Equal(head, run.Reference);
+        Assert.Equal(3, run.ItemsOk);
         Assert.NotNull(run.FinishedAt);
 
         // Git history backfill: entry timestamps come from the commit, not "now".
@@ -151,7 +154,11 @@ public sealed class SyncServiceTests : IDisposable
 
         Assert.True(second.Skipped);
         Assert.Null(second.Error);
-        Assert.Single(_db.SyncRuns.ToList()); // skipped passes write nothing
+        // A skipped pass writes bookkeeping only: one run row, no app mutations.
+        var runs = _db.JobRuns.OrderBy(r => r.Id).ToList();
+        Assert.Equal(2, runs.Count);
+        Assert.Equal(JobStatus.Succeeded, runs[0].Status);
+        Assert.Equal(JobStatus.Skipped, runs[1].Status);
         Assert.Equal(3, _runner.Calls.Count); // nothing due (fake marks rows checked)
     }
 
@@ -177,7 +184,7 @@ public sealed class SyncServiceTests : IDisposable
         var request = Assert.Single(_db.SyncRequests.ToList());
         Assert.True(request.Processed);
         Assert.NotNull(request.ProcessedAt);
-        Assert.Equal(2, _db.SyncRuns.Count());
+        Assert.Equal(2, _db.JobRuns.Count());
     }
 
     [Fact]
@@ -658,7 +665,8 @@ public sealed class SyncServiceTests : IDisposable
 
         Assert.False(result.Skipped);
         Assert.NotNull(result.Error);
-        var run = Assert.Single(_db.SyncRuns.ToList());
+        var run = Assert.Single(_db.JobRuns.ToList());
+        Assert.Equal(JobStatus.Failed, run.Status);
         Assert.NotNull(run.Error);
         Assert.NotNull(run.FinishedAt);
     }
@@ -694,21 +702,22 @@ public sealed class SyncServiceTests : IDisposable
         }
 
         Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
-        var log = new RecordingRunLog();
-        await Service(runLog: log).RunAsync("scheduled", fullRecheck: false, T0);
+        var log = new RecordingJobSink(_db);
+        await Service(jobLog: log.Log).RunAsync("scheduled", fullRecheck: false, T0);
 
         var begin = Assert.Single(log.Begins);
-        Assert.Equal("scheduled", begin.Trigger);
-        Assert.False(begin.FullRecheck);
-        Assert.Equal(3, begin.AppCount);
-        Assert.Equal(3, log.Apps.Count);
-        Assert.Contains(log.Apps, a => a.Slug == "tuner");
-        Assert.Contains(log.Apps, a => a.Result.Outcome == EnrichOutcome.Enriched);
-        var end = Assert.Single(log.Ends);
-        Assert.Equal(3, end.Enriched);
-        Assert.Equal(0, end.Failed);
-        var issues = Assert.Single(log.IssueSnapshots);
-        Assert.Equal(1, issues.RunId);
+        Assert.Equal(JobKind.Sync, begin.Kind);
+        Assert.Equal(JobTrigger.Scheduled, begin.Trigger);
+        Assert.Equal(3, log.Events.Count(e => e.Type == JobEventType.App));
+        Assert.Contains(log.Events, e => e.Slug == "tuner");
+        var (finish, runId) = Assert.Single(log.Finishes);
+        Assert.Equal(JobStatus.Succeeded, finish.Status);
+        Assert.Equal(3, finish.ItemsTotal);
+        Assert.Equal(0, finish.ItemsFailed);
+
+        var run = Assert.Single(_db.JobRuns.ToList());
+        Assert.Equal(run.Id, runId);
+        Assert.Equal(run.Id, _db.SyncIssues.First().JobRunId);
     }
 
     [Fact]
@@ -722,14 +731,17 @@ public sealed class SyncServiceTests : IDisposable
         Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
         await Service().RunAsync("scheduled", fullRecheck: false, T0);
 
-        var log = new RecordingRunLog();
-        await Service(runLog: log).RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
+        var log = new RecordingJobSink(_db);
+        await Service(jobLog: log.Log).RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
 
         Assert.Empty(log.Begins);
         Assert.Equal("nothing due", Assert.Single(log.Skips).Reason);
+        var runs = _db.JobRuns.OrderBy(r => r.Id).ToList();
+        Assert.Equal(2, runs.Count);
+        Assert.Equal(JobStatus.Skipped, runs[1].Status);
     }
 
-    private SyncService Service(string? listPath = null, IReleasePoller? poll = null, IRunLog? runLog = null) => new(
+    private SyncService Service(string? listPath = null, IReleasePoller? poll = null, IJobLog? jobLog = null) => new(
         _db,
         new CatalogUpserter(_db),
         new GitHistoryService(),
@@ -738,7 +750,7 @@ public sealed class SyncServiceTests : IDisposable
         new ThrowingRenderer(),
         new SyncOptions { ListPath = listPath ?? _repo },
         new EnrichmentOptions { MaxParallelism = 1 },
-        runLog);
+        jobLog ?? new RecordingJobSink(_db).Log);
 
     [Fact]
     public async Task RunnerCrashSurfacesMessageInResult()
@@ -848,67 +860,6 @@ public sealed class SyncServiceTests : IDisposable
 
         public Task StopGradleDaemonsAsync() =>
             throw new InvalidOperationException("renderer must stay untouched");
-    }
-
-    /// <summary>Records run-log calls; the run log itself is file IO, tested separately.</summary>
-    private sealed class RecordingRunLog : IRunLog
-    {
-        private readonly object _gate = new();
-
-        public List<(string Trigger, bool FullRecheck, DateTimeOffset Now, int AppCount)> Begins { get; } = [];
-        public List<(string Slug, string? DisplayName, EnrichResult Result)> Apps { get; } = [];
-        public List<string> Details { get; } = [];
-        public List<(string Trigger, DateTimeOffset Now, string Reason)> Skips { get; } = [];
-        public List<(DateTimeOffset Now, int Enriched, int UpToDate, int Failed)> Ends { get; } = [];
-        public List<(long? RunId, string? Head, IReadOnlyList<SyncIssue> Issues)> IssueSnapshots { get; } = [];
-
-        public void Begin(string trigger, bool fullRecheck, DateTimeOffset now, int appCount)
-        {
-            lock (_gate)
-            {
-                Begins.Add((trigger, fullRecheck, now, appCount));
-            }
-        }
-
-        public void App(string slug, string? displayName, EnrichResult result)
-        {
-            lock (_gate)
-            {
-                Apps.Add((slug, displayName, result));
-            }
-        }
-
-        public void Detail(string message)
-        {
-            lock (_gate)
-            {
-                Details.Add(message);
-            }
-        }
-
-        public void Skip(string trigger, DateTimeOffset now, string reason)
-        {
-            lock (_gate)
-            {
-                Skips.Add((trigger, now, reason));
-            }
-        }
-
-        public void End(DateTimeOffset now, int enriched, int upToDate, int failed)
-        {
-            lock (_gate)
-            {
-                Ends.Add((now, enriched, upToDate, failed));
-            }
-        }
-
-        public void Issues(long? runId, string? head, IReadOnlyList<SyncIssue> issues)
-        {
-            lock (_gate)
-            {
-                IssueSnapshots.Add((runId, head, issues));
-            }
-        }
     }
 
     /// <summary>Stub runner: records calls and marks rows checked (serial; shares the pass DbContext).</summary>
@@ -1077,7 +1028,7 @@ public sealed class SyncServiceTests : IDisposable
             ? new PrepareIconResult(EnrichOutcome.UpToDate, null, new PendingBatchIcon($"b{id}_0", null))
             : new PrepareIconResult(EnrichOutcome.UpToDate, null, null);
         var renderer = new CannedBatchRenderer([7]);
-        var runsBefore = _db.SyncRuns.Count();
+        var runsBefore = _db.JobRuns.Count();
         var result = await RefreshService(_runner, renderer).RefreshIconsAsync();
 
         Assert.Equal(3, result.Checked);
@@ -1093,7 +1044,7 @@ public sealed class SyncServiceTests : IDisposable
 
         Assert.Equal(2, _runner.Commits.Count);
         Assert.All(_runner.Commits, c => Assert.Equal([7], c.Png));
-        Assert.Equal(runsBefore, _db.SyncRuns.Count()); // no run row written
+        Assert.Equal(runsBefore, _db.JobRuns.Count()); // the coordinator owns the icon run row
     }
 
     [Fact]
@@ -1204,7 +1155,8 @@ public sealed class SyncServiceTests : IDisposable
             new FakePoller(),
             renderer,
             new SyncOptions { ListPath = _repo },
-            enrichment);
+            enrichment,
+            new RecordingJobSink(_db).Log);
 
         var result = await service.RunAsync("manual", fullRecheck: true, T0);
 
@@ -1213,7 +1165,7 @@ public sealed class SyncServiceTests : IDisposable
         var batch = Assert.Single(renderer.Calls); // one Gradle invocation for the whole pass
         Assert.Equal(ids.Count, batch.Count);
         Assert.Equal(ids.Count, _runner.Commits.Count);
-        Assert.Contains(_db.SyncRuns.ToList(), run => run.Trigger == "manual");
+        Assert.Contains(_db.JobRuns.ToList(), run => run.Trigger == JobTrigger.Manual);
         Assert.False(enrichment.DeferXmlIconRenders); // cleared even though the flag was on
     }
 

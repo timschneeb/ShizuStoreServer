@@ -1,3 +1,5 @@
+using ShizuAppStoreServer.Core.Jobs;
+
 namespace ShizuAppStoreServer.Core.Data;
 
 /// <summary>Lifecycle of one queued AI source analysis.</summary>
@@ -23,6 +25,9 @@ public sealed class UsageAnalysisRun
     public App? App { get; set; }
 
     public UsageAnalysisStatus Status { get; set; }
+
+    /// <summary>What queued the analysis: <c>Auto</c> on APK change, <c>Backfill</c> from the admin API.</summary>
+    public JobTrigger? Trigger { get; set; }
 
     /// <summary>Attempts so far, including the current one.</summary>
     public int Attempts { get; set; }
