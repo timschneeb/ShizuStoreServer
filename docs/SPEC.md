@@ -843,6 +843,18 @@ variant's slug is written as a change-feed `removed[]` tombstone so
 cached clients drop the child row. Candidate-only resolution (the
 opposite-signature candidate side, §5) never creates variants.
 
+Two live list entries can point at the same source repository (its release
+carries several of the catalog's apps, for example the lemmy and mastodon
+redirect clients). They must not mirror each other: a package already served
+by a sibling entry, or by one of its variants, is never created as a variant
+of this entry, because a second `apps` row for one package would overwrite the
+first on install and split the catalog's health snapshot. A variant whose
+package a sibling's own row serves is pruned and tombstoned like any vanished
+variant; when two siblings both mirrored one unlisted package before this
+rule existed, the lower root id keeps it and the other prunes, so repeated
+passes settle on one owner. Excluded entries never claim packages, and entries
+on different repositories do not affect each other.
+
 Legacy variant rows whose stored `apk_label` matches the root's and
 whose package is now a same-label flavor are folded back into the root:
 their downloads move onto the root candidate set (keeping their
@@ -1488,7 +1500,10 @@ all environments; Scalar UI is development-only.
   candidate-only resolution never creates variants. Grouping is by APK
   label: packages that share the root's label are flavors on the root
   (each download keeps its `package_name`), and only a distinct label
-  gets its own variant row.
+  gets its own variant row. A package already served by a live sibling
+  entry on the same source repository is never mirrored as a variant;
+  a list entry always keeps its own package, and among two sibling
+  mirrors of one unlisted package the lower root id wins.
 - The checksum short-circuit only skips work: it may never change a
   primary, drop a download row, or leave a row half-healed. Skipping
   requires a complete row (package, icon hash, icon file, no heal

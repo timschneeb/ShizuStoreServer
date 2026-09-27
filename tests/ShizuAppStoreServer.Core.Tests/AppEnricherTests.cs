@@ -4507,6 +4507,214 @@ public sealed class AppEnricherTests : IDisposable
         Assert.DoesNotContain(_db.Downloads.Local, d => d.ApkUrl.EndsWith("plugin.apk", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Two list entries whose source_url point at one repo, plus an enricher
+    /// whose release ships both their packages. The izzy URLs make each root
+    /// bind its own package, like the lemmy/mastodon redirect pair.
+    /// </summary>
+    private (AppEnricher Enricher, App Alpha, App Beta) SharedRepoPair()
+    {
+        var alphaApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var betaApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var json = ReleaseJsonMultiAssets(
+            ("alpha-release.apk", "https://cdn.example/alpha.apk", alphaApk.Length),
+            ("beta-release.apk", "https://cdn.example/beta.apk", betaApk.Length));
+        var github = new StubHandler(_ => JsonReleases(json, "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("beta", StringComparison.Ordinal)
+                ? betaApk
+                : alphaApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == betaApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.beta", label: "Beta")
+            : TestAssets.CannedBadging(package: "com.example.alpha", label: "Alpha"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var alpha = NewApp("alpha-redirect", "Alpha Redirect",
+            "https://apt.izzysoft.de/fdroid/index/apk/com.example.alpha",
+            sourceUrl: "https://github.com/example/shared-repo");
+        var beta = NewApp("beta-redirect", "Beta Redirect",
+            "https://apt.izzysoft.de/fdroid/index/apk/com.example.beta",
+            sourceUrl: "https://github.com/example/shared-repo/");
+        return (enricher, alpha, beta);
+    }
+
+    private App AddVariant(App root, string slug, string label, string packageName)
+    {
+        var variant = new App
+        {
+            Slug = slug,
+            Name = root.Name,
+            DisplayName = root.Name,
+            Url = root.Url,
+            Listing = Listing.Main,
+            Type = AppType.App,
+            RootAppId = root.Id,
+            CategoryId = root.CategoryId,
+            ApkLabel = label,
+            PackageName = packageName,
+            AddedAt = T0,
+            UpdatedAt = T0,
+        };
+        _db.Apps.Add(variant);
+        _db.SaveChanges();
+        return variant;
+    }
+
+    [Fact]
+    public async Task SiblingEntriesSharingARepoDoNotMirrorEachOthersPackages()
+    {
+        var (enricher, alpha, beta) = SharedRepoPair();
+
+        // Alpha's first pass runs before beta is enriched, so beta's package
+        // is not a known claim yet and a mirror variant appears.
+        await enricher.EnrichAsync(alpha, T0);
+        await _db.SaveChangesAsync();
+        Assert.Single(_db.Apps.Local, a => a.RootAppId == alpha.Id);
+
+        // Beta's pass resolves its own package and yields the alpha group.
+        Age(beta);
+        await enricher.EnrichAsync(beta, T0);
+        await _db.SaveChangesAsync();
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == beta.Id).ToListAsync());
+
+        // Alpha's next pass prunes the mirror now that beta owns the package.
+        Age(alpha);
+        await enricher.EnrichAsync(alpha, T0);
+        await _db.SaveChangesAsync();
+
+        Assert.Equal("com.example.alpha", alpha.PackageName);
+        Assert.Equal("com.example.beta", beta.PackageName);
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == alpha.Id).ToListAsync());
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == beta.Id).ToListAsync());
+        Assert.Equal(2, await _db.Apps.CountAsync());
+        Assert.Contains(await _db.RemovedApps.ToListAsync(), r => r.Slug == "com-example-beta");
+    }
+
+    [Fact]
+    public async Task PrunesVariantServedBySiblingRootPackage()
+    {
+        var (enricher, alpha, beta) = SharedRepoPair();
+        beta.PackageName = "com.example.beta";
+        _db.SaveChanges();
+
+        // A mirror variant the sibling's own row now owns.
+        var mirror = AddVariant(alpha, "com-example-beta", "Beta", "com.example.beta");
+        AddDownload(mirror, SourceKind.GitHub, "https://cdn.example/beta.apk",
+            versionCode: 42, sigSha256: SignerOutputA);
+
+        await enricher.EnrichAsync(alpha, T0);
+        await _db.SaveChangesAsync();
+
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == alpha.Id).ToListAsync());
+        Assert.Contains(await _db.RemovedApps.ToListAsync(), r => r.Slug == "com-example-beta");
+        Assert.Equal("com.example.alpha", alpha.PackageName);
+    }
+
+    [Fact]
+    public async Task SharedUnlistedPackageKeepsSingleOwnerAmongSiblings()
+    {
+        var alphaApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var betaApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var gammaApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(700, 700, Color.Red)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("alpha-release.apk", "https://cdn.example/alpha.apk", alphaApk.Length),
+            ("beta-release.apk", "https://cdn.example/beta.apk", betaApk.Length),
+            ("gamma-release.apk", "https://cdn.example/gamma.apk", gammaApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            var bytes = path.Contains("gamma", StringComparison.Ordinal)
+                ? gammaApk
+                : path.Contains("beta", StringComparison.Ordinal)
+                    ? betaApk
+                    : alphaApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path =>
+        {
+            var length = new FileInfo(path).Length;
+            return length == gammaApk.Length
+                ? TestAssets.CannedBadging(package: "com.example.gamma", label: "Gamma")
+                : length == betaApk.Length
+                    ? TestAssets.CannedBadging(package: "com.example.beta", label: "Beta")
+                    : TestAssets.CannedBadging(package: "com.example.alpha", label: "Alpha");
+        });
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var alpha = NewApp("alpha-redirect", "Alpha Redirect",
+            "https://apt.izzysoft.de/fdroid/index/apk/com.example.alpha",
+            sourceUrl: "https://github.com/example/shared-repo");
+        var beta = NewApp("beta-redirect", "Beta Redirect",
+            "https://apt.izzysoft.de/fdroid/index/apk/com.example.beta",
+            sourceUrl: "https://github.com/example/shared-repo");
+        alpha.PackageName = "com.example.alpha";
+        beta.PackageName = "com.example.beta";
+        _db.SaveChanges();
+
+        // Both passes previously mirrored the third package, so both roots
+        // already carry a gamma variant when the fix lands.
+        var alphaGamma = AddVariant(alpha, "com-example-gamma", "Gamma", "com.example.gamma");
+        var betaGamma = AddVariant(beta, "com-example-gamma-2", "Gamma", "com.example.gamma");
+
+        await enricher.EnrichAsync(beta, T0);
+        await _db.SaveChangesAsync();
+
+        var gamma = Assert.Single(await _db.Apps.Where(a => a.PackageName == "com.example.gamma").ToListAsync());
+        Assert.Equal(alpha.Id, gamma.RootAppId);
+        Assert.Contains(await _db.RemovedApps.ToListAsync(), r => r.Slug == betaGamma.Slug);
+        Assert.Empty(await _db.Apps.Where(a => a.RootAppId == beta.Id).ToListAsync());
+
+        // Alpha's pass agrees on the owner and keeps its variant.
+        Age(alpha);
+        await enricher.EnrichAsync(alpha, T0);
+        await _db.SaveChangesAsync();
+
+        gamma = Assert.Single(await _db.Apps.Where(a => a.PackageName == "com.example.gamma").ToListAsync());
+        Assert.Equal(alphaGamma.Id, gamma.Id);
+        Assert.Equal(alpha.Id, gamma.RootAppId);
+    }
+
+    [Fact]
+    public async Task KeepsVariantWhosePackageIsOwnedByNonSibling()
+    {
+        var alphaApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var pluginApk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(ReleaseJsonMultiAssets(
+            ("alpha-release.apk", "https://cdn.example/alpha.apk", alphaApk.Length),
+            ("plugin-release.apk", "https://cdn.example/plugin.apk", pluginApk.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("plugin", StringComparison.Ordinal)
+                ? pluginApk
+                : alphaApk;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == pluginApk.Length
+            ? TestAssets.CannedBadging(package: "com.example.plugin", label: "Plugin")
+            : TestAssets.CannedBadging(package: "com.example.alpha", label: "Alpha"));
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var alpha = NewApp("alpha-redirect", "Alpha Redirect",
+            "https://apt.izzysoft.de/fdroid/index/apk/com.example.alpha",
+            sourceUrl: "https://github.com/example/shared-repo");
+        // An excluded entry on the same repo must not claim the package, and
+        // an unrelated root on another repo is not a sibling at all.
+        var excluded = NewApp("beta-redirect", "Beta Redirect",
+            "https://apt.izzysoft.de/fdroid/index/apk/com.example.beta",
+            sourceUrl: "https://github.com/example/shared-repo");
+        excluded.Availability = Availability.Excluded;
+        excluded.PackageName = "com.example.plugin";
+        var unrelated = NewApp("plugin-owner", "Plugin Owner", "https://github.com/example/plugin-owner");
+        unrelated.PackageName = "com.example.plugin";
+        _db.SaveChanges();
+
+        await enricher.EnrichAsync(alpha, T0);
+        await _db.SaveChangesAsync();
+
+        Assert.Contains(await _db.Apps.Where(a => a.RootAppId == alpha.Id).ToListAsync(),
+            v => v.PackageName == "com.example.plugin");
+    }
+
     [Fact]
     public async Task HealsRootLabelWhenPrimaryIsNotInTheLatestRelease()
     {

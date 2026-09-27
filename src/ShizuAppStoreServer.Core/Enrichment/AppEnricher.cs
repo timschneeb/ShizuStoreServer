@@ -1419,12 +1419,30 @@ public sealed class AppEnricher(
         // package must not both exist.
         await MergeSameLabelVariantsAsync(root, rootGroup?.Label, listPackage, now, ct);
 
+        // Two list entries can point at one source repo and scan the same
+        // release; each package must stay on the entry that owns it instead of
+        // being mirrored as a variant by its sibling. Claims are resolved once
+        // per pass so the prune and the create path agree.
+        var siblingClaims = await LoadSiblingPackageClaimsAsync(root, ct);
+        await PruneSiblingOwnedVariantsAsync(root, siblingClaims, ct);
+
         foreach (var group in groups)
         {
             var canonical = ResolveCanonicalPackage(root, group.Label, GroupPackages(group), listPackage);
-            var target = ReferenceEquals(group, rootGroup)
-                ? root
-                : await EnsureVariantAsync(root, kind, canonical, now, ct);
+            App? target;
+            if (ReferenceEquals(group, rootGroup))
+            {
+                target = root;
+            }
+            else
+            {
+                target = await EnsureVariantAsync(root, kind, canonical, siblingClaims, now, ct);
+                if (target is null)
+                {
+                    continue;
+                }
+            }
+
             foreach (var analysis in group.Items)
             {
                 // Only the canonical package presents the row; flavor siblings
@@ -1938,8 +1956,9 @@ public sealed class AppEnricher(
     /// new name becomes a variant row that mirrors the list entry's metadata
     /// and points back at it; its package identifies it across passes.
     /// </summary>
-    private async Task<App> EnsureVariantAsync(
-        App root, SourceKind kind, string? packageName, DateTimeOffset now, CancellationToken ct)
+    private async Task<App?> EnsureVariantAsync(
+        App root, SourceKind kind, string? packageName,
+        IReadOnlyDictionary<string, SiblingClaim> siblingClaims, DateTimeOffset now, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(packageName))
         {
@@ -1952,6 +1971,16 @@ public sealed class AppEnricher(
         if (existing is not null)
         {
             return existing;
+        }
+
+        if (siblingClaims.TryGetValue(packageName, out var owner))
+        {
+            // A live entry sharing this source repo already serves the
+            // package; a second listing would overwrite it on install.
+            log?.LogInformation(
+                "Skipping variant {Package} for {Root}: already served by {Owner}.",
+                packageName, root.Slug, owner.Owner.Slug);
+            return null;
         }
 
         var variant = new App
@@ -1986,6 +2015,116 @@ public sealed class AppEnricher(
         // each new variant's downloads stay separated in the change tracker.
         db.Apps.Add(variant);
         return variant;
+    }
+
+    private sealed record SiblingClaim(App Owner, bool RootPackage);
+
+    /// <summary>
+    /// Packages already served by live list entries that share this root's
+    /// source repo, mapped to the owning entry. A sibling's own row always
+    /// owns its package; its variants count too, because the sibling pass
+    /// would otherwise mirror the package back.
+    /// </summary>
+    private async Task<Dictionary<string, SiblingClaim>> LoadSiblingPackageClaimsAsync(
+        App root, CancellationToken ct)
+    {
+        var claims = new Dictionary<string, SiblingClaim>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sibling in await LoadSiblingRootsAsync(root, ct))
+        {
+            if (!string.IsNullOrEmpty(sibling.PackageName))
+            {
+                claims.TryAdd(sibling.PackageName, new SiblingClaim(sibling, RootPackage: true));
+            }
+
+            foreach (var variant in await LoadVariantGroupAsync(sibling, ct))
+            {
+                if (!string.IsNullOrEmpty(variant.PackageName))
+                {
+                    claims.TryAdd(variant.PackageName, new SiblingClaim(sibling, RootPackage: false));
+                }
+            }
+        }
+
+        return claims;
+    }
+
+    /// <summary>
+    /// Live (non-excluded) roots whose list entry targets the same source repo
+    /// as this one, tracked or just added in the current pass. One repo can
+    /// ship several apps, so sibling entries are legitimate; they only must
+    /// not mirror each other's packages.
+    /// </summary>
+    private async Task<List<App>> LoadSiblingRootsAsync(App root, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(root.SourceUrl))
+        {
+            return [];
+        }
+
+        var source = NormalizeSourceUrl(root.SourceUrl);
+        var siblings = new List<App>();
+        var rows = await db.Apps.AsNoTracking()
+            .Where(a => a.Id != root.Id && a.RootAppId == null && a.SourceUrl != null)
+            .ToListAsync(ct);
+        foreach (var app in rows)
+        {
+            if (app.Availability != Availability.Excluded
+                && string.Equals(NormalizeSourceUrl(app.SourceUrl!), source, StringComparison.OrdinalIgnoreCase))
+            {
+                siblings.Add(app);
+            }
+        }
+
+        foreach (var local in db.Apps.Local)
+        {
+            if (local.Id != root.Id
+                && local.RootAppId == null
+                && local.SourceUrl is not null
+                && local.Availability != Availability.Excluded
+                && db.Entry(local).State != EntityState.Deleted
+                && string.Equals(NormalizeSourceUrl(local.SourceUrl), source, StringComparison.OrdinalIgnoreCase)
+                && !siblings.Contains(local))
+            {
+                siblings.Add(local);
+            }
+        }
+
+        return siblings;
+    }
+
+    private static string NormalizeSourceUrl(string sourceUrl) => sourceUrl.TrimEnd('/');
+
+    /// <summary>
+    /// Drops variants whose package a sibling entry sharing this source repo
+    /// already serves. A list entry always keeps its own package; when two
+    /// siblings both mirrored one unlisted package, the lower root id wins so
+    /// both passes agree on the owner.
+    /// </summary>
+    private async Task PruneSiblingOwnedVariantsAsync(
+        App root, IReadOnlyDictionary<string, SiblingClaim> siblingClaims, CancellationToken ct)
+    {
+        foreach (var variant in await LoadVariantGroupAsync(root, ct))
+        {
+            if (string.IsNullOrEmpty(variant.PackageName)
+                || !siblingClaims.TryGetValue(variant.PackageName, out var claim)
+                || (!claim.RootPackage && claim.Owner.Id > root.Id))
+            {
+                continue;
+            }
+
+            log?.LogInformation(
+                "Removing variant {Slug}: package {Package} is already served by {Owner}.",
+                variant.Slug, variant.PackageName, claim.Owner.Slug);
+            var icon = variant.IconHash;
+            variant.IconHash = null;
+            if (icon is not null)
+            {
+                await DeleteIconIfOrphanedAsync(variant, icon, ct);
+            }
+
+            await WriteRemovedTombstoneAsync(variant, ct);
+            db.Apps.Remove(variant);
+        }
     }
 
     private async Task<List<App>> LoadVariantGroupAsync(App root, CancellationToken ct)

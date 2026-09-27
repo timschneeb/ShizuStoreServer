@@ -78,6 +78,12 @@ groups analyzed APKs by their application label:
 - Builds that share the root's label but use a different package (FOSS, Play,
   debug or spoofed flavors) stay on the root entry as extra candidates. Each
   candidate carries its own `packageName`, so one entry can offer every flavor.
+- Two list entries can point at the same repository, each listing one of its
+  apps. They do not mirror each other: a package another entry on the same
+  repository already serves is not duplicated as a variant, and a duplicate
+  variant left over from an older pass is removed. If you list two apps of one
+  repository, give each entry its own URL (for example its Izzy package page)
+  so each one binds the right package.
 
 TV and Wear builds are dropped when the same package also ships a phone build.
 A package that only ships a TV or Wear build is kept, because then that form
