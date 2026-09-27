@@ -25,8 +25,6 @@ public enum EnrichOutcome
     UpToDate,
     /// <summary>No forge source: letter-avatar icon, source kind set, no APK fields.</summary>
     AvatarFallback,
-    /// <summary>Play is the only source and no override is set: never sent to clients.</summary>
-    Excluded,
     /// <summary>Something failed; <c>last_error</c> set, backoff applies. Previous good values kept.</summary>
     Failed,
     /// <summary>Checked recently (success or backoff window); no work done.</summary>
@@ -70,8 +68,8 @@ public sealed record PrepareIconResult(
 /// outside the repo the list points at and are special-cased: instafel (the
 /// updater APK ships from github.com/instafel/u-rel while the list links the
 /// source monorepo mamiiblt/instafel) and hlbmerge_flutter (APK builds only
-/// on the GitCode mirror gitcode.com/bigmolihuan/hlbmerge_flutter). Play-sole-source apps are
-/// excluded unless the operator override flag is set. Failures record
+/// on the GitCode mirror gitcode.com/bigmolihuan/hlbmerge_flutter). Play-sole-source apps become
+/// redirects to their Play listing instead of being hidden. Failures record
 /// <c>last_error</c> and keep previous good values. Does not call
 /// <c>SaveChanges</c>, the caller batches (fast loop in M6, tests).
 /// </summary>
@@ -3696,15 +3694,6 @@ public sealed class AppEnricher(
             app.IconAdaptive = false;
         }
 
-        if (kind == SourceKind.Play && !HasAltSource(app) && !app.ExcludeOverride)
-        {
-            app.Availability = Availability.Excluded;
-            app.ExcludedReason = "Play Store is the only source; no APK available, no source code link";
-            app.LastCheckedAt = now;
-            app.LastError = null;
-            return new EnrichResult(EnrichOutcome.Excluded, null);
-        }
-
         if (kind == SourceKind.Play)
         {
             app.Availability = Availability.PlayRedirect;
@@ -3721,10 +3710,6 @@ public sealed class AppEnricher(
         app.LastError = null;
         return new EnrichResult(EnrichOutcome.AvatarFallback, null);
     }
-
-    private static bool HasAltSource(App app) =>
-        !string.IsNullOrWhiteSpace(app.SourceUrl)
-        && SourceClassifier.Classify(app.SourceUrl) != SourceKind.Play;
 
     /// <summary>
     /// Resolves the linked Play listing and returns its scraped details.

@@ -35,6 +35,7 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
     private readonly int _rateLimitPerMinute;
     private readonly string? _adminSecret;
     private readonly bool _enableOutputCache;
+    private readonly string _excludedIps;
 
     public string IconDir { get; } =
         Path.Combine(Path.GetTempPath(), "shizu-test-icons-" + Guid.NewGuid().ToString("N"));
@@ -44,11 +45,16 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
     {
     }
 
-    internal ShizuApiFactory(int rateLimitPerMinute, string? adminSecret, bool enableOutputCache = false)
+    internal ShizuApiFactory(
+        int rateLimitPerMinute,
+        string? adminSecret,
+        bool enableOutputCache = false,
+        string excludedIps = "")
     {
         _rateLimitPerMinute = rateLimitPerMinute;
         _adminSecret = adminSecret;
         _enableOutputCache = enableOutputCache;
+        _excludedIps = excludedIps;
         Directory.CreateDirectory(IconDir);
         _connection.Open();
     }
@@ -106,6 +112,7 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
             services.AddSingleton(new RequestLogOptions
             {
                 FlushInterval = TimeSpan.FromHours(1),
+                ExcludedIps = _excludedIps,
             });
 
             // Disable output caching: replace every production policy with a

@@ -251,7 +251,8 @@ builder.Services.AddSingleton<UserAgentTracker>();
 builder.Services.AddHostedService<UserAgentTrackingWorker>();
 
 // Non-client request log: every request whose User-Agent is not a ShizuStore
-// release, on all paths (icons and admin included). DB-only, append-only.
+// client and whose client IP is not excluded, on all paths (icons and admin
+// included). DB-only, append-only.
 var requestLog = builder.Configuration.GetSection("RequestLog").Get<RequestLogOptions>() ?? new();
 builder.Services.AddSingleton(requestLog);
 builder.Services.AddSingleton<RequestLogTracker>();

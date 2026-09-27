@@ -4,13 +4,14 @@ namespace ShizuAppStoreServer.Tracking;
 
 /// <summary>
 /// Recognizes the ShizuStore client by its exact User-Agent prefix
-/// (<c>ShizuStore/&lt;major&gt;.&lt;minor&gt;.&lt;patch&gt;</c>; debug builds append
-/// <c>-&lt;commit&gt;</c>, which the prefix accepts). Case-sensitive on purpose:
-/// anything else, including a missing header, counts as non-client traffic.
+/// (<c>ShizuStore/&lt;major&gt;.&lt;minor&gt;.&lt;patch&gt;</c>; debug builds use the
+/// app name <c>ShizuStore (Debug)</c>, nightly builds append <c>-&lt;commit&gt;</c>,
+/// both accepted here). Case-sensitive on purpose: anything else, including a
+/// missing header, counts as non-client traffic.
 /// </summary>
 public static partial class ClientUserAgentMatcher
 {
-    [GeneratedRegex(@"^ShizuStore/\d+\.\d+\.\d+")]
+    [GeneratedRegex(@"^ShizuStore( \(Debug\))?/\d+\.\d+\.\d+")]
     public static partial Regex ClientUserAgentPattern();
 
     public static bool IsClient(string? userAgent) =>

@@ -66,7 +66,7 @@ public enum Availability
     PlayRedirect,
     /// <summary>No APK source; client opens the source page in a Custom Tab.</summary>
     LinkOnly,
-    /// <summary>Play-sole-source entry; never sent to clients.</summary>
+    /// <summary>Hidden by policy (archived upstream or missing Shizuku permission); never sent to clients.</summary>
     Excluded,
 }
 

@@ -66,9 +66,9 @@ public sealed class App
     public string? ExcludedReason { get; set; }
 
     /// <summary>
-    /// Operator override: keep a Play-sole-source app as
-    /// <c>PlayRedirect</c> instead of excluding it. Never touched by the
-    /// upserter, set via admin tooling.
+    /// Operator override for the Shizuku permission gate: keep an app whose
+    /// served APK does not declare the Shizuku permission. Never touched by
+    /// the upserter, set via admin tooling.
     /// </summary>
     public bool ExcludeOverride { get; set; }
 

@@ -432,7 +432,7 @@ public sealed class SyncService(
                 case EnrichOutcome.UpToDate or EnrichOutcome.SkippedFresh:
                     upToDate++;
                     break;
-                default: // Enriched, AvatarFallback, Excluded
+                default: // Enriched, AvatarFallback
                     enriched++;
                     break;
             }

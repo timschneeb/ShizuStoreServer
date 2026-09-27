@@ -233,7 +233,6 @@ public static class JobSessionExtensions
         EnrichOutcome.Enriched => "OK",
         EnrichOutcome.AvatarFallback => "ok",
         EnrichOutcome.Failed => "FAIL",
-        EnrichOutcome.Excluded => "excluded",
         _ => "skip", // UpToDate, SkippedFresh
     };
 }

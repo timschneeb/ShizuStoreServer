@@ -75,14 +75,17 @@ unchanged.
 
 Non-client traffic: `NonClientRequestLoggingMiddleware` sits next to the UA
 middleware (after response compression, before `UseOutputCache`) and records
-one row per request whose `User-Agent` is not a
-`ShizuStore/<major>.<minor>.<patch>` client (debug builds append
-`-<commit>`, which still matches); requests without the header count as
+one row per request whose `User-Agent` is not a ShizuStore client
+(`ShizuStore/<major>.<minor>.<patch>`; debug builds send
+`ShizuStore (Debug)/<version>` and nightly builds append `-<commit>`, both
+still match); requests without the header count as
 non-client. Scope is **every** path: `/v1/*`, `/icons/*`, `/healthz`,
-404s, cache hits and 429s. Two exceptions are never logged: `GET /`, the
+404s, cache hits and 429s. Three exceptions are never logged: `GET /`, the
 browser-facing redirect to the project repo (browsers, bots and scanners hit
-it constantly and it says nothing about API use), and operator `/v1/admin/*`
-traffic. The row stores the request line, all
+it constantly and it says nothing about API use), operator `/v1/admin/*`
+traffic, and requests whose client IP
+(`CF-Connecting-IP`, else the first `X-Forwarded-For` hop, else the socket
+peer) appears in the comma-separated `RequestLog:ExcludedIps` list. The row stores the request line, all
 request headers as `jsonb` and the raw reconstructed request (both verbatim,
 `Authorization` included, nothing truncated), plus transport fields: socket
 peer, `CF-Connecting-IP` (else the first `X-Forwarded-For` hop), raw
@@ -618,8 +621,9 @@ therefore treats Izzy as forge-like.
   yields no release or no APK asset (for example a GitHub repo with no
   release), so those entries become a Play redirect instead of failing
   the pass.
-  Play-sole-source apps (no usable source link, no override) are
-  `Excluded` with a reason and hidden from every endpoint.
+  Play-sole-source apps (no usable source link) keep their Play
+  listing as `PlayRedirect` as well, so entries with no APK source stay
+  browsable instead of being hidden.
 
 ### 5.1 APK analysis (forge + changed F-Droid builds)
 
@@ -730,7 +734,7 @@ recompute. A newer release date or a changed checksum always
 re-analyzes; any gap (missing package, icon hash, or icon file)
 heals on the next pass.
 
-Outcomes: `Enriched`, `UpToDate`, `AvatarFallback`, `Excluded`,
+Outcomes: `Enriched`, `UpToDate`, `AvatarFallback`,
 `Failed` (`last_error` set, previous good values kept),
 `SkippedFresh`. Every completed check stamps `last_checked_at` (and
 clears `last_error`), including analyses whose build does not become
@@ -1371,9 +1375,10 @@ all environments; Scalar UI is development-only.
 | `UserAgentTracking:Enabled` | `true` | Anonymous per-UA request stats, DB-only (§2) |
 | `UserAgentTracking:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `UserAgentTracking:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
-| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/` and `/v1/admin/*`, DB-only (§2) |
+| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/`, `/v1/admin/*` and excluded IPs, DB-only (§2) |
 | `RequestLog:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `RequestLog:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
+| `RequestLog:ExcludedIps` | `""` | Comma-separated client IPs (IPv4 or IPv6) that are never logged |
 | `Jobs:MinLevel` | `Debug` | Lowest job-event level the DB sink stores; raise it to trim volume |
 | `Jobs:ChannelCapacity` | `20000` | Bounded job-event buffer; overflow increments `events_dropped` |
 | `Jobs:FlushIntervalSeconds` | `1` | DB sink flush period |

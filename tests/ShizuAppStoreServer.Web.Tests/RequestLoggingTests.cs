@@ -73,6 +73,7 @@ public sealed class RequestLoggingTests(ShizuApiFactory factory) : IClassFixture
         await ClientWithAgent(factory, "ShizuStore/1.1.0").GetAsync("/v1/meta");
         await ClientWithAgent(factory, "ShizuStore/1.1.0-abc1234").GetAsync("/v1/meta");
         await ClientWithAgent(factory, "ShizuStore/1.1.0 (Android 14; Pixel 8)").GetAsync("/v1/meta");
+        await ClientWithAgent(factory, "ShizuStore (Debug)/1.1.0").GetAsync("/v1/meta");
         await ClientWithAgent(factory, "ShizuStore/latest").GetAsync("/v1/meta");
 
         await RequestLogFlush.NowAsync(factory);
@@ -165,6 +166,71 @@ public sealed class RequestLogRateLimitTests : IDisposable
     public void Dispose() => _factory.Dispose();
 }
 
+/// <summary>Request logging with a configured IP exclusion list.</summary>
+public sealed class RequestLogExcludedIpTests : IDisposable
+{
+    private readonly ShizuApiFactory _factory =
+        new(100_000, "test-admin-secret", excludedIps: "203.0.113.7, 2001:db8::7");
+
+    [Fact]
+    public async Task ExcludedCloudflareIpIsNotLogged()
+    {
+        await _factory.ResetAsync(_ => { });
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/meta");
+        request.Headers.TryAddWithoutValidation("CF-Connecting-IP", "203.0.113.7");
+        request.Headers.TryAddWithoutValidation("X-Forwarded-For", "198.51.100.9");
+
+        await _factory.NewClient().SendAsync(request);
+        await RequestLogFlush.NowAsync(_factory);
+
+        Assert.Empty(await _factory.QueryAsync(db => db.RequestLogs.ToListAsync()));
+    }
+
+    [Fact]
+    public async Task ExcludedForwardedForHopIsNotLogged()
+    {
+        await _factory.ResetAsync(_ => { });
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/meta");
+        request.Headers.TryAddWithoutValidation("X-Forwarded-For", "203.0.113.7, 198.51.100.9");
+
+        await _factory.NewClient().SendAsync(request);
+        await RequestLogFlush.NowAsync(_factory);
+
+        Assert.Empty(await _factory.QueryAsync(db => db.RequestLogs.ToListAsync()));
+    }
+
+    [Fact]
+    public async Task UnlistedIpIsStillLogged()
+    {
+        await _factory.ResetAsync(_ => { });
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/meta");
+        request.Headers.TryAddWithoutValidation("CF-Connecting-IP", "203.0.113.8");
+
+        await _factory.NewClient().SendAsync(request);
+        await RequestLogFlush.NowAsync(_factory);
+
+        var row = await _factory.QueryAsync(db => db.RequestLogs.SingleAsync());
+        Assert.Equal("203.0.113.8", row.ClientIp);
+    }
+
+    [Fact]
+    public async Task SpoofedForwardedForDoesNotHideTheCloudflareClient()
+    {
+        await _factory.ResetAsync(_ => { });
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/meta");
+        request.Headers.TryAddWithoutValidation("CF-Connecting-IP", "198.51.100.9");
+        request.Headers.TryAddWithoutValidation("X-Forwarded-For", "203.0.113.7");
+
+        await _factory.NewClient().SendAsync(request);
+        await RequestLogFlush.NowAsync(_factory);
+
+        var row = await _factory.QueryAsync(db => db.RequestLogs.SingleAsync());
+        Assert.Equal("198.51.100.9", row.ClientIp);
+    }
+
+    public void Dispose() => _factory.Dispose();
+}
+
 /// <summary>Worker loop on a private SQLite connection, so the timer is not raced by test queries.</summary>
 public sealed class RequestLogWorkerTests
 {
@@ -213,15 +279,40 @@ public sealed class ClientUserAgentMatcherTests
     [InlineData("ShizuStore/1.1.0-abc1234", true)]
     [InlineData("ShizuStore/1.1.0 (Android 14; Pixel 8)", true)]
     [InlineData("ShizuStore/10.20.30", true)]
+    [InlineData("ShizuStore (Debug)/1.1.0", true)]
+    [InlineData("ShizuStore (Debug)/1.1.0 (Android 14; Pixel 8)", true)]
     [InlineData("ShizuStore/latest", false)]
     [InlineData("ShizuStore/1.1", false)]
     [InlineData("ShizuStore/", false)]
     [InlineData("ShizuStore", false)]
+    [InlineData("ShizuStore (Debug)/latest", false)]
+    [InlineData("ShizuStore (Debug)/1.1", false)]
+    [InlineData("ShizuStore (debug)/1.1.0", false)]
+    [InlineData("ShizuStore(Debug)/1.1.0", false)]
     [InlineData("shizustore/1.1.0", false)]
     [InlineData("Mozilla/5.0 ShizuStore/1.1.0", false)]
+    [InlineData("Mozilla/5.0 ShizuStore (Debug)/1.1.0", false)]
     [InlineData("curl/8.0", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
     public void MatchesOnlyClientReleasePrefixes(string? userAgent, bool expected) =>
         Assert.Equal(expected, ClientUserAgentMatcher.IsClient(userAgent));
+}
+
+public sealed class RequestLogOptionsTests
+{
+    [Theory]
+    [InlineData("203.0.113.7", "203.0.113.7", true)]
+    [InlineData("203.0.113.7, 198.51.100.9", "198.51.100.9", true)]
+    [InlineData("203.0.113.7", "203.0.113.8", false)]
+    [InlineData("2001:DB8::7", "2001:db8::7", true)]
+    [InlineData("", "203.0.113.7", false)]
+    [InlineData("203.0.113.7", null, false)]
+    [InlineData("203.0.113.7", " ", false)]
+    public void MatchesOnlyListedClientIps(string excludedIps, string? ip, bool expected)
+    {
+        var options = new RequestLogOptions { ExcludedIps = excludedIps };
+
+        Assert.Equal(expected, options.IsExcludedIp(ip));
+    }
 }

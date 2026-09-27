@@ -8,19 +8,22 @@ namespace ShizuAppStoreServer.Tracking;
 
 /// <summary>
 /// Records every request whose User-Agent is not a ShizuStore client, on every
-/// path: icons, health, 404s and 429s included. Two exceptions stay out of the
-/// log: the bare host (the browser-facing redirect to the project repo) and
-/// operator <c>/v1/admin/*</c> traffic. Registered next to the UA middleware
-/// (after response compression, before the output cache), so cache hits and
-/// rate-limited requests are visible too. Records after the response; headers
-/// and the raw request line are stored verbatim.
+/// path: icons, health, 404s and 429s included. Three exceptions stay out of
+/// the log: the bare host (the browser-facing redirect to the project repo),
+/// operator <c>/v1/admin/*</c> traffic, and client IPs on the configured
+/// exclusion list (<c>RequestLog:ExcludedIps</c>). Registered next to the UA
+/// middleware (after response compression, before the output cache), so cache
+/// hits and rate-limited requests are visible too. Records after the response;
+/// headers and the raw request line are stored verbatim.
 /// </summary>
 public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
 {
-    public async Task InvokeAsync(HttpContext context, RequestLogTracker tracker)
+    public async Task InvokeAsync(
+        HttpContext context, RequestLogTracker tracker, RequestLogOptions options)
     {
         if (IsExcluded(context.Request.Path)
-            || ClientUserAgentMatcher.IsClient(context.Request.Headers.UserAgent.ToString()))
+            || ClientUserAgentMatcher.IsClient(context.Request.Headers.UserAgent.ToString())
+            || options.IsExcludedIp(ClientIp(context)))
         {
             await next(context);
             return;
@@ -51,6 +54,19 @@ public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
     // neither says anything about how the public API is used.
     private static bool IsExcluded(PathString path) =>
         path == "/" || path.StartsWithSegments("/v1/admin");
+
+    /// <summary>
+    /// Real client IP for the exclusion list. Cloudflare rewrites
+    /// <c>CF-Connecting-IP</c>, so it wins over the client-supplied
+    /// <c>X-Forwarded-For</c>; the socket peer is the last resort.
+    /// </summary>
+    private static string? ClientIp(HttpContext context)
+    {
+        var request = context.Request;
+        return Header(request, "CF-Connecting-IP")
+            ?? FirstHop(Header(request, "X-Forwarded-For"))
+            ?? context.Connection.RemoteIpAddress?.ToString();
+    }
 
     private static RequestLogHit Capture(HttpContext context, int statusCode, int durationMs)
     {

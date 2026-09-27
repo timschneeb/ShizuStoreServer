@@ -1511,7 +1511,7 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
-    public async Task ExcludedPlayOnlyAppStillExcluded()
+    public async Task PlayOnlyAppBecomesPlayRedirect()
     {
         var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
         var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
@@ -1520,14 +1520,15 @@ public sealed class AppEnricherTests : IDisposable
         });
         var aapt2 = new FakeAapt2Runner(_ => throw new InvalidOperationException("must not run aapt2"));
         var play = new FakePlayClient(_ => "https://play-lh.googleusercontent.com/icon=s0-br30");
-        var app = NewApp("play-only-x", "Play Excluded",
+        var app = NewApp("play-only-x", "Play Only",
             "https://play.google.com/store/apps/details?id=com.example.pe");
 
         var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
 
-        Assert.Equal(EnrichOutcome.Excluded, result.Outcome);
-        Assert.Equal(Availability.Excluded, app.Availability);
-        Assert.Contains("no APK available", app.ExcludedReason);
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
+        Assert.Equal("https://play.google.com/store/apps/details?id=com.example.pe", app.StoreUrl);
+        Assert.Null(app.ExcludedReason);
         Assert.False(HasDownloads(app));
         Assert.Equal(1, play.Calls);
     }
@@ -3607,23 +3608,25 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
-    public async Task ExcludesPlaySoleSource()
+    public async Task PlaySoleSourceBecomesPlayRedirect()
     {
         var enricher = NoNetworkEnricher();
-        var app = NewApp("tasker", "Tasker", "https://play.google.com/store/apps/details?id=net.dinglisch.android.taskerm");
+        var play = "https://play.google.com/store/apps/details?id=net.dinglisch.android.taskerm";
+        var app = NewApp("tasker", "Tasker", play);
 
         var result = await enricher.EnrichAsync(app, T0);
 
-        Assert.Equal(EnrichOutcome.Excluded, result.Outcome);
-        Assert.Equal(Availability.Excluded, app.Availability);
+        Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
+        Assert.Equal(Availability.PlayRedirect, app.Availability);
         Assert.Equal(SourceKind.Play, app.SourceKind);
-        Assert.Contains("Play", app.ExcludedReason);
+        Assert.Equal(play, app.StoreUrl);
+        Assert.Null(app.ExcludedReason);
         Assert.Null(app.LastError);
         Assert.False(HasDownloads(app));
     }
 
     [Fact]
-    public async Task OverrideKeepsPlayRedirect()
+    public async Task ExcludeOverrideLeavesPlayRedirect()
     {
         var enricher = NoNetworkEnricher();
         var play = "https://play.google.com/store/apps/details?id=net.dinglisch.android.taskerm";
