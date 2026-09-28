@@ -93,7 +93,8 @@ rsync excludes it by name):
     "MaxRunsPerDay": 600,
     "MonthlyBudgetUsd": 20,
     "SnapshotRoot": "/opt/shizuappstore/tmp",
-    "LogPath": "/opt/shizuappstore/usage-logs"
+    "LogPath": "/opt/shizuappstore/usage-logs",
+    "LogRetention": "1.00:00:00"
   }
 }
 ```
@@ -107,10 +108,12 @@ Every analysis attempt writes a JSON transcript and a self-contained HTML
 page (conversation, expandable tool calls, token and cost stats) under
 `UsageAnalysis:LogPath`; point it at a writable directory such as
 `/opt/shizuappstore/usage-logs`, or set it to `null` to disable logging.
-The unit's `ReadWritePaths` must include that directory under
-`ProtectSystem=strict`, and `deploy/deploy.sh` creates it owned by `shizu`
-before the restart. Pages can be regenerated from the stored JSON with
-`ShizuAppStoreServer --render-usage-logs [dir]`.
+Files older than `UsageAnalysis:LogRetention` (default 24 hours) are deleted
+by the worker at startup and every 15 minutes; set the retention to `null` to
+keep transcripts forever. The unit's `ReadWritePaths` must include that
+directory under `ProtectSystem=strict`, and `deploy/deploy.sh` creates it
+owned by `shizu` before the restart. Pages can be regenerated from the stored
+JSON with `ShizuAppStoreServer --render-usage-logs [dir]`.
 
 GitHub PAT (higher Releases-API rate limits for the ~350-repo backfill):
 

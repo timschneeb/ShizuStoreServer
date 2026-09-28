@@ -146,6 +146,12 @@ public sealed class UsageAnalysisOptions
     /// </summary>
     public int MaxTranscriptToolResultChars { get; set; } = 20_000;
 
+    /// <summary>
+    /// Transcript files whose last write is older than this are deleted so the
+    /// log directory stays bounded. Null keeps them forever.
+    /// </summary>
+    public TimeSpan? LogRetention { get; set; } = TimeSpan.FromHours(24);
+
     /// <summary>Worker poll interval while the queue is empty.</summary>
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(10);
 

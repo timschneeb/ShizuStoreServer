@@ -30,6 +30,8 @@ public sealed class UsageAnalysisLogWriter(
     public static readonly JsonSerializerOptions Json =
         new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    private static readonly string[] TranscriptPatterns = ["*.json", "*.html"];
+
     public async Task<string?> WriteAsync(
         UsageAnalysisRun run,
         App app,
@@ -98,6 +100,52 @@ public sealed class UsageAnalysisLogWriter(
         }
 
         return rendered;
+    }
+
+    /// <summary>
+    /// Deletes stored transcript files whose last write is older than
+    /// <paramref name="retention"/>. Returns the number of deleted files.
+    /// A missing directory, a non-positive retention window and individual
+    /// delete failures are not errors.
+    /// </summary>
+    public static int PruneDirectory(string path, TimeSpan retention, ILogger? log = null)
+    {
+        if (retention <= TimeSpan.Zero || !Directory.Exists(path))
+        {
+            return 0;
+        }
+
+        var cutoff = DateTime.UtcNow - retention;
+        var deleted = 0;
+        foreach (var pattern in TranscriptPatterns)
+        {
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(path, pattern).ToList())
+                {
+                    if (File.GetLastWriteTimeUtc(file) >= cutoff)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        File.Delete(file);
+                        deleted++;
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        log?.LogWarning(ex, "Could not delete stale usage log {File}.", file);
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                log?.LogWarning(ex, "Could not scan usage logs in {Path}.", path);
+            }
+        }
+
+        return deleted;
     }
 
     private UsageLogDocument Build(

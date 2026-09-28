@@ -201,4 +201,50 @@ public sealed class UsageLogWriterTests : IDisposable
 
         Assert.Null(file);
     }
+
+    [Fact]
+    public async Task PrunesTranscriptsOlderThanTheRetentionWindow()
+    {
+        var writer = new UsageAnalysisLogWriter(_options, NullLogger<UsageAnalysisLogWriter>.Instance);
+        var fresh = await writer.WriteAsync(
+            NewRun(), NewApp(), null, DateTimeOffset.UtcNow,
+            new UsageAgentResult(null, 10, 0, 5, 0, 1, false, Transcript()), null);
+
+        var staleJson = Path.Combine(_dir, "20260901-000000-old-r1.json");
+        var staleHtml = Path.Combine(_dir, "20260901-000000-old-r1.html");
+        await File.WriteAllTextAsync(staleJson, "{}");
+        await File.WriteAllTextAsync(staleHtml, "<html></html>");
+        var stale = DateTime.UtcNow - TimeSpan.FromHours(25);
+        File.SetLastWriteTimeUtc(staleJson, stale);
+        File.SetLastWriteTimeUtc(staleHtml, stale);
+
+        Assert.Equal(2, UsageAnalysisLogWriter.PruneDirectory(
+            _dir, TimeSpan.FromHours(24), NullLogger.Instance));
+
+        Assert.False(File.Exists(staleJson));
+        Assert.False(File.Exists(staleHtml));
+        Assert.True(File.Exists(Path.Combine(_dir, fresh!)));
+        Assert.True(File.Exists(Path.Combine(_dir, Path.ChangeExtension(fresh!, ".json"))));
+    }
+
+    [Fact]
+    public async Task NonPositiveRetentionDeletesNothing()
+    {
+        Directory.CreateDirectory(_dir);
+        var file = Path.Combine(_dir, "20260901-000000-old-r1.json");
+        await File.WriteAllTextAsync(file, "{}");
+        File.SetLastWriteTimeUtc(file, DateTime.UtcNow - TimeSpan.FromDays(30));
+
+        Assert.Equal(0, UsageAnalysisLogWriter.PruneDirectory(
+            _dir, TimeSpan.Zero, NullLogger.Instance));
+
+        Assert.True(File.Exists(file));
+    }
+
+    [Fact]
+    public void PruneIsQuietForAMissingDirectory()
+    {
+        Assert.Equal(0, UsageAnalysisLogWriter.PruneDirectory(
+            Path.Combine(_dir, "does-not-exist"), TimeSpan.FromHours(24), NullLogger.Instance));
+    }
 }

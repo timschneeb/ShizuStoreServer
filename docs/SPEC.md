@@ -1113,7 +1113,9 @@ marker scanning survives only as internal context extraction.
   The HTML references no external assets; tool results
   are truncated at `MaxTranscriptToolResultChars`. `run.log_file` is
   returned by the admin status endpoint, and `--render-usage-logs [dir]`
-  re-renders every stored JSON.
+  re-renders every stored JSON. Transcripts whose last write is older than
+  `UsageAnalysis:LogRetention` (default 24 hours) are deleted by the worker
+  at startup and every 15 minutes; a null retention keeps them forever.
 - Budgets: per-run wall clock, tool-step cap, daily run cap and monthly
   USD cap from the recorded run costs. Failures retry with linear backoff
   and are then parked; the queue endpoint can force a retry.
@@ -1484,7 +1486,7 @@ all environments; Scalar UI is development-only.
 | `UsageAnalysis:InputPricePerMillion` / `CachedInputPricePerMillion` / `OutputPricePerMillion` | `0.14` / `0.0028` / `0.28` | Cost table for recorded usage |
 | `UsageAnalysis:RetryMaxAttempts` / `RetryBackoff` | `3` / `30min` | Failure retry policy |
 | `UsageAnalysis:SnapshotRoot` / `PollInterval` | `null` (temp) / `10s` | Checkout location and worker idle poll |
-| `UsageAnalysis:LogPath` / `MaxTranscriptToolResultChars` | `usage-logs` / `20000` | Per-run JSON+HTML transcript directory (null disables) and tool-result truncation (0 keeps everything) |
+| `UsageAnalysis:LogPath` / `LogRetention` / `MaxTranscriptToolResultChars` | `usage-logs` / `24h` / `20000` | Per-run JSON+HTML transcript directory (null disables), retention window (null keeps transcripts forever) and tool-result truncation (0 keeps everything) |
 | `Sync:ListPath` | `/opt/shizuappstore/list` | Local list clone |
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |
 | `Sync:NightlyTimeUtc` | `03:00` | Full re-check time (UTC) |
