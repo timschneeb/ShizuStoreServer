@@ -457,7 +457,10 @@ bundle` is rebuilt per deploy, never committed.
   syncs, are hard-deleted and reported by slug. Only root rows
   (`root_app_id` null) are matched or swept: a variant shares its
   root's URL, so it must never look like a duplicate or go stale on
-  its own. First-seen rows and stale-row tombstones are stamped with
+  its own. When a root does sweep out, its variants are hard-deleted
+  with it and each variant slug gets its own tombstone, so cached
+  clients drop the child rows too. First-seen rows and stale-row
+  tombstones are stamped with
   the write clock (`DateTimeOffset.UtcNow` inside the upsert), not the
   pass clock: `now` is captured before fetch + history parsing, so a
   client that syncs while the pass runs would hold a cursor past it and

@@ -121,6 +121,16 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             .ToList();
         var removedSlugs = stale.Select(a => a.Slug).ToList();
         WriteTombstones(tombstones, stale, commitNow);
+
+        // Variants cascade with their root at the DB level, but each owns a
+        // client row that only a tombstone can delete; without one the stale
+        // child lingers forever and /v1/changes never reports it.
+        var staleRootIds = stale.Where(a => a.Id != 0).Select(a => a.Id).ToHashSet();
+        WriteTombstones(
+            tombstones,
+            allApps.Where(a => a.RootAppId is { } rootId && staleRootIds.Contains(rootId)).ToList(),
+            commitNow);
+
         db.Apps.RemoveRange(stale);
 
         await db.SaveChangesAsync(ct);

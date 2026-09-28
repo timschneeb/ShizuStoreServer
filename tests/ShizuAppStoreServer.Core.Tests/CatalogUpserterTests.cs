@@ -311,6 +311,7 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.Equal((0, 0, 0), (counts.Added, counts.Updated, counts.Removed));
         Assert.Equal(5, await _db.Apps.CountAsync());
         Assert.Equal(1, await _db.Apps.CountAsync(a => a.RootAppId == root.Id));
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
     }
 
     [Fact]
@@ -333,6 +334,13 @@ public sealed class CatalogUpserterTests : IDisposable
 
         Assert.Contains("micup", counts.RemovedSlugs);
         Assert.Null(await _db.Apps.FirstOrDefaultAsync(a => a.Slug == "com-example-plugin"));
+
+        // The variant cascades with its root, but clients only delete rows
+        // listed in removed[], so a tombstone of its own is required.
+        var variantTombstone = await _db.RemovedApps.SingleOrDefaultAsync(t => t.Slug == "com-example-plugin");
+        Assert.NotNull(variantTombstone);
+        Assert.Equal("MicUp", variantTombstone.Name);
+        Assert.Equal(Listing.Main, variantTombstone.Listing);
     }
 
     private static App NewVariant(App root, string package, DateTimeOffset now) => new()
