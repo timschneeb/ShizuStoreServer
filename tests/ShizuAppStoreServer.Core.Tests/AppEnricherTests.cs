@@ -5483,6 +5483,10 @@ public sealed class AppEnricherTests : IDisposable
         Assert.True(candidates[0].IsPrimary);
         Assert.DoesNotContain(await _db.Downloads.ToListAsync(),
             d => d.PackageName == "moe.shizuku.privileged.api");
+
+        // The excluded drop-in stays remembered as a known artifact.
+        Assert.Contains(candidates[0].AnalyzedArtifacts,
+            entry => entry.EndsWith(" https://cdn.example/shizuku-plus-drop-in.apk", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -5533,6 +5537,12 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Single(candidates);
         Assert.Equal(survivor.Id, candidates[0].Id);
         Assert.True(candidates[0].IsPrimary);
+
+        // The dropped drop-in must stay remembered: the fast-path poll counts
+        // analyzed artifacts as recorded, and forgetting it would force this
+        // app on every pass although enrichment never serves it.
+        Assert.Contains(candidates[0].AnalyzedArtifacts,
+            entry => entry.EndsWith(" https://cdn.example/shizuku-plus-drop-in.apk", StringComparison.Ordinal));
     }
 
     [Fact]

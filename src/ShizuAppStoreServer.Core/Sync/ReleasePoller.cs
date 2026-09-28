@@ -14,7 +14,7 @@ namespace ShizuAppStoreServer.Core.Sync;
 public interface IReleasePoller
 {
     /// <returns>Ids of non-excluded apps whose upstream release looks newer
-    /// than the recorded primary download. Empty when the poll is disabled,
+    /// than the recorded artifacts. Empty when the poll is disabled,
     /// unauthenticated, or everything is unchanged. Never throws on
     /// upstream trouble (fail-open to due-only enrichment), except on
     /// cancellation or an unwritable DB.</returns>
@@ -24,13 +24,18 @@ public interface IReleasePoller
 /// <summary>
 /// Cheap per-source new-release signal, read-only (the F-Droid index
 /// provider cache is the only state touched). GitHub compares the picked
-/// APK/zip asset URL against the primary download (the stored ETag rides
-/// along, so unchanged feeds answer 304); GitLab does the same URL
-/// compare (its API largely ignores ETags); F-Droid/Izzy fetch each repo
-/// index once and compare version codes in memory. Play, link-only,
-/// Codeberg and the GitCode special case have no cheap signal and stay
-/// on the due window. Poll failures are soft (unchanged), so a
-/// flapping upstream never marks rows failed.
+/// APK/zip asset URL against the URLs already known for the app's repo:
+/// every row's served URL of every entry served from it, plus the flavor
+/// twins, alternatives and operator-excluded artifacts the enricher
+/// remembered in analyzed_artifacts (the stored ETag rides
+/// along, so unchanged feeds answer 304); GitLab does the same compare
+/// (its API largely ignores ETags); a root with variant apps instead
+/// requires every .apk asset of the release to be known, so a new app or
+/// a new build flips the root; F-Droid/Izzy fetch each repo index once
+/// and compare version codes in memory. Play, link-only, Codeberg and
+/// the GitCode special case have no cheap signal and stay on the due
+/// window. Poll failures are soft (unchanged), so a flapping upstream
+/// never marks rows failed.
 /// </summary>
 public sealed class ReleasePoller(
     ShizuDbContext db,
@@ -41,15 +46,11 @@ public sealed class ReleasePoller(
     SyncOptions sync,
     ILogger<ReleasePoller>? log = null) : IReleasePoller
 {
-    // Same special cases as AppEnricher: instafel's list URL points at the
-    // source monorepo while the updater releases live in u-rel, so poll that
-    // feed; hlbmerge rebuilds only on GitCode, so skip the GitHub poll.
-    // SmartspacerPlugins spreads its apps across many releases, so one
-    // latest-release compare cannot see them; it stays on the due window.
-    private const string InstafelListOwner = "mamiiblt";
-    private const string InstafelListRepo = "instafel";
-    private const string InstafelUpdaterOwner = "instafel";
-    private const string InstafelUpdaterRepo = "u-rel";
+    // Shared special cases live in ForgeReleaseHomes (instafel, LinkSheet),
+    // so the poll and enrichment always watch the same repo. hlbmerge
+    // rebuilds only on GitCode, so skip the GitHub poll. SmartspacerPlugins
+    // spreads its apps across many releases, so one latest-release compare
+    // cannot see them; it stays on the due window.
     private const string HlbmergeOwner = "molihuan";
     private const string HlbmergeRepo = "hlbmerge_flutter";
     private const string SmartspacerOwner = "KieronQuinn";
@@ -132,10 +133,39 @@ public sealed class ReleasePoller(
             }
         }
 
+        // One repo can back several list entries, each serving one of its
+        // packages. The known set is built per repo and shared by every entry,
+        // so an asset recorded by a sibling entry makes the release known here
+        // instead of flagging this app on every pass. Rows alone are not
+        // enough: the enricher deliberately keeps not-served twins and
+        // alternatives off the rows and remembers them as analyzed artifacts,
+        // and both count or the poll would force an enrich that never converges.
+        var knownByRepo = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var knownByApp = new Dictionary<long, HashSet<string>>();
+        foreach (var target in forge)
+        {
+            var key = RepoKey(target);
+            if (!knownByRepo.TryGetValue(key, out var known))
+            {
+                known = new HashSet<string>(StringComparer.Ordinal);
+                knownByRepo[key] = known;
+            }
+
+            knownByApp[target.App.Id] = known;
+            if (groupDownloads.TryGetValue(target.App.Id, out var rows))
+            {
+                foreach (var row in rows)
+                {
+                    known.Add(row.ApkUrl);
+                    known.UnionWith(RecordedArtifacts.Urls(row));
+                }
+            }
+        }
+
         var changed = new HashSet<long>();
         foreach (var (app, isChanged) in await BulkEnricher.EnrichManyAsync<ForgeTarget, bool>(
             forge,
-            (t, c) => PollForgeAsync(t, groupDownloads, variantsByRoot.ContainsKey(t.App.Id), c),
+            (t, c) => PollForgeAsync(t, groupDownloads, knownByApp, variantsByRoot.ContainsKey(t.App.Id), c),
             Math.Max(1, sync.PollParallelism), _ => false, ct))
         {
             if (isChanged)
@@ -157,6 +187,11 @@ public sealed class ReleasePoller(
         if (SourceClassifier.TryParseGitHubRepo(app.Url, out var owner, out var repo)
             || SourceClassifier.TryParseGitHubRepo(app.SourceUrl, out owner, out repo))
         {
+            // Instafel and LinkSheet publish from a repo other than the listed
+            // one; watching the listed repo would compare a feed that never
+            // changes. Same remap as AppEnricher, shared so it cannot drift.
+            (owner, repo) = ForgeReleaseHomes.Remap(owner, repo);
+
             // hlbmerge rebuilds only on GitCode, so a GitHub poll would
             // compare the wrong feed.
             if (owner == HlbmergeOwner && repo == HlbmergeRepo)
@@ -169,14 +204,6 @@ public sealed class ReleasePoller(
             if (owner == SmartspacerOwner && repo == SmartspacerRepo)
             {
                 return null;
-            }
-
-            // instafel's list URL points at the source monorepo; the updater
-            // releases live in u-rel, so poll that feed instead.
-            if (owner == InstafelListOwner && repo == InstafelListRepo)
-            {
-                owner = InstafelUpdaterOwner;
-                repo = InstafelUpdaterRepo;
             }
 
             return new ForgeTarget(app, owner, repo, true);
@@ -216,9 +243,13 @@ public sealed class ReleasePoller(
         return true;
     }
 
+    private static string RepoKey(ForgeTarget target) =>
+        $"{target.IsGitHub}:{target.OwnerOrProject}/{target.Repo}".ToLowerInvariant();
+
     private async Task<bool> PollForgeAsync(
         ForgeTarget target,
         Dictionary<long, List<AppDownload>> groupDownloads,
+        Dictionary<long, HashSet<string>> knownByApp,
         bool hasVariants,
         CancellationToken ct)
     {
@@ -243,9 +274,12 @@ public sealed class ReleasePoller(
             }
 
             var rows = groupDownloads.TryGetValue(target.App.Id, out var group) ? group : [];
+            var known = knownByApp.TryGetValue(target.App.Id, out var repoKnown)
+                ? repoKnown
+                : [];
 
             // A multi-app repo ships several packages per release: the poll is
-            // stale as soon as any APK asset is not recorded on the group.
+            // stale as soon as any APK asset is unknown to the group.
             if (hasVariants)
             {
                 var latest = release.Assets
@@ -257,8 +291,7 @@ public sealed class ReleasePoller(
                     return false;
                 }
 
-                var recorded = rows.Select(d => d.ApkUrl).ToHashSet(StringComparer.Ordinal);
-                return !latest.IsSubsetOf(recorded);
+                return !latest.IsSubsetOf(known);
             }
 
             var latestUrl = ApkAssetSelector.PickApk(release.Assets)?.Url
@@ -270,8 +303,10 @@ public sealed class ReleasePoller(
                 return false;
             }
 
+            // A missing primary still means "needs enrichment" (heals rows
+            // created before a serveable asset existed).
             var primary = rows.FirstOrDefault(d => d.IsPrimary);
-            return primary is null || primary.ApkUrl != latestUrl;
+            return primary is null || !known.Contains(latestUrl);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

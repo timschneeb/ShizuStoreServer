@@ -205,6 +205,44 @@ public sealed class ReleasePollerTests : IDisposable
     }
 
     [Fact]
+    public async Task GitHubPickOnSiblingRowSkipped()
+    {
+        // The stable pick is a sibling row of the same release (another ABI),
+        // not the primary; a recorded row URL still counts as known.
+        const string primaryUrl = "https://github.com/acme/tuner/releases/download/v2/app-arm64-v8a.apk";
+        const string pickedUrl = "https://github.com/acme/tuner/releases/download/v2/app-universal-release.apk";
+        var app = SeedApp("tuner", "https://github.com/acme/tuner");
+        SeedDownload(app.Id, primaryUrl, SourceKind.GitHub);
+        SeedDownload(app.Id, pickedUrl, SourceKind.GitHub, primary: false);
+        var poller = Poller(github: new StubGitHub((_, _, _) => Task.FromResult<SourceRelease?>(
+            new SourceRelease("v2", null, "\"e\"", [
+                new SourceAsset("app-arm64-v8a.apk", primaryUrl, Primary: true, Size: 1000),
+                new SourceAsset("app-universal-release.apk", pickedUrl, Size: 2000)]))));
+
+        Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task GitHubPickRememberedInAnalyzedArtifactsSkipped()
+    {
+        // The picked stable asset is a flavor twin the enricher analyzed but
+        // kept off the row; only the remembered artifact makes the release
+        // known, so the poll must not flip the app on every pass.
+        const string servedUrl = "https://github.com/acme/tuner/releases/download/v1.5.3-pr1/app-universal-release.apk";
+        const string pickedUrl = "https://github.com/acme/tuner/releases/download/v1.5.2/app-universal-release.apk";
+        var app = SeedApp("tuner", "https://github.com/acme/tuner");
+        SeedDownload(app.Id, servedUrl, SourceKind.GitHub);
+        var row = _db.Downloads.Single(d => d.AppId == app.Id);
+        row.AnalyzedArtifacts = [$"deadbeef {pickedUrl}"];
+        _db.SaveChanges();
+        var poller = Poller(github: new StubGitHub((_, _, _) => Task.FromResult<SourceRelease?>(
+            new SourceRelease("v1.5.2", null, "\"e\"",
+                [new SourceAsset("app-universal-release.apk", pickedUrl, Primary: true, Size: 1000)]))));
+
+        Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
     public async Task GitHubNewerPrereleaseDoesNotDirtyStableApp()
     {
         // The feed gained an automatic prerelease above the served stable.
@@ -296,6 +334,47 @@ public sealed class ReleasePollerTests : IDisposable
     }
 
     [Fact]
+    public async Task VariantRootSkippedWhenAssetsOnlyRememberedInAnalyzedArtifacts()
+    {
+        // The release's whole .apk set is known only once the variant's
+        // remembered twins count; row URLs alone would keep flagging it.
+        const string main = "https://github.com/acme/tuner/releases/download/v2/app.apk";
+        const string served = "https://github.com/acme/tuner/releases/download/v2/plugin-arm64.apk";
+        const string twin = "https://github.com/acme/tuner/releases/download/v2/plugin-universal.apk";
+        var app = SeedApp("tuner", "https://github.com/acme/tuner");
+        SeedDownload(app.Id, main, SourceKind.GitHub);
+        var variant = SeedVariant(app, served);
+        var row = _db.Downloads.Single(d => d.AppId == variant.Id);
+        row.AnalyzedArtifacts = [$"feedface {twin}"];
+        _db.SaveChanges();
+        var poller = Poller(github: new StubGitHub((_, _, _) => Task.FromResult<SourceRelease?>(
+            new SourceRelease("v2", null, "\"e\"", [
+                new SourceAsset("app.apk", main, Size: 10),
+                new SourceAsset("plugin-arm64.apk", served, Size: 11),
+                new SourceAsset("plugin-universal.apk", twin, Size: 12)]))));
+
+        Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task SiblingRootRecordedUrlMakesPickKnown()
+    {
+        // Two list entries can share one repo, each serving one package (for
+        // example Lemmy Redirect and Mastodon Redirect). The known set is
+        // repo-wide, so the asset recorded by the sibling entry must not flag
+        // this entry even though its own rows never carry it.
+        const string shared = "https://cdn.example/mastodon-release.apk";
+        var sibling = SeedApp("redirect-mastodon", "https://github.com/acme/redirect");
+        var app = SeedApp("redirect-lemmy", "https://github.com/acme/redirect");
+        SeedDownload(sibling.Id, shared, SourceKind.GitHub);
+        SeedDownload(app.Id, "https://cdn.example/lemmy-release.apk", SourceKind.GitHub);
+        var poller = Poller(github: new StubGitHub((_, _, _) => Task.FromResult<SourceRelease?>(
+            GitHubReleaseWith(shared))));
+
+        Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
     public async Task SmartspacerRepoIsNotForgePolled()
     {
         // SmartspacerPlugins ships a separate release per plugin, so the
@@ -303,6 +382,40 @@ public sealed class ReleasePollerTests : IDisposable
         SeedApp("smartspacer", "https://github.com/KieronQuinn/SmartspacerPlugins");
 
         Assert.Empty(await Poller().FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task LinkSheetPolledThroughNightlyRepo()
+    {
+        // LinkSheet's source repo stopped publishing releases; the poll must
+        // watch LinkSheet/nightly like the enricher does, not the listed repo.
+        const string url = "https://github.com/LinkSheet/nightly/releases/download/nightly-2026091203/LinkSheet-foss-nightly.apk";
+        var app = SeedApp("linksheet", "https://github.com/LinkSheet/LinkSheet");
+        SeedDownload(app.Id, url, SourceKind.GitHub);
+        var poller = Poller(github: new StubGitHub((owner, repo, _) =>
+        {
+            Assert.Equal("LinkSheet", owner);
+            Assert.Equal("nightly", repo);
+            return Task.FromResult<SourceRelease?>(new SourceRelease(
+                "nightly-2026091203", null, "\"e\"",
+                [new SourceAsset("LinkSheet-foss-nightly.apk", url, Primary: true, Size: 1000)]));
+        }));
+
+        Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task InstafelPolledThroughUpdaterRepo()
+    {
+        SeedApp("instafel", "https://github.com/mamiiblt/instafel");
+        var poller = Poller(github: new StubGitHub((owner, repo, _) =>
+        {
+            Assert.Equal("instafel", owner);
+            Assert.Equal("u-rel", repo);
+            return Task.FromResult<SourceRelease?>(null);
+        }));
+
+        Assert.Empty(await poller.FindChangedAsync());
     }
 
     [Fact]

@@ -1247,25 +1247,31 @@ Every non-nightly pass cheaply checks whether apps still inside
 their re-check window released something new, and force-enriches
 the changed ones. The poll is metadata-only (release feeds plus
 one F-Droid/Izzy index fetch per repo, no APK download, no aapt2,
-no DB writes) and compares against the recorded downloads:
-GitHub/GitLab compare the picked APK/zip asset URL against the
-primary download (the stored ETag rides along, so unchanged GitHub
-feeds answer 304); a root with variant rows (§5.2) instead compares
-the release's whole `.apk` URL set against the union of the root's
-and its variants' download URLs, since no single primary represents
-them; F-Droid/Izzy compare the index version code
-and APK URL against the matching download row. Play, link-only,
-Codeberg and the GitCode special case have no cheap signal and
-  stay on the due window; instafel's list entry is polled through
-  its real release repo (instafel/u-rel), LinkSheet through its nightly
-  release repo (LinkSheet/nightly), while SmartspacerPlugins is
-  skipped (its apps span separate releases, §5.2). Skipped apps (excluded) and
-rows without a matching download count as changed, so they enrich
-on the next pass. Poll failures are soft (unchanged): a flapping
-upstream never marks rows failed, and a throwing poller degrades
-the pass to due-only enrichment. The poll needs a GitHub PAT
-(anonymous limits cover 60 calls/hr); without one it stays off
-with a startup warning and fast passes enrich due-only apps.
+no DB writes) and compares against the same recorded artifacts
+enrichment uses, so the two agree on what is already known: every
+row's served URL, the flavor twins and alternatives remembered in
+`analyzed_artifacts`, and operator-excluded artifacts (remembered
+when the exclusion drops them). One repo can back several list
+entries, so the set is shared across every entry served from it.
+GitHub/GitLab compare the picked APK/zip asset URL against that set
+(the stored ETag rides along, so unchanged GitHub feeds answer 304);
+a root with variant rows (§5.2) instead requires the release's whole
+`.apk` URL set to be known, since no single primary represents them;
+F-Droid/Izzy compare the index version code and APK URL against the
+matching download row.
+Play, link-only, Codeberg and the GitCode special case have no
+cheap signal and stay on the due window; instafel's list entry is
+polled through its real release repo (instafel/u-rel) and LinkSheet
+through its nightly release repo (LinkSheet/nightly), both shared
+with enrichment via `ForgeReleaseHomes`, while SmartspacerPlugins is
+skipped (its apps span separate releases, §5.2). Skipped apps
+(excluded) and rows without a matching download still count as
+changed, so they enrich on the next pass. Poll failures are soft
+(unchanged): a flapping upstream never marks rows failed, and a
+throwing poller degrades the pass to due-only enrichment. The poll
+needs a GitHub PAT (anonymous limits cover 60 calls/hr); without one
+it stays off with a startup warning and fast passes enrich due-only
+apps.
 
 ### 7.3 Job log (`job_runs` + `job_events`, optional file sink)
 

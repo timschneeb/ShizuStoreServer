@@ -91,23 +91,13 @@ public sealed class AppEnricher(
     ITrackerCatalog? trackers = null,
     IUsageAnalysisQueue? usageQueue = null)
 {
-    // Special-case release homes (user calls): the GitHub projects below
-    // publish no usable release assets on GitHub itself. The list links the
-    // instafel source monorepo, but the updater APK ships from u-rel.
-    private const string InstafelListOwner = "mamiiblt";
-    private const string InstafelListRepo = "instafel";
-    private const string InstafelUpdaterOwner = "instafel";
-    private const string InstafelUpdaterRepo = "u-rel";
+    // Special-case release homes (instafel, LinkSheet) live in
+    // ForgeReleaseHomes so enrichment and the release poll cannot drift.
+    // hlbmerge rebuilds only on GitCode, so its releases are fetched there.
     private const string HlbmergeGitHubOwner = "molihuan";
     private const string HlbmergeGitHubRepo = "hlbmerge_flutter";
     private const string HlbmergeGitCodeOwner = "bigmolihuan";
     private const string HlbmergeGitCodeRepo = "hlbmerge_flutter";
-
-    // LinkSheet stopped publishing releases from its source repo; the nightly
-    // repo carries them. The source repo stays the analysis target.
-    private const string LinkSheetListOwner = "LinkSheet";
-    private const string LinkSheetListRepo = "LinkSheet";
-    private const string LinkSheetNightlyRepo = "nightly";
 
     // One repo, several distinct apps, each in its own GitHub release; the
     // newest release only carries one of them, so scan them all.
@@ -534,20 +524,9 @@ public sealed class AppEnricher(
             app.SourceKind = SourceKind.GitHub;
             KeepPlayStoreUrl(app, githubPrimary);
 
-            // The list links instafel's source monorepo; the updater APK ships
-            // from a separate release repo. Treat it as a plain GitHub source.
-            if (owner == InstafelListOwner && repo == InstafelListRepo)
-            {
-                owner = InstafelUpdaterOwner;
-                repo = InstafelUpdaterRepo;
-            }
-
-            // LinkSheet publishes from a nightly release repo; the source repo
-            // is still the analysis target for usage and screenshots.
-            if (owner == LinkSheetListOwner && repo == LinkSheetListRepo)
-            {
-                repo = LinkSheetNightlyRepo;
-            }
+            // Instafel and LinkSheet publish from separate release repos; the
+            // list target stays the analysis source for usage and screenshots.
+            (owner, repo) = ForgeReleaseHomes.Remap(owner, repo);
 
             EnrichResult result;
             if (gitcode is not null && owner == HlbmergeGitHubOwner && repo == HlbmergeGitHubRepo)
@@ -1068,7 +1047,7 @@ public sealed class AppEnricher(
 
             foreach (var entry in download.AnalyzedArtifacts)
             {
-                var parsed = ParseArtifactEntry(entry);
+                var parsed = RecordedArtifacts.Parse(entry);
                 if (parsed is null)
                 {
                     continue;
@@ -1453,7 +1432,15 @@ public sealed class AppEnricher(
         var presented = new List<App>();
         var listPackage = ListEndpointPackage(root);
 
+        var scanned = analyses;
         analyses = await ApplyDownloadExclusionsAsync(root, analyses, ct);
+        // Operator-excluded artifacts are never served, but they must still be
+        // remembered as recorded: the fast-path poll compares the release
+        // against the stored URLs, and an unrecorded exclusion forces this app
+        // on every pass even though enrichment will never serve it.
+        var excludedArtifacts = scanned
+            .Where(a => !analyses.Any(kept => ReferenceEquals(kept, a)))
+            .ToList();
 
         // A repo can ship the same package for phone, TV and watch (for example
         // universal-installer's app/tv/wearos release APKs); the phone build is
@@ -1504,6 +1491,23 @@ public sealed class AppEnricher(
                 {
                     result = applied;
                     presented.Add(target);
+                }
+            }
+        }
+
+        if (excludedArtifacts.Count > 0)
+        {
+            // A row marked for deletion is still visible to the query until the
+            // DELETE flushes, so never anchor the memory on it.
+            var alive = (await LoadGroupDownloadsAsync(root, ct))
+                .Where(d => db.Entry(d).State != EntityState.Deleted)
+                .ToList();
+            var host = alive.FirstOrDefault(d => d.IsPrimary) ?? alive.FirstOrDefault();
+            if (host is not null)
+            {
+                foreach (var analysis in excludedArtifacts)
+                {
+                    RememberArtifact(host, analysis.FileSha256, analysis.ArtifactUrl);
                 }
             }
         }
@@ -2573,14 +2577,8 @@ public sealed class AppEnricher(
         }
 
         row.AnalyzedArtifacts.RemoveAll(entry =>
-            ParseArtifactEntry(entry) is { } parsed && string.Equals(parsed.Url, url, StringComparison.Ordinal));
+            RecordedArtifacts.Parse(entry) is { } parsed && string.Equals(parsed.Url, url, StringComparison.Ordinal));
         row.AnalyzedArtifacts.Add($"{sha} {url}");
-    }
-
-    private static (string Sha256, string Url)? ParseArtifactEntry(string entry)
-    {
-        var split = entry.IndexOf(' ');
-        return split > 0 && split < entry.Length - 1 ? (entry[..split], entry[(split + 1)..]) : null;
     }
 
     /// <summary>
