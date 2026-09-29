@@ -1,0 +1,9 @@
+@inject ShizuAppStoreServer.Web.Services.IAppReleaseProvider ReleaseProvider
+@{
+    var apkUrl = await ReleaseProvider.GetLatestApkUrlAsync();
+}
+<div class="app-nudge" id="app-nudge" hidden>
+    <span class="app-nudge-text">Did nothing happen? You may need to install or update the ShizuStore app.</span>
+    <a class="app-nudge-link" href="@apkUrl">Download now</a>
+    <button type="button" class="app-nudge-close" data-nudge-close aria-label="Dismiss">&#x2715;</button>
+</div>

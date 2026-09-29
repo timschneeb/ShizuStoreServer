@@ -1,0 +1,60 @@
+@page "/privacy"
+@model PrivacyModel
+@{
+    ViewData["Title"] = "Privacy policy";
+    ViewData["Description"] = "How ShizuStore handles data in the website and the Android app.";
+}
+
+<article class="privacy">
+    <h1>Privacy policy</h1>
+    <p>
+        ShizuStore is an open-source app store for Shizuku apps. This page describes what
+        data the website at shizustore.com and the ShizuStore Android app process.
+    </p>
+
+    <h2>Website</h2>
+    <ul>
+        <li>The website has no user accounts, cookies, or analytics scripts.</li>
+        <li>
+            Like any web server, the API and storefront log requests (timestamp, IP address,
+            requested path and User-Agent) to protect the service from abuse and to produce
+            aggregate usage statistics. Logs are not used to identify individuals.
+        </li>
+        <li>
+            The site is served through Cloudflare, which proxies requests and may process
+            your IP address and User-Agent for security and performance purposes under
+            its own
+            <a href="https://www.cloudflare.com/privacypolicy/" rel="noopener noreferrer">privacy policy</a>.
+        </li>
+        <li>
+            Pages may show images from upstream project pages or GitHub; those requests are
+            governed by the respective site's privacy policy.
+        </li>
+    </ul>
+
+    <h2>Android app</h2>
+    <ul>
+        <li>The app has no user accounts and does not collect personal data.</li>
+        <li>
+            When you install an app, the app sends an anonymous install report to the API
+            containing the app's slug, version code and whether it was a fresh install or an
+            update. No device or user identifiers are attached.
+        </li>
+        <li>
+            Catalog requests contain no account or device identifiers; the server records
+            aggregate request and User-Agent statistics.
+        </li>
+        <li>
+            APK downloads go directly from your device to the upstream project page.
+            ShizuStore never mirrors APKs.
+        </li>
+    </ul>
+
+    <h2>Contact</h2>
+    <p>
+        Questions go to
+        <a href="mailto:shizustore@timschneeberger.me">shizustore@timschneeberger.me</a>
+        or via the
+        <a href="https://github.com/timschneeb/ShizuStore/issues" rel="noopener noreferrer">GitHub issue tracker</a>.
+    </p>
+</article>

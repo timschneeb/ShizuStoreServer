@@ -1,0 +1,70 @@
+﻿<!DOCTYPE html>
+<html lang="en" class="mdui-theme-auto">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@(ViewData["Title"] is string title && title.Length > 0 ? $"{title} - ShizuStore" : "ShizuStore")</title>
+    @if (ViewData["Description"] is string description && description.Length > 0)
+    {
+        <meta name="description" content="@description" />
+    }
+    @{
+        var ogTitle = ViewData["Title"] is string titleValue && titleValue.Length > 0 ? titleValue : "ShizuStore";
+        var ogDescription = ViewData["Description"] as string;
+        var ogImage = ViewData["OgImage"] as string ?? "https://shizustore.com/apple-touch-icon.png";
+        var ogUrl = $"https://shizustore.com{Context.Request.Path}";
+    }
+    <meta property="og:site_name" content="ShizuStore" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="@ogTitle" />
+    <meta property="og:url" content="@ogUrl" />
+    <meta property="og:image" content="@ogImage" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="@ogTitle" />
+    <meta name="twitter:image" content="@ogImage" />
+    @if (!string.IsNullOrWhiteSpace(ogDescription))
+    {
+        <meta property="og:description" content="@ogDescription" />
+        <meta name="twitter:description" content="@ogDescription" />
+    }
+    <link rel="icon" href="~/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="~/apple-touch-icon.png" />
+    <link rel="stylesheet" href="~/lib/mdui/mdui.css" asp-append-version="true" />
+    <link rel="stylesheet" href="~/lib/material-symbols/material-symbols.css" asp-append-version="true" />
+    <link rel="stylesheet" href="~/site.css" asp-append-version="true" />
+    <script src="~/lib/mdui/mdui.global.js" asp-append-version="true" defer></script>
+    <script src="~/site.js" asp-append-version="true" defer></script>
+</head>
+<body>
+    <partial name="_IconSprite" />
+    <mdui-top-app-bar class="site-top-bar" scroll-behavior="elevate" role="banner">
+        <div class="wrap">
+            <a class="site-brand" href="/"><img class="site-brand-icon" src="~/apple-touch-icon.png" alt="" width="28" height="28" />ShizuStore</a>
+            <nav class="site-nav">
+                <mdui-button variant="text" href="/apps">Apps</mdui-button>
+                <mdui-button-icon href="https://github.com/timschneeb/ShizuStore" target="_blank" rel="noopener noreferrer">
+                    <partial name="_Icon" model="@(("github", "icon"))" />
+                    <span class="visually-hidden">GitHub repository</span>
+                </mdui-button-icon>
+            </nav>
+        </div>
+    </mdui-top-app-bar>
+    <main class="wrap site-main">
+        @if (ViewData["HideAppBanner"] is not true)
+        {
+            <partial name="_AppBanner" />
+        }
+        @RenderBody()
+    </main>
+    <footer class="site-footer">
+        <div class="wrap">
+            <p>ShizuStore never hosts APKs. Downloads come from the upstream project pages.</p>
+            <nav class="footer-nav">
+                <a href="/privacy">Privacy policy</a>
+                <a href="https://github.com/timschneeb/ShizuStore" rel="noopener noreferrer">GitHub</a>
+            </nav>
+        </div>
+    </footer>
+    @await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

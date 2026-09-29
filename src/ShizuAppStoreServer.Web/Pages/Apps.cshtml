@@ -1,0 +1,187 @@
+@page "/apps"
+@model AppsModel
+@{
+    ViewData["Title"] = "Apps";
+}
+
+<div class="apps-toolbar">
+    <form class="app-search" method="get" action="/apps">
+        @if (Model.Sort != AppListSort.Stars)
+        {
+            <input type="hidden" name="sort" value="@Model.SortKey" />
+        }
+        @if (Model.CategorySlug is not null)
+        {
+            <input type="hidden" name="category" value="@Model.CategorySlug" />
+        }
+        @if (Model.PriceKey is not null)
+        {
+            <input type="hidden" name="price" value="@Model.PriceKey" />
+        }
+        @if (Model.Recommended)
+        {
+            <input type="hidden" name="recommended" value="true" />
+        }
+        <input type="search" name="q" value="@Model.Query" placeholder="Search apps" aria-label="Search apps" />
+    </form>
+
+    <div class="filter-row">
+        <mdui-dropdown placement="auto">
+            <button slot="trigger" type="button" class="filter-chip @(Model.CategoryName is not null ? "selected" : "")">
+                @if (AppIcons.CategorySymbol(Model.CategorySlug) is { } categorySymbol)
+                {
+                    <partial name="_Symbol" model="@categorySymbol" />
+                }
+                else if (Model.CategorySlug is { } categorySlug)
+                {
+                    <partial name="_Icon" model="@((AppIcons.CategorySpriteId(categorySlug), "icon icon-chip"))" />
+                }
+                @(Model.CategoryName ?? "All categories")
+                <partial name="_Icon" model="@(("arrow-down", "icon icon-chip"))" />
+            </button>
+            <div class="category-cloud">
+                <a class="filter-chip @(Model.CategorySlug is null ? "selected" : "")" href="@Model.ListUrl(null, Model.Sort, Model.Price, Model.Recommended)">
+                    <partial name="_Symbol" model="@AppIcons.CategoryFallback" />
+                    All categories
+                </a>
+                @foreach (var category in Model.Categories)
+                {
+                    <a class="filter-chip @(Model.CategorySlug == category.Slug ? "selected" : "")" href="@Model.ListUrl(category.Slug, Model.Sort, Model.Price, Model.Recommended)">
+                        @if (AppIcons.CategorySymbol(category.Slug) is { } symbol)
+                        {
+                            <partial name="_Symbol" model="@symbol" />
+                        }
+                        else
+                        {
+                            <partial name="_Icon" model="@((AppIcons.CategorySpriteId(category.Slug), "icon icon-chip"))" />
+                        }
+                        @category.Name
+                    </a>
+                }
+            </div>
+        </mdui-dropdown>
+
+        <mdui-dropdown placement="auto">
+            <button slot="trigger" type="button" class="filter-chip @(Model.Sort != AppListSort.Stars ? "selected" : "")">
+                <partial name="_Symbol" model="@AppIcons.SortSymbol(Model.Sort)" />
+                @Model.SortLabel(Model.Sort)
+                <partial name="_Icon" model="@(("arrow-down", "icon icon-chip"))" />
+            </button>
+            <mdui-menu selects="single" value="@Model.SortKey">
+                @foreach (var sort in new[] { AppListSort.Name, AppListSort.RecentlyAdded, AppListSort.RecentlyUpdated, AppListSort.Stars, AppListSort.Downloads, AppListSort.SizeDesc })
+                {
+                    <mdui-menu-item value="@sort.ToString().ToLowerInvariant()" href="@Model.ListUrl(Model.CategorySlug, sort, Model.Price, Model.Recommended)">
+                        <span slot="icon"><partial name="_Symbol" model="@AppIcons.SortSymbol(sort)" /></span>
+                        @Model.SortLabel(sort)
+                    </mdui-menu-item>
+                }
+            </mdui-menu>
+        </mdui-dropdown>
+
+        <a class="filter-chip @(Model.Recommended ? "selected" : "")" href="@Model.ListUrl(Model.CategorySlug, Model.Sort, Model.Price, !Model.Recommended)">
+            <partial name="_Symbol" model="@AppIcons.Recommended" />
+            Recommended
+        </a>
+
+        <mdui-dropdown placement="auto">
+            <button slot="trigger" type="button" class="filter-chip @(Model.Price is not null ? "selected" : "")">
+                <partial name="_Symbol" model="@AppIcons.PriceSymbol(Model.Price)" />
+                @Model.PriceLabel(Model.Price)
+                <partial name="_Icon" model="@(("arrow-down", "icon icon-chip"))" />
+            </button>
+            <mdui-menu selects="single" value="@(Model.PriceKey ?? "all")">
+                @foreach (var price in new AppListPrice?[] { null, AppListPrice.Free, AppListPrice.Iap, AppListPrice.IapOrPaid })
+                {
+                    <mdui-menu-item value="@(price?.ToString().ToLowerInvariant() ?? "all")" href="@Model.ListUrl(Model.CategorySlug, Model.Sort, price, Model.Recommended)">
+                        <span slot="icon"><partial name="_Symbol" model="@AppIcons.PriceSymbol(price)" /></span>
+                        @Model.PriceLabel(price)
+                    </mdui-menu-item>
+                }
+            </mdui-menu>
+        </mdui-dropdown>
+    </div>
+</div>
+
+@if (Model.Items.Count == 0)
+{
+    <section class="placeholder">
+        <partial name="_Icon" model="@(("apps", "icon icon-medium"))" />
+        <p class="placeholder-title">No apps match that search</p>
+    </section>
+}
+else
+{
+    <div class="app-list-rows">
+        @foreach (var item in Model.Items)
+        {
+            <mdui-card clickable variant="filled" href="/apps/@item.Slug" class="surface-card app-list-row">
+                <div class="app-row">
+                    <span class="app-row-icon @(item.IconAdaptive ? "adaptive" : "legacy")">
+                        @if (item.IconPath is { } icon)
+                        {
+                            <img src="@icon" alt="" loading="lazy" />
+                        }
+                        else
+                        {
+                            <span>@(item.Name.Length > 0 ? item.Name[..1].ToUpperInvariant() : "?")</span>
+                        }
+                    </span>
+                    <span class="app-row-text">
+                        <span class="app-row-name">@item.Name</span>
+                        <span class="app-row-summary">@item.Description</span>
+                        @if (!string.IsNullOrWhiteSpace(item.Meta))
+                        {
+                            <span class="app-row-meta">@item.Meta</span>
+                        }
+                    </span>
+                    @if (item.Badges.Count > 0)
+                    {
+                        <span class="app-row-badges">
+                            @foreach (var badge in item.Badges)
+                            {
+                                <span class="label-chip">@badge</span>
+                            }
+                        </span>
+                    }
+                </div>
+            </mdui-card>
+        }
+    </div>
+
+    @if (Model.TotalPages > 1)
+    {
+        <nav class="pagination" aria-label="Pagination">
+            @if (Model.PageNumber > 1)
+            {
+                <a class="filter-chip" href="@Model.ListUrl(Model.CategorySlug, Model.Sort, Model.Price, Model.Recommended, Model.PageNumber - 1)" rel="prev">Previous</a>
+            }
+            else
+            {
+                <span class="filter-chip disabled" aria-disabled="true">Previous</span>
+            }
+            @foreach (var pageNumber in Model.PageNumbers())
+            {
+                if (pageNumber is null)
+                {
+                    <span class="pagination-gap" aria-hidden="true">&#x2026;</span>
+                }
+                else if (pageNumber == Model.PageNumber)
+                {
+                    <span class="filter-chip selected" aria-current="page">@pageNumber</span>
+                }
+                else
+                {
+                    <a class="filter-chip" href="@Model.ListUrl(Model.CategorySlug, Model.Sort, Model.Price, Model.Recommended, pageNumber.Value)">@pageNumber</a>
+                }
+            }
+            @if (Model.PageNumber < Model.TotalPages)
+            {
+                <a class="filter-chip" href="@Model.ListUrl(Model.CategorySlug, Model.Sort, Model.Price, Model.Recommended, Model.PageNumber + 1)" rel="next">Next</a>
+            }
+            else
+            {
+                <span class="filter-chip disabled" aria-disabled="true">Next</span>
+            }
+        </nav>
+    }
+}

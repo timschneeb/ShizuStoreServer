@@ -1,0 +1,1554 @@
+/* ShizuStore storefront. Built on mdui design tokens; the detail page mirrors
+   the Android client's Material 3 detail screen (spacing in px matches dp). */
+
+* {
+    box-sizing: border-box;
+}
+
+:root {
+    /* Brand palette: the client's fallback Material 3 scheme. Overriding the
+       suffixed base tokens re-colors light, dark and auto themes at once. */
+    --mdui-color-primary-light: 108, 99, 255;
+    --mdui-color-on-primary-light: 255, 255, 255;
+    --mdui-color-primary-container-light: 228, 223, 255;
+    --mdui-color-on-primary-container-light: 26, 0, 102;
+    --mdui-color-secondary-light: 92, 93, 114;
+    --mdui-color-on-secondary-light: 255, 255, 255;
+    --mdui-color-secondary-container-light: 225, 224, 249;
+    --mdui-color-on-secondary-container-light: 25, 26, 44;
+    --mdui-color-tertiary-light: 120, 83, 107;
+    --mdui-color-on-tertiary-light: 255, 255, 255;
+    --mdui-color-tertiary-container-light: 255, 216, 238;
+    --mdui-color-on-tertiary-container-light: 46, 17, 38;
+    --mdui-color-error-light: 186, 26, 26;
+    --mdui-color-on-error-light: 255, 255, 255;
+    --mdui-color-error-container-light: 255, 218, 214;
+    --mdui-color-on-error-container-light: 65, 0, 2;
+    --mdui-color-background-light: 252, 248, 255;
+    --mdui-color-on-background-light: 27, 27, 33;
+    --mdui-color-surface-light: 252, 248, 255;
+    --mdui-color-on-surface-light: 27, 27, 33;
+    --mdui-color-surface-variant-light: 228, 225, 236;
+    --mdui-color-on-surface-variant-light: 71, 70, 79;
+    --mdui-color-outline-light: 119, 118, 128;
+    --mdui-color-outline-variant-light: 200, 197, 208;
+    --mdui-color-primary-dark: 200, 191, 255;
+    --mdui-color-on-primary-dark: 49, 20, 156;
+    --mdui-color-primary-container-dark: 83, 75, 214;
+    --mdui-color-on-primary-container-dark: 228, 223, 255;
+    --mdui-color-secondary-dark: 197, 196, 221;
+    --mdui-color-on-secondary-dark: 46, 47, 66;
+    --mdui-color-secondary-container-dark: 68, 69, 89;
+    --mdui-color-on-secondary-container-dark: 225, 224, 249;
+    --mdui-color-tertiary-dark: 232, 185, 213;
+    --mdui-color-on-tertiary-dark: 70, 38, 59;
+    --mdui-color-tertiary-container-dark: 94, 60, 82;
+    --mdui-color-on-tertiary-container-dark: 255, 216, 238;
+    --mdui-color-error-dark: 255, 180, 171;
+    --mdui-color-on-error-dark: 105, 0, 5;
+    --mdui-color-error-container-dark: 147, 0, 10;
+    --mdui-color-on-error-container-dark: 255, 218, 214;
+    --mdui-color-background-dark: 19, 19, 24;
+    --mdui-color-on-background-dark: 228, 225, 233;
+    --mdui-color-surface-dark: 19, 19, 24;
+    --mdui-color-on-surface-dark: 228, 225, 233;
+    --mdui-color-surface-variant-dark: 71, 70, 79;
+    --mdui-color-on-surface-variant-dark: 200, 197, 208;
+    --mdui-color-outline-dark: 145, 143, 154;
+    --mdui-color-outline-variant-dark: 71, 70, 79;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    font-family: Roboto, "Segoe UI", system-ui, -apple-system, sans-serif;
+    background-color: rgb(var(--mdui-color-surface));
+    color: rgb(var(--mdui-color-on-surface));
+    line-height: 1.5;
+}
+
+@supports (min-height: 100dvh) {
+    body {
+        min-height: 100dvh;
+    }
+}
+
+a {
+    color: rgb(var(--mdui-color-primary));
+}
+
+/* Unupgraded mdui custom elements: first paint can beat the deferred bundle,
+   so approximate the final component. :where() keeps specificity low enough
+   for class overrides like .surface-card and .notice-store to still win. */
+
+mdui-dialog:where(:not(:defined)) {
+    display: none;
+}
+
+mdui-card:where(:not(:defined)) {
+    display: block;
+    overflow: hidden;
+    border-radius: var(--shape-corner, var(--mdui-shape-corner-medium));
+    background-color: rgb(var(--mdui-color-surface-container-highest));
+}
+
+mdui-dropdown:where(:not(:defined)) {
+    display: contents;
+}
+
+mdui-menu:where(:not(:defined)) {
+    display: none;
+}
+
+/* mdui paints the bar surface once upgraded; match it before that. */
+mdui-top-app-bar:where(:not(:defined)) {
+    background-color: rgb(var(--mdui-color-surface));
+}
+
+/* Light-DOM panel, so it needs its own guard; mdui only hides it once upgraded. */
+mdui-dropdown:where(:not(:defined)) .category-cloud {
+    display: none;
+}
+
+mdui-button:where(:not(:defined)) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 2.5rem;
+    padding: 0 24px;
+    border: none;
+    border-radius: var(--shape-corner, var(--mdui-shape-corner-full));
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.1px;
+    line-height: 20px;
+    white-space: nowrap;
+    text-decoration: none;
+    cursor: pointer;
+    user-select: none;
+}
+
+mdui-button[variant="filled"]:where(:not(:defined)) {
+    background-color: rgb(var(--mdui-color-primary));
+    color: rgb(var(--mdui-color-on-primary));
+}
+
+mdui-button[variant="tonal"]:where(:not(:defined)) {
+    background-color: rgb(var(--mdui-color-secondary-container));
+    color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+mdui-button[variant="text"]:where(:not(:defined)) {
+    background-color: transparent;
+    color: rgb(var(--mdui-color-primary));
+}
+
+mdui-button[variant="outlined"]:where(:not(:defined)) {
+    box-shadow: inset 0 0 0 1px rgb(var(--mdui-color-outline));
+}
+
+mdui-button-icon:where(:not(:defined)) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: var(--mdui-shape-corner-full);
+    color: rgb(var(--mdui-color-on-surface-variant));
+    cursor: pointer;
+}
+
+.wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+mdui-top-app-bar.site-top-bar {
+    /* Sticky instead of mdui's fixed default keeps the bar in flow; mdui then skips its body padding injection. */
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex: none;
+    align-items: center;
+    height: 4rem;
+    padding: 0;
+    border-bottom: 1px solid rgb(var(--mdui-color-outline-variant));
+}
+
+mdui-top-app-bar.site-top-bar .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+}
+
+.site-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    text-decoration: none;
+    color: inherit;
+}
+
+.site-brand-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+}
+
+.site-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.site-main {
+    /* Grow so the footer sits at the bottom on short pages. */
+    flex: 1 0 auto;
+    width: 100%;
+    padding-top: 28px;
+    padding-bottom: 56px;
+}
+
+.site-footer {
+    border-top: 1px solid rgb(var(--mdui-color-outline-variant));
+    font-size: 0.875rem;
+    opacity: 0.72;
+    padding: 16px 0;
+}
+
+.site-footer p {
+    margin: 0;
+}
+
+.footer-nav {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+}
+
+/* Icons */
+
+.icon-sprite {
+    display: none;
+}
+
+/* Exposes a label to assistive tech without taking layout space. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+.icon {
+    width: 24px;
+    height: 24px;
+    flex: none;
+    fill: currentColor;
+    color: inherit;
+}
+
+.btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-icon .icon {
+    width: 18px;
+    height: 18px;
+}
+
+.icon-primary-icon {
+    color: rgb(var(--mdui-color-primary));
+}
+
+.icon-chip {
+    width: 18px;
+    height: 18px;
+}
+
+.icon-stat {
+    width: 18px;
+    height: 18px;
+    color: rgb(var(--mdui-color-secondary));
+}
+
+.icon-medium {
+    width: 56px;
+    height: 56px;
+    color: rgb(var(--mdui-color-primary));
+}
+
+/* Landing (kept minimal) */
+
+.landing {
+    margin: 7vh auto 0;
+    max-width: 640px;
+    text-align: center;
+}
+
+.landing-icon {
+    width: 96px;
+    height: 96px;
+    border-radius: 22px;
+}
+
+.landing h1 {
+    font-size: 2.6rem;
+    margin: 16px 0 12px;
+}
+
+.landing-lead {
+    font-size: 1.2rem;
+    opacity: 0.8;
+    margin: 0 0 24px;
+}
+
+.landing-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 28px;
+}
+
+@media (max-width: 600px) {
+    .landing-break {
+        display: none;
+    }
+}
+
+/* Generic panel (error page) */
+
+.panel {
+    border: 1px solid rgb(var(--mdui-color-outline-variant));
+    border-radius: 16px;
+    padding: 20px;
+    margin: 16px 0;
+}
+
+/* Buttons */
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 0 24px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: 500;
+    text-decoration: none;
+    background-color: rgb(var(--mdui-color-secondary-container));
+    color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+.btn:hover {
+    filter: brightness(1.05);
+}
+
+.btn-primary {
+    background-color: rgb(var(--mdui-color-primary));
+    color: rgb(var(--mdui-color-on-primary));
+}
+
+/* Ripple feedback on interactive surfaces */
+
+.viewer-nav,
+.viewer-close {
+    position: relative;
+    overflow: hidden;
+}
+
+.viewer-nav > mdui-ripple,
+.viewer-close > mdui-ripple {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+}
+
+/* Missing-app placeholder, mirroring the client's Placeholder composable */
+
+.placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 48px 12px;
+    text-align: center;
+}
+
+.placeholder-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+}
+
+/* Detail: header */
+
+.detail-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-top: 12px;
+}
+
+.detail-icon {
+    width: 72px;
+    height: 72px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background-color: rgb(var(--mdui-color-primary-container));
+    color: rgb(var(--mdui-color-on-primary-container));
+    font-size: 28px;
+}
+
+.detail-icon.adaptive {
+    border-radius: 12px;
+}
+
+.detail-icon.legacy {
+    border-radius: 30%;
+}
+
+.detail-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.detail-heading {
+    min-width: 0;
+}
+
+.detail-heading h1 {
+    margin: 0 0 4px;
+    font-size: 22px;
+    line-height: 28px;
+    font-weight: 400;
+    overflow-wrap: anywhere;
+}
+
+.detail-author {
+    margin: 0 0 4px;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.detail-author a {
+    text-decoration: none;
+}
+
+.detail-version {
+    margin: 0;
+    font-size: 12px;
+    line-height: 16px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+.detail-dot {
+    opacity: 0.7;
+}
+
+/* Notices */
+
+.notice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin: 4px 0 8px;
+    font-size: 14px;
+    line-height: 20px;
+    text-decoration: none;
+}
+
+mdui-card.notice-store {
+    display: block;
+    padding: 12px 16px;
+    color: rgb(var(--mdui-color-on-secondary-container));
+    font-size: 14px;
+    line-height: 0;
+}
+
+mdui-card.notice-store {
+    --mdui-color-surface-container-highest: var(--mdui-color-secondary-container);
+    --shape-corner: 12px;
+}
+
+.notice-body {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    line-height: 20px;
+}
+
+.notice-secondary {
+    background-color: rgb(var(--mdui-color-secondary-container));
+    color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+.notice-tertiary {
+    background-color: rgb(var(--mdui-color-tertiary-container));
+    color: rgb(var(--mdui-color-on-tertiary-container));
+}
+
+.notice-card {
+    display: block;
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin: 4px 0 8px;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.notice-card summary {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.notice-card summary::-webkit-details-marker {
+    display: none;
+}
+
+.tracker-title {
+    flex: 1;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.tracker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.tracker-tile {
+    display: flex;
+    flex-direction: column;
+    border-radius: 12px;
+    padding: 8px 12px;
+    background-color: rgb(var(--mdui-color-tertiary-container));
+    color: rgb(var(--mdui-color-on-tertiary-container));
+}
+
+.tracker-name {
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.tracker-tags {
+    font-size: 12px;
+}
+
+.note {
+    margin: 8px 0 0;
+    font-size: 12px;
+    line-height: 16px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* Actions */
+
+.detail-actions {
+    display: flex;
+    gap: 12px;
+    margin: 12px 0 8px;
+}
+
+.detail-actions mdui-button {
+    flex: 1 1 0;
+}
+
+/* Tags */
+
+.detail-tags {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding-bottom: 10px;
+    overflow-x: auto;
+}
+
+.label-chip {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 32px;
+    padding: 4px 12px;
+    border-radius: 8px;
+    background-color: rgb(var(--mdui-color-secondary-container));
+    color: rgb(var(--mdui-color-on-secondary-container));
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.label-chip-selected {
+    background-color: rgb(var(--mdui-color-primary-container));
+    color: rgb(var(--mdui-color-on-primary-container));
+}
+
+a.label-chip {
+    text-decoration: none;
+}
+
+a.label-chip:hover {
+    background-color: color-mix(in srgb, rgb(var(--mdui-color-on-secondary-container)) 8%, rgb(var(--mdui-color-secondary-container)));
+}
+
+/* Stats strip */
+
+.detail-stats {
+    display: flex;
+    align-items: stretch;
+    margin: 6px 0 10px;
+}
+
+.stat-cell {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    text-align: center;
+}
+
+.stat-cell + .stat-cell::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1px;
+    height: 40px;
+    background-color: rgb(var(--mdui-color-outline-variant));
+}
+
+.stat-value {
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 500;
+}
+
+.stat-label {
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 500;
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* Section headers */
+
+.detail-section {
+    margin-top: 0;
+}
+
+.surface-card {
+    display: block;
+    width: 100%;
+    border-radius: 12px;
+    --shape-corner: 12px;
+    background-color: transparent;
+    cursor: pointer;
+}
+
+mdui-card.surface-card:hover {
+    background-color: rgba(var(--mdui-color-on-surface), 0.08);
+}
+
+.section-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-height: 48px;
+    padding: 8px 12px;
+}
+
+.section-summary {
+    list-style: none;
+    cursor: pointer;
+}
+
+.section-summary::-webkit-details-marker {
+    display: none;
+}
+
+.section-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.section-title {
+    margin: 0;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 500;
+}
+
+.section-subtitle {
+    margin: 0;
+    font-size: 12px;
+    line-height: 16px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.chevron {
+    transition: transform 0.2s ease;
+}
+
+details[open] > summary .chevron {
+    transform: rotate(180deg);
+}
+
+/* Dialogs */
+
+mdui-dialog::part(panel) {
+    width: 100%;
+    max-width: 920px;
+}
+
+.dialog-body {
+    max-height: 60vh;
+    overflow: auto;
+}
+
+.dialog-body > :first-child {
+    margin-top: 0;
+}
+
+/* Links list */
+
+.detail-links {
+    display: flex;
+    flex-direction: column;
+}
+
+.link-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-height: 48px;
+    padding: 8px 12px;
+    color: inherit;
+}
+
+.link-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.link-label {
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 500;
+}
+
+.link-url {
+    font-size: 12px;
+    line-height: 16px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Screenshots */
+
+.screenshots {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 10px;
+    margin-bottom: 2px;
+}
+
+.screenshots a {
+    flex: none;
+}
+
+.screenshots img {
+    height: 320px;
+    width: auto;
+    border-radius: 12px;
+}
+
+.screenshot-viewer {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px;
+    background-color: rgba(0, 0, 0, 0.9);
+}
+
+.screenshot-viewer[hidden] {
+    display: none;
+}
+
+.viewer-image {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 12px;
+}
+
+.viewer-nav,
+.viewer-close {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border: 0;
+    border-radius: 50%;
+    background-color: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    cursor: pointer;
+}
+
+.viewer-nav:hover,
+.viewer-close:hover {
+    background-color: rgba(255, 255, 255, 0.22);
+}
+
+.viewer-prev .icon {
+    transform: scaleX(-1);
+}
+
+.viewer-close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    font-size: 18px;
+}
+
+body.viewer-open {
+    overflow: hidden;
+}
+
+/* Permissions */
+
+.permissions {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.permissions li {
+    padding: 6px 12px;
+    border-radius: 8px;
+    background-color: rgb(var(--mdui-color-surface-variant));
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+/* Sources */
+
+.source-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.source-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-height: 72px;
+    padding: 8px 0;
+    border-top: 1px solid rgb(var(--mdui-color-outline-variant));
+}
+
+.source-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.source-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.source-version {
+    font-size: 16px;
+    line-height: 24px;
+}
+
+.source-abi {
+    min-height: 0;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background-color: rgb(var(--mdui-color-surface-container-highest));
+    color: rgb(var(--mdui-color-on-surface-variant));
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.source-sub {
+    font-size: 14px;
+    line-height: 20px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+    overflow-wrap: anywhere;
+}
+
+.source-note {
+    font-size: 12px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+.source-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+mdui-button.source-download {
+    --shape-corner: 8px;
+}
+
+/* Meta lists (app information, signature) */
+
+.meta-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0 24px;
+    margin: 0 0 8px;
+}
+
+.meta-list > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px dashed rgb(var(--mdui-color-outline-variant));
+}
+
+.meta-list dt {
+    font-size: 13px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+.meta-list dd {
+    margin: 0;
+    font-size: 13px;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.signature h3 {
+    margin: 12px 0 4px;
+    font-size: 14px;
+}
+
+.fingerprints {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+/* Markdown */
+
+.markdown {
+    overflow-wrap: anywhere;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+    margin: 20px 0 10px;
+    font-weight: 400;
+}
+
+.markdown h1 {
+    font-size: 45px;
+    line-height: 52px;
+}
+
+.markdown h2 {
+    font-size: 36px;
+    line-height: 44px;
+}
+
+.markdown h3 {
+    font-size: 28px;
+    line-height: 36px;
+}
+
+.markdown h4 {
+    font-size: 24px;
+    line-height: 32px;
+}
+
+.markdown h5 {
+    font-size: 22px;
+    line-height: 28px;
+}
+
+.markdown h6 {
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 500;
+}
+
+.markdown p {
+    margin: 0 0 12px;
+}
+
+.markdown ul,
+.markdown ol {
+    margin: 0 0 12px;
+    padding-left: 22px;
+}
+
+.markdown img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 12px;
+}
+
+.markdown pre {
+    margin: 0 0 12px;
+    padding: 12px;
+    border-radius: 10px;
+    background-color: rgb(var(--mdui-color-surface-variant));
+    overflow-x: auto;
+}
+
+.markdown code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9em;
+}
+
+.markdown p code,
+.markdown li code {
+    padding: 2px 5px;
+    border-radius: 6px;
+    background-color: rgb(var(--mdui-color-surface-variant));
+}
+
+.markdown pre code {
+    padding: 0;
+    background: none;
+}
+
+.markdown table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 0 0 12px;
+}
+
+.markdown th,
+.markdown td {
+    border: 1px solid rgb(var(--mdui-color-outline-variant));
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.markdown blockquote {
+    margin: 12px 0;
+    padding: 4px 0 4px 14px;
+    border-left: 4px solid rgb(var(--mdui-color-outline-variant));
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+.markdown hr {
+    border: none;
+    border-top: 1px solid rgb(var(--mdui-color-outline-variant));
+    margin: 16px 0;
+}
+
+.usage-markdown blockquote {
+    border-left: none;
+    border-radius: 12px;
+    padding: 8px 12px;
+    background-color: rgb(var(--mdui-color-secondary-container));
+    color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+.usage-markdown blockquote strong {
+    color: rgb(var(--mdui-color-primary));
+}
+
+/* Carousels */
+
+.carousel {
+    margin-top: 16px;
+}
+
+.carousel-title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 500;
+}
+
+.carousel-row {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 10px;
+    margin-bottom: -10px;
+}
+
+.app-tile {
+    width: 80px;
+    flex: none;
+    padding: 4px;
+    color: inherit;
+    text-align: center;
+}
+
+.app-tile:hover {
+    background-color: rgb(var(--mdui-color-surface-variant));
+}
+
+.tile-icon {
+    width: 72px;
+    height: 72px;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background-color: rgb(var(--mdui-color-surface-variant));
+    font-size: 24px;
+}
+
+.tile-icon.adaptive {
+    border-radius: 12px;
+}
+
+.tile-icon.legacy {
+    border-radius: 30%;
+}
+
+.tile-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.tile-name {
+    display: block;
+    margin-top: 4px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.tile-size {
+    display: block;
+    font-size: 11px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* Uniform vertical rhythm between detail sections */
+
+.detail > * {
+    margin-top: 0;
+    margin-bottom: 12px;
+}
+
+.detail > mdui-dialog {
+    margin: 0;
+}
+
+/* App banner and open-in-app hint */
+
+.app-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    border-radius: 12px;
+    background-color: rgb(var(--mdui-color-secondary-container));
+    color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+.app-banner-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+}
+
+.app-banner-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.app-banner-title {
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.app-banner-subtitle {
+    font-size: 12px;
+}
+
+.app-nudge {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    background-color: rgb(var(--mdui-color-inverse-surface));
+    color: rgb(var(--mdui-color-inverse-on-surface));
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.app-nudge[hidden] {
+    display: none;
+}
+
+.app-nudge-text {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+}
+
+.app-nudge-link {
+    color: rgb(var(--mdui-color-inverse-primary));
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.app-nudge-close {
+    border: 0;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+/* App list page */
+
+.apps-toolbar {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.app-search input {
+    width: 100%;
+    min-height: 48px;
+    padding: 0 16px;
+    border: 1px solid rgb(var(--mdui-color-outline));
+    border-radius: 28px;
+    background-color: rgb(var(--mdui-color-surface));
+    color: inherit;
+    font: inherit;
+    font-size: 16px;
+}
+
+.app-search input:focus {
+    outline: 2px solid rgb(var(--mdui-color-primary));
+    outline-offset: -1px;
+}
+
+.filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.filter-chip {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid rgb(var(--mdui-color-outline));
+    border-radius: 8px;
+    background: none;
+    color: rgb(var(--mdui-color-on-surface-variant));
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    text-decoration: none;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.filter-chip:hover {
+    background-color: rgba(var(--mdui-color-on-surface), 0.08);
+}
+
+.filter-chip.selected {
+    border-color: transparent;
+    background-color: rgb(var(--mdui-color-secondary-container));
+    color: rgb(var(--mdui-color-on-secondary-container));
+}
+
+.filter-chip .material-symbols-rounded {
+    font-size: 18px;
+}
+
+mdui-menu-item .material-symbols-rounded {
+    font-size: 20px;
+}
+
+/* Long menus must never run past the viewport; scroll them instead. */
+mdui-menu {
+    max-height: min(45vh, 360px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.category-cloud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: min(88vw, 560px);
+    max-height: min(45vh, 360px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 12px;
+    border-radius: 12px;
+    background-color: rgb(var(--mdui-color-surface-container));
+    box-shadow: var(--mdui-elevation-level2);
+}
+
+.app-list-rows {
+    display: flex;
+    flex-direction: column;
+}
+
+.app-list-row {
+    margin-bottom: 0;
+}
+
+.app-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-height: 88px;
+    padding: 8px 16px;
+}
+
+.app-row-icon {
+    width: 56px;
+    height: 56px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background-color: rgb(var(--mdui-color-surface-variant));
+    font-size: 24px;
+}
+
+.app-row-icon.adaptive {
+    border-radius: 12px;
+}
+
+.app-row-icon.legacy {
+    border-radius: 30%;
+}
+
+.app-row-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.app-row-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.app-row-name {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-row-summary {
+    font-size: 14px;
+    line-height: 20px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-row-meta {
+    font-size: 14px;
+    line-height: 20px;
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+.app-row-badges {
+    display: flex;
+    flex: none;
+    gap: 4px;
+}
+
+.pagination {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 20px;
+}
+
+.pagination .filter-chip {
+    justify-content: center;
+    min-width: 36px;
+}
+
+.pagination .filter-chip.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+.pagination-gap {
+    color: rgb(var(--mdui-color-on-surface-variant));
+}
+
+/* Privacy policy */
+
+.privacy h1 {
+    font-size: 28px;
+    line-height: 36px;
+    margin: 0 0 12px;
+}
+
+.privacy h2 {
+    font-size: 18px;
+    line-height: 26px;
+    margin: 20px 0 8px;
+}
+
+.privacy p,
+.privacy li {
+    font-size: 14px;
+    line-height: 22px;
+}
+
+.privacy ul {
+    padding-left: 20px;
+}
+
+/* Helpers */
+
+.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.dim {
+    opacity: 0.72;
+}
+
+@media (max-width: 640px) {
+    .landing h1 {
+        font-size: 2rem;
+    }
+
+    .detail-stats {
+        overflow-x: auto;
+    }
+
+    .screenshots img {
+        height: 240px;
+    }
+
+    .detail-tags {
+        padding-bottom: 0;
+        scrollbar-width: none;
+    }
+
+    .detail-tags::-webkit-scrollbar {
+        display: none;
+    }
+
+    body {
+        -webkit-user-select: none;
+        user-select: none;
+    }
+
+    mdui-dialog,
+    .dialog-body {
+        -webkit-user-select: text;
+        user-select: text;
+    }
+
+    mdui-dialog {
+        padding: 0;
+    }
+
+    mdui-dialog::part(overlay) {
+        padding: 0;
+    }
+
+    mdui-dialog::part(panel) {
+        width: 100%;
+        max-width: 100%;
+        border-radius: 0;
+    }
+}

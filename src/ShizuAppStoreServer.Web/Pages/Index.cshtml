@@ -1,0 +1,56 @@
+﻿@page
+@model IndexModel
+@{
+    ViewData["Title"] = "";
+    ViewData["HideAppBanner"] = true;
+}
+
+<section class="landing">
+    <img class="landing-icon" src="~/apple-touch-icon.png" alt="" width="96" height="96" />
+    <h1>ShizuStore</h1>
+    <p class="landing-lead">
+        An open-source app store for Shizuku apps,<br class="landing-break" />
+        based on the
+        <a href="https://github.com/timschneeb/awesome-shizuku">awesome-shizuku</a> list
+    </p>
+    <div class="landing-actions">
+        <mdui-button variant="filled" href="@Model.ApkUrl">
+            <span slot="icon" class="btn-icon"><partial name="_Icon" model="@(("download", "icon"))" /></span>
+            Download APK
+        </mdui-button>
+        <mdui-button variant="outlined" href="https://github.com/timschneeb/ShizuStore" target="_blank" rel="noopener noreferrer">
+            <span slot="icon" class="btn-icon"><partial name="_Icon" model="@(("github", "icon"))" /></span>
+            GitHub
+        </mdui-button>
+        <mdui-button variant="outlined" href="/apps">
+            <span slot="icon" class="btn-icon"><partial name="_Icon" model="@(("apps", "icon"))" /></span>
+            Browse apps
+        </mdui-button>
+    </div>
+    @if (Model.Screenshots.Count > 0)
+    {
+        <div class="screenshots">
+            @foreach (var screenshot in Model.Screenshots)
+            {
+                <a class="screenshot" href="@screenshot" target="_blank" rel="noopener noreferrer">
+                    <img src="@screenshot" alt="" loading="lazy" />
+                </a>
+            }
+        </div>
+        <div class="screenshot-viewer" id="screenshot-viewer" role="dialog" aria-modal="true" aria-label="Screenshot viewer" hidden>
+            <button type="button" class="viewer-nav viewer-prev" aria-label="Previous screenshot">
+                <mdui-ripple></mdui-ripple>
+                <partial name="_Icon" model="@(("arrow-right", "icon"))" />
+            </button>
+            <img class="viewer-image" alt="" />
+            <button type="button" class="viewer-nav viewer-next" aria-label="Next screenshot">
+                <mdui-ripple></mdui-ripple>
+                <partial name="_Icon" model="@(("arrow-right", "icon"))" />
+            </button>
+            <button type="button" class="viewer-close" aria-label="Close">
+                <mdui-ripple></mdui-ripple>
+                &#x2715;
+            </button>
+        </div>
+    }
+</section>

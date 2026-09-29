@@ -15,12 +15,18 @@ public sealed class UsageAnalysisWorker(
 {
     private static readonly TimeSpan PruneInterval = TimeSpan.FromMinutes(15);
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public override Task StartAsync(CancellationToken cancellationToken)
     {
         // Prune even when the analyzer is off: the transcripts are only useful
-        // for a short window and nothing else deletes them.
+        // for a short window and nothing else deletes them. Runs here, not in
+        // ExecuteAsync: BackgroundService defers the latter to the thread pool,
+        // so a shutdown racing startup could skip the prune entirely.
         TryPruneLogs();
+        return base.StartAsync(cancellationToken);
+    }
 
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
         if (!options.IsConfigured)
         {
             log.LogInformation("Usage analysis is disabled (set UsageAnalysis:Enabled, BaseUrl and Model).");

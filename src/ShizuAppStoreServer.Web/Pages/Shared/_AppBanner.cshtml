@@ -1,0 +1,12 @@
+@inject ShizuAppStoreServer.Web.Services.IAppReleaseProvider ReleaseProvider
+@{
+    var apkUrl = await ReleaseProvider.GetLatestApkUrlAsync();
+}
+<aside class="app-banner">
+    <img class="app-banner-icon" src="~/apple-touch-icon.png" alt="" width="40" height="40" />
+    <span class="app-banner-text">
+        <span class="app-banner-title">Get the ShizuStore app</span>
+        <span class="app-banner-subtitle">Browse and install Shizuku apps on Android.</span>
+    </span>
+    <mdui-button variant="filled" href="@apkUrl">Download app</mdui-button>
+</aside>

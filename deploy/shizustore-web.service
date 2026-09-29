@@ -1,0 +1,33 @@
+[Unit]
+Description=Shizu App Store Web (storefront)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shizu
+Group=shizu
+WorkingDirectory=/opt/shizustore-web/app
+ExecStart=/opt/shizustore-web/app/ShizuAppStoreServer.Web
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5139
+# Always: a crash must not leave the public storefront down. Manual stops are
+# respected.
+Restart=always
+RestartSec=10
+# Server-rendered pages only; keep it below the API's budget.
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=128M
+CPUQuota=50%
+Nice=10
+# Hardening: loopback HTTP, Postgres and read access to the icon store only.
+# Nothing is written to disk (rendered HTML goes straight to the socket), so
+# no ReadWritePaths are needed.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

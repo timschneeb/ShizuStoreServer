@@ -1,0 +1,476 @@
+@page "/apps/{slug}"
+@model ShizuAppStoreServer.Web.Pages.AppModel
+@{
+    ViewData["Title"] = Model.Missing ? "App not found or no longer available" : Model.View?.TitleName;
+    if (Model.View is { } described && !string.IsNullOrWhiteSpace(described.Description))
+    {
+        ViewData["Description"] = described.Description;
+    }
+    if (Model.View is { } preview && !string.IsNullOrEmpty(preview.App.IconHash))
+    {
+        ViewData["OgImage"] = $"https://shizustore.com/icons/{preview.App.IconHash}.png";
+    }
+}
+
+@if (Model.Missing || Model.View is not { } view)
+{
+    <section class="placeholder">
+        <partial name="_Icon" model="@(("apps", "icon icon-medium"))" />
+        <p class="placeholder-title">App no longer available</p>
+    </section>
+}
+else
+{
+    var storeUrl = view.App.StoreUrl;
+    var apkUrl = view.Primary?.ApkUrl;
+    var versionLine = string.Join(
+        " · ",
+        new[] { view.VersionName, view.SourceLabel }.Where(part => !string.IsNullOrWhiteSpace(part)));
+
+    <article class="detail">
+        <header class="detail-header">
+            <div class="detail-icon @(view.IconAdaptive ? "adaptive" : "legacy")">
+                @if (view.IconPath is { } iconPath)
+                {
+                    <img src="@iconPath" alt="" />
+                }
+                else
+                {
+                    <span class="detail-icon-letter">@(view.Name.Length > 0 ? view.Name[..1].ToUpperInvariant() : "?")</span>
+                }
+            </div>
+            <div class="detail-heading">
+                <h1>@view.Name</h1>
+                @if (!string.IsNullOrWhiteSpace(view.App.AuthorName))
+                {
+                    <p class="detail-author">
+                        @if (!string.IsNullOrWhiteSpace(view.App.AuthorUrl))
+                        {
+                            <a href="@view.App.AuthorUrl" target="_blank" rel="noopener noreferrer">@view.App.AuthorName</a>
+                        }
+                        else
+                        {
+                            @view.App.AuthorName
+                        }
+                    </p>
+                }
+                @if (versionLine.Length > 0)
+                {
+                    <p class="detail-version">@versionLine</p>
+                }
+            </div>
+        </header>
+
+        @if (!string.IsNullOrWhiteSpace(view.StoreNotice) && !string.IsNullOrWhiteSpace(storeUrl))
+        {
+            <mdui-card clickable variant="filled" href="@storeUrl" target="_blank" rel="noopener noreferrer" class="notice-store">
+                <span class="notice-body">
+                    <partial name="_Icon" model="@(("storefront", "icon"))" />
+                    <span>@view.StoreNotice</span>
+                </span>
+            </mdui-card>
+        }
+
+        <div class="detail-actions">
+            @{
+                var availabilityVariant = Model.IsAndroid ? "tonal" : "filled";
+            }
+            @if (view.IsDirectApk && !string.IsNullOrWhiteSpace(apkUrl))
+            {
+                <mdui-button variant="@availabilityVariant" href="@apkUrl" rel="noopener noreferrer">Download APK</mdui-button>
+            }
+            else if (view.IsPlayRedirect && !string.IsNullOrWhiteSpace(storeUrl))
+            {
+                <mdui-button variant="@availabilityVariant" href="@storeUrl" target="_blank" rel="noopener noreferrer">View on Play</mdui-button>
+            }
+            else if (!string.IsNullOrWhiteSpace(view.App.Url))
+            {
+                <mdui-button variant="@availabilityVariant" href="@view.App.Url" target="_blank" rel="noopener noreferrer">View website</mdui-button>
+            }
+            @if (Model.IsAndroid)
+            {
+                <mdui-button variant="filled" href="shizustore://apps/@view.Slug">Open in ShizuStore</mdui-button>
+            }
+        </div>
+
+        @if (view.Tags.Count > 0)
+        {
+            <div class="detail-tags">
+                @foreach (var tag in view.Tags)
+                {
+                    if (tag.CategorySlug is { } categorySlug)
+                    {
+                        <a class="label-chip" href="/apps?category=@categorySlug">
+                            <partial name="_Icon" model="@((tag.IconId!, "icon icon-chip"))" />
+                            <span>@tag.Text</span>
+                        </a>
+                    }
+                    else
+                    {
+                        <span class="label-chip">
+                            @if (!string.IsNullOrWhiteSpace(tag.IconId))
+                            {
+                                <partial name="_Icon" model="@((tag.IconId!, "icon icon-chip"))" />
+                            }
+                            <span>@tag.Text</span>
+                        </span>
+                    }
+                }
+            </div>
+        }
+
+        @if (view.HasStats)
+        {
+            <div class="detail-stats">
+                @if (view.App.InstallCount > 0)
+                {
+                    <div class="stat-cell" title="Number of installs reported by other ShizuStore users.">
+                        <partial name="_Icon" model="@(("download", "icon icon-stat"))" />
+                        <span class="stat-value">@Display.CompactCount(view.App.InstallCount)</span>
+                        <span class="stat-label">ShizuStore</span>
+                    </div>
+                }
+                @if (view.App.DownloadTotal is > 0)
+                {
+                    <div class="stat-cell" title="Number of downloads counted at @view.SourceLabel.">
+                        <partial name="_Icon" model="@(("download", "icon icon-stat"))" />
+                        <span class="stat-value">@Display.CompactCount(view.App.DownloadTotal)</span>
+                        <span class="stat-label">@view.SourceLabel</span>
+                    </div>
+                }
+                @if (view.App.Stars is > 0)
+                {
+                    <div class="stat-cell" title="Number of stars on the source code repository.">
+                        <partial name="_Icon" model="@(("star", "icon icon-stat"))" />
+                        <span class="stat-value">@Display.CompactCount(view.App.Stars)</span>
+                        <span class="stat-label">Stars</span>
+                    </div>
+                }
+                @if (Display.SizeLabel(view.SizeBytes) is { } size && size != "-")
+                {
+                    <div class="stat-cell" title="Download size of the APK file.">
+                        <partial name="_Icon" model="@(("sd-card", "icon icon-stat"))" />
+                        <span class="stat-value">@size</span>
+                        <span class="stat-label">Size</span>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(view.BillingNotice))
+        {
+            <div class="notice notice-tertiary">
+                <partial name="_Icon" model="@(("info", "icon"))" />
+                <span>@view.BillingNotice</span>
+            </div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(view.ClosedSourceNotice))
+        {
+            <div class="notice notice-tertiary">
+                <partial name="_Icon" model="@(("shield-person", "icon"))" />
+                <span>@view.ClosedSourceNotice</span>
+            </div>
+        }
+
+        @if (view.TrackerGroups.Count > 0)
+        {
+            <details class="notice-card notice-secondary">
+                <summary>
+                    <partial name="_Icon" model="@(("fingerprint", "icon"))" />
+                    <span class="tracker-title">Detected trackers (@view.TrackerGroups.Count)</span>
+                    <partial name="_Icon" model="@(("arrow-down", "icon chevron"))" />
+                </summary>
+                <div class="tracker-list">
+                    @foreach (var group in view.TrackerGroups)
+                    {
+                        <div class="tracker-tile">
+                            <span class="tracker-name">@group.Name</span>
+                            @if (group.Tags.Count > 0)
+                            {
+                                <span class="tracker-tags">@string.Join(", ", group.Tags)</span>
+                            }
+                        </div>
+                    }
+                </div>
+                <p class="note">Matched by Exodus Privacy code signatures. Not a complete list.</p>
+            </details>
+        }
+
+@if (!string.IsNullOrWhiteSpace(view.Description) || !string.IsNullOrWhiteSpace(Model.DescriptionHtml))
+{
+    <section class="detail-section">
+        <mdui-card clickable variant="filled" class="surface-card" data-dialog="about-dialog">
+            <div class="section-header">
+                <partial name="_Icon" model="@(("info", "icon icon-primary-icon"))" />
+                <div class="section-text">
+                    <h2 class="section-title">More about this app</h2>
+                    @if (!string.IsNullOrWhiteSpace(view.Description))
+                    {
+                        <p class="section-subtitle">@view.Description</p>
+                    }
+                </div>
+                <partial name="_Icon" model="@(("arrow-right", "icon chevron"))" />
+            </div>
+        </mdui-card>
+    </section>
+    <mdui-dialog id="about-dialog" headline="More about this app" close-on-overlay-click close-on-esc>
+        <div class="dialog-body markdown">
+            @if (!string.IsNullOrWhiteSpace(Model.DescriptionHtml))
+            {
+                @Html.Raw(Model.DescriptionHtml)
+            }
+            else
+            {
+                <p>@view.Description</p>
+            }
+        </div>
+        <mdui-button slot="action" variant="text" data-dialog-close>Close</mdui-button>
+    </mdui-dialog>
+}
+
+        @if (!string.IsNullOrWhiteSpace(view.App.UsageShort) || !string.IsNullOrWhiteSpace(Model.UsageHtml))
+        {
+            <section class="detail-section">
+                <mdui-card clickable variant="filled" class="surface-card" data-dialog="usage-dialog">
+                    <div class="section-header">
+                        <partial name="_Icon" model="@(("shizuku", "icon icon-primary-icon"))" />
+                        <div class="section-text">
+                            <h2 class="section-title">How Shizuku is used</h2>
+                            @if (!string.IsNullOrWhiteSpace(view.App.UsageShort))
+                            {
+                                <p class="section-subtitle">@view.App.UsageShort</p>
+                            }
+                        </div>
+                        <partial name="_Icon" model="@(("arrow-right", "icon chevron"))" />
+                    </div>
+                </mdui-card>
+            </section>
+            <mdui-dialog id="usage-dialog" headline="How Shizuku is used" close-on-overlay-click close-on-esc>
+                <div class="dialog-body markdown usage-markdown">
+                    @if (!string.IsNullOrWhiteSpace(Model.UsageHtml))
+                    {
+                        <p class="note">This is an AI-assisted analysis of Shizuku-related usages in the app's public source code. It is best effort, so it may not catch every single usage.</p>
+                        @Html.Raw(Model.UsageHtml)
+                    }
+                    else
+                    {
+                        <p class="note">No usage report is available for this app.</p>
+                    }
+                </div>
+                <mdui-button slot="action" variant="text" data-dialog-close>Close</mdui-button>
+            </mdui-dialog>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(Model.ChangelogHtml) || !string.IsNullOrWhiteSpace(view.App.ChangelogUrl))
+        {
+            <section class="detail-section">
+                <mdui-card clickable variant="filled" class="surface-card" data-dialog="changelog-dialog">
+                    <div class="section-header">
+                        <partial name="_Icon" model="@(("updates", "icon icon-primary-icon"))" />
+                        <div class="section-text">
+                            <h2 class="section-title">Changelog</h2>
+                            <p class="section-subtitle">What's new for version @view.VersionName</p>
+                        </div>
+                        <partial name="_Icon" model="@(("arrow-right", "icon chevron"))" />
+                    </div>
+                </mdui-card>
+            </section>
+            <mdui-dialog id="changelog-dialog" headline="Changelog" close-on-overlay-click close-on-esc>
+                <div class="dialog-body markdown">
+                    @if (!string.IsNullOrWhiteSpace(Model.ChangelogHtml))
+                    {
+                        @Html.Raw(Model.ChangelogHtml)
+                    }
+                    else
+                    {
+                        <p><a href="@view.App.ChangelogUrl" target="_blank" rel="noopener noreferrer">View upstream changelog</a></p>
+                    }
+                </div>
+                <mdui-button slot="action" variant="text" data-dialog-close>Close</mdui-button>
+            </mdui-dialog>
+        }
+
+        @if (view.App.Screenshots.Count > 0)
+        {
+            <div class="screenshots">
+                @foreach (var screenshot in view.App.Screenshots)
+                {
+                    <a class="screenshot" href="@screenshot" target="_blank" rel="noopener noreferrer">
+                        <img src="@screenshot" alt="" loading="lazy" />
+                    </a>
+                }
+            </div>
+            <div class="screenshot-viewer" id="screenshot-viewer" role="dialog" aria-modal="true" aria-label="Screenshot viewer" hidden>
+                <button type="button" class="viewer-nav viewer-prev" aria-label="Previous screenshot">
+                    <mdui-ripple></mdui-ripple>
+                    <partial name="_Icon" model="@(("arrow-right", "icon"))" />
+                </button>
+                <img class="viewer-image" alt="" />
+                <button type="button" class="viewer-nav viewer-next" aria-label="Next screenshot">
+                    <mdui-ripple></mdui-ripple>
+                    <partial name="_Icon" model="@(("arrow-right", "icon"))" />
+                </button>
+                <button type="button" class="viewer-close" aria-label="Close">
+                    <mdui-ripple></mdui-ripple>
+                    &#x2715;
+                </button>
+            </div>
+        }
+
+        @if (view.Links.Count > 0)
+        {
+            <nav class="detail-links">
+                @foreach (var link in view.Links)
+                {
+                    <mdui-card clickable variant="filled" href="@link.Url" target="_blank" rel="noopener noreferrer" class="surface-card">
+                        <div class="link-row">
+                            <partial name="_Icon" model="@((link.IconId, "icon icon-primary-icon"))" />
+                            <span class="link-text">
+                                <span class="link-label">@link.Label</span>
+                                <span class="link-url">@link.Url</span>
+                            </span>
+                            <partial name="_Icon" model="@(("open-in-new", "icon icon-primary-icon"))" />
+                        </div>
+                    </mdui-card>
+                }
+            </nav>
+        }
+
+        @if (view.App.Permissions.Count > 0)
+        {
+            <section class="detail-section">
+                <mdui-card clickable variant="filled" class="surface-card" data-dialog="permissions-dialog">
+                    <div class="section-header">
+                        <partial name="_Icon" model="@(("shield", "icon icon-primary-icon"))" />
+                        <div class="section-text">
+                            <h2 class="section-title">Permissions</h2>
+                            <p class="section-subtitle">@(view.App.Permissions.Count == 1 ? "1 permission requested" : $"{view.App.Permissions.Count} permissions requested")</p>
+                        </div>
+                        <partial name="_Icon" model="@(("arrow-right", "icon chevron"))" />
+                    </div>
+                </mdui-card>
+            </section>
+            <mdui-dialog id="permissions-dialog" headline="Permissions" close-on-overlay-click close-on-esc>
+                <div class="dialog-body">
+                    <ul class="permissions">
+                        @foreach (var permission in view.App.Permissions)
+                        {
+                            <li class="mono">@permission</li>
+                        }
+                    </ul>
+                </div>
+                <mdui-button slot="action" variant="text" data-dialog-close>Close</mdui-button>
+            </mdui-dialog>
+        }
+
+        @if (view.Sources.Count > 1)
+        {
+            <details class="detail-section">
+                <summary class="section-summary">
+                    <mdui-card clickable variant="filled" class="surface-card">
+                        <div class="section-header">
+                            <partial name="_Icon" model="@(("sources", "icon icon-primary-icon"))" />
+                            <div class="section-text">
+                                <h2 class="section-title">Sources</h2>
+                                <p class="section-subtitle">@(view.Sources.Count == 1 ? "1 source" : $"{view.Sources.Count} sources")</p>
+                            </div>
+                            <partial name="_Icon" model="@(("arrow-down", "icon icon-primary-icon chevron"))" />
+                        </div>
+                    </mdui-card>
+                </summary>
+                <div class="source-list">
+                    @foreach (var source in view.Sources)
+                    {
+                        <div class="source-row">
+                            <div class="source-text">
+                                <span class="source-head">
+                                    <span class="source-version">@source.Version</span>
+                                    @if (source.AbiLabel is not null)
+                                    {
+                                        <span class="label-chip source-abi">@source.AbiLabel</span>
+                                    }
+                                </span>
+                                <span class="source-sub">@source.Origin <span class="detail-dot">·</span> @source.Package</span>
+                                @if (source.ArchiveEntry is { Length: > 0 } archiveEntry)
+                                {
+                                    <span class="source-note">zip entry: @archiveEntry</span>
+                                }
+                            </div>
+                            <div class="source-actions">
+                                @if (source.IsPrimary)
+                                {
+                                    <span class="label-chip label-chip-selected">Selected</span>
+                                }
+                                <mdui-button variant="text" href="@source.DownloadUrl" rel="noopener noreferrer" class="source-download">Download</mdui-button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </details>
+        }
+
+        @if (Model.MoreFromAuthor.Count > 0)
+        {
+            <section class="carousel">
+                <h2 class="carousel-title">More apps from this developer</h2>
+                <div class="carousel-row">
+                    @foreach (var tile in Model.MoreFromAuthor)
+                    {
+                        <mdui-card clickable variant="filled" href="/apps/@tile.Slug" class="surface-card app-tile">
+                            <span class="tile-icon @(tile.IconAdaptive ? "adaptive" : "legacy")">
+                                @if (tile.IconPath is { } authorIcon)
+                                {
+                                    <img src="@authorIcon" alt="" loading="lazy" />
+                                }
+                                else
+                                {
+                                    <span>@(tile.Name.Length > 0 ? tile.Name[..1].ToUpperInvariant() : "?")</span>
+                                }
+                            </span>
+                            <span class="tile-name">@tile.Name</span>
+                            @if (!string.IsNullOrWhiteSpace(tile.SizeLabel))
+                            {
+                                <span class="tile-size">@tile.SizeLabel</span>
+                            }
+                        </mdui-card>
+                    }
+                </div>
+            </section>
+        }
+
+        @if (Model.MoreFromCategory.Count > 0)
+        {
+            <section class="carousel">
+                <h2 class="carousel-title">More from this category</h2>
+                <div class="carousel-row">
+                    @foreach (var tile in Model.MoreFromCategory)
+                    {
+                        <mdui-card clickable variant="filled" href="/apps/@tile.Slug" class="surface-card app-tile">
+                            <span class="tile-icon @(tile.IconAdaptive ? "adaptive" : "legacy")">
+                                @if (tile.IconPath is { } categoryIcon)
+                                {
+                                    <img src="@categoryIcon" alt="" loading="lazy" />
+                                }
+                                else
+                                {
+                                    <span>@(tile.Name.Length > 0 ? tile.Name[..1].ToUpperInvariant() : "?")</span>
+                                }
+                            </span>
+                            <span class="tile-name">@tile.Name</span>
+                            @if (!string.IsNullOrWhiteSpace(tile.SizeLabel))
+                            {
+                                <span class="tile-size">@tile.SizeLabel</span>
+                            }
+                        </mdui-card>
+                    }
+                </div>
+            </section>
+        }
+
+        @if (Model.IsAndroid)
+        {
+            <partial name="_AppNudge" />
+        }
+    </article>
+}

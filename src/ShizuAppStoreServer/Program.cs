@@ -262,7 +262,7 @@ var app = builder.Build();
 
 // Fail fast when the enrichment toolchain is missing: without aapt2 (or
 // apksigner + its JRE, gradle + its JRE for XML icons) the server would
-// boot but never enrich. Skipped in the Testing environment so Web.Tests
+// boot but never enrich. Skipped in the Testing environment so Api.Tests
 // stay hermetic (no binaries needed).
 // The fast-loop release poll costs one feed call per app per pass, which
 // needs the 5000/hr authenticated GitHub limit; without a PAT it stays

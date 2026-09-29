@@ -16,6 +16,7 @@ lives in `PLAN.md`.
 ```
 src/ShizuAppStoreServer/          Web host: controllers, Api/, Sync/, Program.cs
 src/ShizuAppStoreServer.Core/     All domain logic (no ASP.NET references)
+src/ShizuAppStoreServer.Web/      Public storefront (shizustore.com, separate unit)
   Parsing/      Markdig awesome-list parser
   Data/         EF Core entities + ShizuDbContext + Migrations/
   History/      git-history backfill (added_at/updated_at)
@@ -27,13 +28,19 @@ src/ShizuAppStoreServer.Core/     All domain logic (no ASP.NET references)
 tools/icon-render/   Gradle + Paparazzi tool that renders staged XML
               drawables through LayoutLib (same engine as Android Studio)
 tests/ShizuAppStoreServer.Core.Tests/   Hermetic unit/integration tests (SQLite)
-tests/ShizuAppStoreServer.Web.Tests/    Endpoint tests (full host, SQLite-swapped)
+tests/ShizuAppStoreServer.Api.Tests/    Endpoint tests (full host, SQLite-swapped)
 ```
 
 Core never references ASP.NET: everything the host needs crosses the
 boundary through constructor injection (`IAapt2Runner`,
 `IApkSignerRunner`, `IAppSource` source clients,
 `FdroidIndexProvider`, `IEnrichmentRunner`, `IPaparazziRenderer`).
+
+`ShizuAppStoreServer.Web` is not part of the API surface: it is a separate
+Razor Pages process (own systemd unit, loopback port 5139) that
+server-renders the public storefront at `https://shizustore.com`. It reads
+the same Postgres database read-only through Core's `ShizuDbContext` and
+never calls the API. See `docs/storefront.md`.
 
 ## 2. Runtime architecture
 

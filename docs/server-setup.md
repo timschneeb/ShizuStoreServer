@@ -481,6 +481,11 @@ verify from a client with `curl https://shizustore.timschneeberger.me/v1/apps`.
 If the hostname ever gets a Zero Trust Access application, remember the
 API must stay reachable without a login prompt.
 
+The same tunnel also fronts the public storefront at
+`https://shizustore.com` (`http://localhost:5139`, unit
+`shizustore-web.service`). That is a separate app and unit, documented in
+`docs/storefront.md`; this document covers only the API.
+
 Each deploy (from the repo root on the dev machine):
 
 ```bash

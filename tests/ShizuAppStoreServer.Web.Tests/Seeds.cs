@@ -2,71 +2,45 @@ using ShizuAppStoreServer.Core.Data;
 
 namespace ShizuAppStoreServer.Web.Tests;
 
-/// <summary>Small builders for endpoint-test fixtures.</summary>
-public static class Seeds
+internal static class Seeds
 {
-    public static Category NewCategory(
-        string slug,
-        string? name = null,
-        CategorySection section = CategorySection.Apps,
-        Category? parent = null) => new()
-        {
-            Slug = slug,
-            Name = name ?? slug,
-            Section = section,
-            Parent = parent,
-        };
+    public static Category Category(long id, string slug, string name, long? parentId = null) => new()
+    {
+        Id = id,
+        Slug = slug,
+        Name = name,
+        ParentId = parentId,
+        Section = CategorySection.Apps,
+    };
 
-    public static App NewApp(
-        string slug,
-        Category category,
-        string? name = null,
-        string? url = null,
-        Listing listing = Listing.Main,
-        AppType type = AppType.App,
-        Availability availability = Availability.LinkOnly,
-        DateTimeOffset? addedAt = null,
-        DateTimeOffset? updatedAt = null,
-        DateTimeOffset? listUpdatedAt = null,
-        bool recommended = false,
-        string? license = null,
-        string? packageName = null,
-        App? parent = null,
-        string? authorKey = null,
-        string? authorName = null,
-        string? authorUrl = null,
-        List<string>? permissions = null,
-        string? fullDescription = null,
-        string? changelog = null,
-        string? changelogUrl = null,
-        List<string>? screenshots = null,
-        string? versionName = null,
-        string? displayName = null) => new()
-        {
-            Slug = slug,
-            Name = name ?? slug,
-            DisplayName = displayName,
-            Url = url ?? $"https://github.com/example/{slug}",
-            Description = $"{slug} description",
-            License = license,
-            Listing = listing,
-            Type = type,
-            Availability = availability,
-            IsRecommended = recommended,
-            PackageName = packageName,
-            AuthorKey = authorKey,
-            AuthorName = authorName,
-            AuthorUrl = authorUrl,
-            Permissions = permissions ?? [],
-            FullDescription = fullDescription,
-            Changelog = changelog,
-            ChangelogUrl = changelogUrl,
-            Screenshots = screenshots ?? [],
-            VersionName = versionName,
-            Category = category,
-            Parent = parent,
-            AddedAt = addedAt ?? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
-            ListUpdatedAt = listUpdatedAt,
-            UpdatedAt = updatedAt ?? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
-        };
+    public static App App(long id, string slug, string name, long categoryId) => new()
+    {
+        Id = id,
+        Slug = slug,
+        Name = name,
+        Description = $"{name} description",
+        Url = $"https://example.com/{slug}",
+        CategoryId = categoryId,
+        Availability = Availability.DirectApk,
+        AddedAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+        UpdatedAt = new DateTimeOffset(2026, 2, 1, 0, 0, 0, TimeSpan.Zero),
+        VersionUpdatedAt = new DateTimeOffset(2026, 2, 1, 0, 0, 0, TimeSpan.Zero),
+    };
+
+    public static AppDownload Download(
+        long appId,
+        string url,
+        bool primary = true,
+        long? versionCode = 10,
+        string packageName = "com.example.app") => new()
+    {
+        AppId = appId,
+        ApkUrl = url,
+        IsPrimary = primary,
+        VersionCode = versionCode,
+        VersionName = $"1.{versionCode}",
+        PackageName = packageName,
+        SigKey = $"key:{url}",
+        ResolvedAt = new DateTimeOffset(2026, 2, 1, 0, 0, 0, TimeSpan.Zero),
+    };
 }

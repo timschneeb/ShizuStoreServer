@@ -21,7 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\ShizuAppStoreServer.Web\ShizuAppStoreServer.Web.csproj" />
+    <ProjectReference Include="..\..\src\ShizuAppStoreServer\ShizuAppStoreServer.csproj" />
   </ItemGroup>
 
 </Project>
