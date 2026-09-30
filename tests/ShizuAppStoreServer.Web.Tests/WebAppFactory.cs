@@ -35,6 +35,8 @@ public sealed class WebAppFactory : WebApplicationFactory<Program>
 
     public const string ApkUrl = "https://example.com/ShizuStore-test.apk";
 
+    public const string MetricsToken = "test-metrics-token";
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
@@ -57,6 +59,11 @@ public sealed class WebAppFactory : WebApplicationFactory<Program>
             });
 
             services.AddOutputCache(o => o.AddPolicy("pages", NoOutputCachePolicy.Instance));
+
+            // Program maps /metrics from the DI-resolved singleton, so setting
+            // the token here is enough to exercise the real endpoint.
+            services.RemoveAll<MetricsOptions>();
+            services.AddSingleton(new MetricsOptions { Token = MetricsToken });
 
             // The banner/nudge link comes from GitHub in production; stub it.
             services.RemoveAll<IAppReleaseProvider>();

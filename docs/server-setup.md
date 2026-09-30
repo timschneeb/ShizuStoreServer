@@ -436,6 +436,58 @@ branch to its upstream (`git merge --ff-only`), and records the HEAD in
 fast-forward cannot apply (diverged history or a dirty tree) the worker
 deletes the clone and re-clones it from origin.
 
+## Metrics
+
+Both hosts expose a Prometheus endpoint at `GET /metrics` on their loopback
+port (API `5137`, storefront `5139`), reachable through the Cloudflare Tunnel
+with a bearer token. The API reuses the admin token (`SHIZU_ADMIN_SECRET`);
+set `Metrics:Token` or `SHIZU_METRICS_TOKEN` to scrape with a separate one.
+The storefront has no admin token: give it its own in
+`/opt/shizustore-web/app/appsettings.Production.json`:
+
+```json
+{ "Metrics": { "Token": "<openssl rand -hex 32>" } }
+```
+
+Without a resolvable token the route is not mapped at all, and
+`Metrics:Enabled=false` opts out entirely. Scrapes are excluded from
+`request_logs` and from the HTTP request metrics (`/healthz` too).
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://shizustore.timschneeberger.me/metrics   # 401
+curl -s -H "Authorization: Bearer $SHIZU_ADMIN_TOKEN" \
+  https://shizustore.timschneeberger.me/metrics | head
+```
+
+The Prometheus stack that scrapes both targets lives in `deploy/monitoring/`
+(see the next section). Scrape credentials are read from files
+(`credentials_file`), so tokens are never inlined in the Prometheus config.
+
+## Monitoring stack (zbox)
+
+Grafana + Prometheus + node_exporter run as one Docker Compose stack on `zbox`
+(`deploy/monitoring/`; paste `compose.yml` into Portainer). Prometheus scrapes
+`https://shizustore.timschneeberger.me/metrics` (bearer) and
+`https://shizustore.com/metrics` (own token), plus host metrics from the
+sidecar node_exporter (job `node-zbox`) and from srv1's node_exporter (job
+`node-srv1`). Grafana listens on host port `3001` (`3000` is taken by
+lanraragi) and is reachable on the LAN and tailnet only. No alerts yet.
+
+srv1 side: install `prometheus-node-exporter`, add the basic-auth `web.yml`,
+point the unit at it via `/etc/conf.d/prometheus-node-exporter` (files under
+`deploy/monitoring/srv1/`), and route `node-srv1.timschneeberger.me` through
+the same Cloudflare tunnel to `http://localhost:9100`. Do not attach a Zero
+Trust Access policy there; the exporter basic auth is the gate.
+
+```bash
+sudo pacman -Sy prometheus-node-exporter
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9100/metrics                          # 401
+curl -s -o /dev/null -w '%{http_code}\n' -u monitoring:"$PASSWORD" http://127.0.0.1:9100/metrics  # 200
+```
+
+Full runbook (token sources, zbox file layout, dashboard fetching,
+verification): `deploy/monitoring/README.md`.
+
 ## Deploy flow
 
 One-time unit install (after provisioning above):

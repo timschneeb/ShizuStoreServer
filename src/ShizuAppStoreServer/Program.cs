@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using OpenTelemetry.Metrics;
 using Scalar.AspNetCore;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
@@ -87,7 +88,12 @@ if (apiOptions.EnableOutputCache)
 }
 
 var connectionString = builder.Configuration.GetConnectionString("Shizu");
-builder.Services.AddDbContext<ShizuDbContext>(o => o.UseNpgsql(connectionString));
+// Pool metrics tag connections by data source name; unnamed, Npgsql uses the
+// raw connection string (secrets included) as db.client.connection.pool.name.
+builder.Services.AddDbContext<ShizuDbContext>(o =>
+    o.UseNpgsql(
+        connectionString,
+        npgsql => npgsql.ConfigureDataSource(source => source.Name = "shizuappstore")));
 
 // Operator auth token (AdminOptions singleton so integration tests can swap
 // it per suite; the admin controller takes it via DI). The legacy env name
@@ -99,6 +105,52 @@ var adminOptions = new AdminOptions
         ?? Environment.GetEnvironmentVariable("SHIZU_ADMIN_SECRET"),
 };
 builder.Services.AddSingleton(adminOptions);
+
+// Prometheus scraping (GET /metrics): ASP.NET Core, Kestrel, outbound HTTP,
+// EF Core/Npgsql and the custom ShizuAppStore meter. The bearer token falls
+// back to the admin token unless Metrics:Token or SHIZU_METRICS_TOKEN sets
+// its own; when no token is configured the endpoint is not mapped, and
+// Metrics:Enabled=false opts out of collection altogether. The singleton is
+// built lazily so tests can swap it (and AdminOptions) via DI.
+var metricsEnabled = (builder.Configuration.GetSection("Metrics").Get<MetricsOptions>() ?? new()).Enabled;
+builder.Services.AddSingleton(sp =>
+{
+    var options = builder.Configuration.GetSection("Metrics").Get<MetricsOptions>() ?? new();
+    options.Token ??= Environment.GetEnvironmentVariable("SHIZU_METRICS_TOKEN")
+        ?? sp.GetRequiredService<AdminOptions>().Token;
+    return options;
+});
+builder.Services.AddSingleton<ShizuMetrics>();
+if (metricsEnabled)
+{
+    builder.Services.AddOpenTelemetry().WithMetrics(metrics =>
+    {
+        metrics.AddMeter(
+            "Microsoft.AspNetCore.Hosting",
+            "Microsoft.AspNetCore.Server.Kestrel",
+            "System.Net.Http",
+            "Microsoft.EntityFrameworkCore",
+            "Npgsql",
+            ShizuMetrics.MeterName);
+
+        metrics.AddRuntimeInstrumentation();
+
+        // Latency buckets suited to a cached, latency-sensitive catalog API
+        // rather than the SDK's wide defaults.
+        metrics.AddView(
+            "http.server.request.duration",
+            new ExplicitBucketHistogramConfiguration
+            {
+                Boundaries =
+                [
+                    0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25,
+                    0.5, 0.75, 1, 2.5, 5, 7.5, 10,
+                ],
+            });
+
+        metrics.AddPrometheusExporter();
+    });
+}
 
 // Enricher (M3/M4/M8): GitHub + GitLab clients, F-Droid index provider, APK
 // downloader, aapt2 + apksigner runners. The M6 workers resolve AppEnricher
@@ -215,6 +267,8 @@ var jobLogOptions = builder.Configuration.GetSection("Jobs").Get<JobLogOptions>(
 builder.Services.AddSingleton(jobLogOptions);
 builder.Services.AddSingleton<DbJobSink>();
 builder.Services.AddSingleton<IJobSink>(sp => sp.GetRequiredService<DbJobSink>());
+builder.Services.AddSingleton<MetricsJobSink>();
+builder.Services.AddSingleton<IJobSink>(sp => sp.GetRequiredService<MetricsJobSink>());
 if (!string.IsNullOrWhiteSpace(enrichment.RunLogPath))
 {
     builder.Services.AddSingleton<IJobSink>(sp => new FileJobSink(
@@ -448,6 +502,11 @@ if (args.Contains("--render-usage-logs"))
     return renderedLogs > 0 ? 0 : 1;
 }
 
+// Metrics options resolved through DI so tests can swap the singleton;
+// configuration snapshots taken at registration time would ignore that.
+var metricsOptions = app.Services.GetRequiredService<MetricsOptions>();
+var metricsToken = metricsOptions.Token;
+
 // Configure the HTTP request pipeline.
 app.MapOpenApi(); // Public API: clients may fetch the spec in any environment.
 if (app.Environment.IsDevelopment())
@@ -458,6 +517,24 @@ if (app.Environment.IsDevelopment())
 // Compression outside the output cache: cached bodies stay uncompressed and
 // are compressed per request on the way out.
 app.UseResponseCompression();
+
+// The scrape endpoint exposes operational internals even through the public
+// tunnel, so it sits behind the same bearer check as the admin API.
+if (metricsOptions.Enabled && !string.IsNullOrEmpty(metricsToken))
+{
+    app.UseWhen(
+        context => context.Request.Path == "/metrics",
+        branch => branch.Use(async (context, next) =>
+        {
+            if (!AdminAuth.IsValidToken(context.Request, metricsToken!))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            await next(context);
+        }));
+}
 
 // Before the output cache so cache hits and 429s are visible; records the
 // response for requests that are not from a ShizuStore client.
@@ -473,6 +550,9 @@ if (userAgentTracking.Enabled)
     app.UseMiddleware<UserAgentTrackingMiddleware>();
 }
 
+// Before the output cache so detail responses served from it still count.
+app.UseMiddleware<AppViewMetricsMiddleware>();
+
 // Output cache first so cache hits don't consume rate-limit permits.
 if (apiOptions.EnableOutputCache)
 {
@@ -484,6 +564,18 @@ app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapControllers();
+
+if (metricsOptions.Enabled && !string.IsNullOrEmpty(metricsToken))
+{
+    // The scrape itself is excluded from HTTP metrics: scrapes are operator
+    // traffic and would otherwise be the most regular series in the store.
+    app.MapPrometheusScrapingEndpoint("/metrics").DisableHttpMetrics();
+}
+else if (metricsOptions.Enabled)
+{
+    app.Logger.LogWarning(
+        "Metrics are enabled but no metrics token is configured; /metrics is not mapped.");
+}
 
 // The API has no HTML surface; a browser hitting the bare host gets the
 // project page instead of a 404.

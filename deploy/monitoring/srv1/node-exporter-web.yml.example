@@ -1,0 +1,2 @@
+basic_auth_users:
+  monitoring: <htpasswd -nbB monitoring output, without the "monitoring:" prefix>

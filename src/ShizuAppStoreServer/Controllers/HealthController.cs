@@ -9,6 +9,7 @@ namespace ShizuAppStoreServer.Controllers;
 public sealed class HealthController : ControllerBase
 {
     [HttpGet]
+    [DisableHttpMetrics]
     [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
     [ProducesResponseType<HealthDto>(StatusCodes.Status200OK)]
     public ActionResult<HealthDto> Get() => Ok(new HealthDto("ok"));

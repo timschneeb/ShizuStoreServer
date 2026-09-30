@@ -47,7 +47,8 @@ never calls the API. See `docs/storefront.md`.
 `Program.cs` wires, in order: controllers, OpenAPI document (all
 environments) + Scalar UI (development only), Npgsql `DbContext`,
 option singletons (`ApiOptions`, `EnrichmentOptions`, `AdminOptions`,
-`SyncOptions`, `UserAgentTrackingOptions`, `RequestLogOptions`), typed HTTP clients (GitHub/GitLab 30s timeouts,
+`SyncOptions`, `UserAgentTrackingOptions`, `RequestLogOptions`,
+`MetricsOptions`), typed HTTP clients (GitHub/GitLab 30s timeouts,
 F-Droid index 60s, `apk-download` uses the configured download
 timeout), singleton runners (`Aapt2Runner`, `ApkSignerRunner`,
 `PaparazziRenderer`), scoped `AppEnricher` factory, singleton `FdroidIndexProvider`,
@@ -87,11 +88,12 @@ one row per request whose `User-Agent` is not a ShizuStore client
 `ShizuStore (Debug)/<version>` and nightly builds append `-<commit>`, both
 still match; the web frontend sends `ShizuStoreWeb/...`); requests without the
 header count as non-client. Scope is almost every path: `/v1/*`, `/healthz`,
-404s, cache hits and 429s. Four exceptions are never logged: `GET /`, the
+404s, cache hits and 429s. Five exceptions are never logged: `GET /`, the
 browser-facing redirect to the project repo (browsers, bots and scanners hit
 it constantly and it says nothing about API use), `/icons/*` (browser and
 proxy icon fetches say nothing about API use either), operator `/v1/admin/*`
-traffic, and requests whose client IP
+traffic, `/metrics` (a scrape every few seconds says nothing about API use
+and would store the bearer token verbatim), and requests whose client IP
 (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop, else the socket
 peer) appears in the comma-separated `RequestLog:ExcludedIps` list. The row stores the request line, all
 request headers as `jsonb` and the raw reconstructed request (both verbatim,
@@ -103,6 +105,24 @@ them to `request_logs` every `RequestLog:FlushInterval` and on shutdown;
 flush failures are logged and never kill the host. There is no body to store
 (no endpoint accepts one). DB-only, no endpoint, no pruning: rows are kept
 until an operator deletes them.
+
+Metrics: `GET /metrics` serves the Prometheus text exposition from the
+OpenTelemetry SDK (Prometheus exporter) and is the only operator endpoint
+outside `/v1`. It is gated by the same constant-time bearer check: token from
+`Metrics:Token`, `SHIZU_METRICS_TOKEN`, else the admin token; when no token
+resolves the route is not mapped at all (fail closed). `Metrics:Enabled=false`
+skips the OpenTelemetry registration entirely. The listener collects the
+in-box meters `Microsoft.AspNetCore.Hosting`,
+`Microsoft.AspNetCore.Server.Kestrel`, `System.Net.Http`,
+`Microsoft.EntityFrameworkCore` and `Npgsql`, plus the runtime
+instrumentation and the custom `ShizuAppStore` meter: `shizu.jobs.runs` and
+`shizu.jobs.duration` per job kind/trigger/status (recorded by every job sink,
+so CLI one-shots included), `shizu.installs.reported` per install-report type,
+and the `shizu.catalog.apps` gauge per availability. The Npgsql pool is named
+`shizuappstore` so `db.client.connection.pool.name` never carries the raw
+connection string. The scrape itself is
+excluded from HTTP metrics (`DisableHttpMetrics`; `/healthz` too), is never
+rate-limited and is never output-cached.
 
 Startup gate: after `builder.Build()`, the host probes
 `aapt2 version`, `apksigner --version` (30s/60s timeouts),
@@ -1406,6 +1426,7 @@ rather than persisting them.
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
+| `GET /metrics` | Prometheus text exposition (OpenTelemetry exporter: `# HELP`/`# TYPE` lines, `target_info`). Requires `Authorization: Bearer <token>` (`Metrics:Token`, `SHIZU_METRICS_TOKEN`, else the admin token) → 401 otherwise; the route is not mapped without a token. The scrape itself does not count in HTTP metrics; no rate limit, no cache. |
 | `GET /` | 302 to the project repo (`https://github.com/timschneeb/ShizuStore`); the bare host is a browser entry point, not part of the API. No rate limit, no cache. |
 | `GET /icons/{sha}.png` | 64-hex sha else 400; missing file → 404; served as a physical file with manual immutable 1-day `Cache-Control` (no output-cache attribute - its filter would overwrite the header). No rate limit. |
 | `POST /v1/admin/sync` | Webhook: token from `Admin:Token`, `SHIZU_ADMIN_TOKEN` or the legacy `SHIZU_ADMIN_SECRET`, else fail-closed 503. Requires `Authorization: Bearer <token>` (constant-time compare, bodies > 4KB rejected) else 401. Inserts a `sync_requests` row and wakes the fast loop immediately → 202 `{queued:true}`; a request that lands while a pass is running becomes an immediate follow-up pass instead of waiting for the next tick (the row stays pending until that follow-up drains it). The optional JSON body carries a free-form `reason`, a `full` flag and an `icons` flag: `{"full":true}` upgrades the drained pass to a full-catalog re-check like the nightly, and `{"icons":false}` force-disables APK icon rendering for that pass (no inline resolve or adoption, no end-of-pass batch; with several drained requests any `icons:false` vetoes). |
@@ -1440,10 +1461,12 @@ all environments; Scalar UI is development-only.
 | `UserAgentTracking:Enabled` | `true` | Anonymous per-UA request stats, DB-only (§2) |
 | `UserAgentTracking:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `UserAgentTracking:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
-| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/`, `/icons/*`, `/v1/admin/*` and excluded IPs, DB-only (§2) |
+| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/`, `/icons/*`, `/v1/admin/*`, `/metrics` and excluded IPs, DB-only (§2) |
 | `RequestLog:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `RequestLog:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
 | `RequestLog:ExcludedIps` | `""` | Comma-separated client IPs (IPv4 or IPv6) that are never logged |
+| `Metrics:Enabled` | `true` | OpenTelemetry metrics and `GET /metrics`; `false` skips the registration entirely |
+| `Metrics:Token` | `null` | Bearer token for `/metrics`; falls back to `SHIZU_METRICS_TOKEN`, then the admin token; no token leaves the route unmapped |
 | `Jobs:MinLevel` | `Debug` | Lowest job-event level the DB sink stores; raise it to trim volume |
 | `Jobs:ChannelCapacity` | `20000` | Bounded job-event buffer; overflow increments `events_dropped` |
 | `Jobs:FlushIntervalSeconds` | `1` | DB sink flush period |

@@ -1,0 +1,42 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # The stack itself.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # zbox host metrics from the sidecar node-exporter.
+  - job_name: node-zbox
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # srv1 host metrics, reachable via the Cloudflare tunnel hostname and
+  # protected by the node_exporter basic auth config.
+  - job_name: node-srv1
+    scheme: https
+    basic_auth:
+      username: monitoring
+      password_file: /etc/prometheus/secrets/node-srv1.pass
+    static_configs:
+      - targets: ["node-srv1.timschneeberger.me"]
+
+  # ShizuStore API (bearer falls back to the admin secret on the server).
+  - job_name: shizu-api
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/shizu-api.token
+    static_configs:
+      - targets: ["shizustore.timschneeberger.me"]
+
+  # ShizuStore web storefront (own Metrics:Token).
+  - job_name: shizustore-web
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/shizustore-web.token
+    static_configs:
+      - targets: ["shizustore.com"]

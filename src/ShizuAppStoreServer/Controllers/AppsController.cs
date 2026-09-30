@@ -12,7 +12,7 @@ namespace ShizuAppStoreServer.Controllers;
 [ApiController]
 [Route("v1/apps")]
 [EnableRateLimiting("api")]
-public sealed class AppsController(ShizuDbContext db) : ControllerBase
+public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : ControllerBase
 {
     private const int DefaultPageSize = 50;
     private const int MaxPageSize = 200;
@@ -265,6 +265,8 @@ public sealed class AppsController(ShizuDbContext db) : ControllerBase
             """, ct);
 
         await tx.CommitAsync(ct);
+
+        metrics.InstallReported(installType);
 
         return Ok(new InstallRecordedDto(slug, app.InstallCount));
     }

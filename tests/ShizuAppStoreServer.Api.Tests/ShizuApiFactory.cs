@@ -5,9 +5,11 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using OpenTelemetry.Exporter;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;
 using ShizuAppStoreServer.Sync;
 using ShizuAppStoreServer.Tracking;
@@ -123,6 +125,20 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
                 o.AddPolicy("issues", NoOutputCachePolicy.Instance);
                 o.AddPolicy("meta", NoOutputCachePolicy.Instance);
             });
+
+            // Scrapes in a suite arrive back to back; the exporter's response
+            // cache would serve a body collected before the test recorded its
+            // own measurements.
+            services.Configure<PrometheusAspNetCoreOptions>(
+                o => o.ScrapeResponseCacheDurationMilliseconds = 0);
+
+            // JobLogWorker runs a recovery query at startup; the wrapper makes
+            // that query observable so tests can wait for it before their
+            // first database operation (the shared SQLite connection is not
+            // thread-safe). JobLogTests still exercise JobLog directly.
+            services.RemoveAll<IJobLog>();
+            services.AddSingleton<IJobLog>(sp => new RecoveryGatedJobLog(
+                new JobLog([.. sp.GetServices<IJobSink>()])));
         });
     }
 
@@ -140,6 +156,7 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
     /// </summary>
     public async Task ResetAsync(Action<ShizuDbContext> seed)
     {
+        await AwaitStartupRecoveryAsync();
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ShizuDbContext>();
         await db.Database.EnsureDeletedAsync();
@@ -151,8 +168,25 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
     /// <summary>Direct DB access for assertions (separate scope, fresh view).</summary>
     public async Task<T> QueryAsync<T>(Func<ShizuDbContext, Task<T>> query)
     {
+        await AwaitStartupRecoveryAsync();
         using var scope = Services.CreateScope();
         return await query(scope.ServiceProvider.GetRequiredService<ShizuDbContext>());
+    }
+
+    private Task? _startupRecovery;
+
+    /// <summary>
+    /// The job-log worker recovers interrupted runs on a background thread as
+    /// soon as the host starts; the shared SQLite connection cannot serve it
+    /// and a test query at the same time, so tests sequence behind it once.
+    /// </summary>
+    private async Task AwaitStartupRecoveryAsync()
+    {
+        _ = Services; // starts the host and its workers
+        _startupRecovery ??= ((RecoveryGatedJobLog)Services.GetRequiredService<IJobLog>())
+            .Recovered
+            .WaitAsync(TimeSpan.FromSeconds(30));
+        await _startupRecovery;
     }
 
     protected override void Dispose(bool disposing)
@@ -184,5 +218,35 @@ internal sealed class IdleSyncSignal : SyncSignal
 {
     public override void Request()
     {
+    }
+}
+
+/// <summary>
+/// Wraps the real job log so tests can observe the worker's startup recovery
+/// pass, which runs on a background thread against the shared connection.
+/// </summary>
+internal sealed class RecoveryGatedJobLog(IJobLog inner) : IJobLog
+{
+    private readonly TaskCompletionSource _recovered =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task Recovered => _recovered.Task;
+
+    public JobSession? Current => inner.Current;
+
+    public JobSession Begin(JobStart start) => inner.Begin(start);
+
+    public void Skipped(JobStart start, string reason) => inner.Skipped(start, reason);
+
+    public async Task RecoverInterruptedAsync(CancellationToken ct)
+    {
+        try
+        {
+            await inner.RecoverInterruptedAsync(ct);
+        }
+        finally
+        {
+            _recovered.TrySetResult();
+        }
     }
 }

@@ -1,9 +1,11 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using OpenTelemetry.Metrics;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Web.Configuration;
 using ShizuAppStoreServer.Web.Rendering;
 using ShizuAppStoreServer.Web.Services;
+using ShizuAppStoreServer.Web.Tracking;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,12 +13,18 @@ builder.Services.AddRazorPages();
 
 var connectionString = builder.Configuration.GetConnectionString("Shizu")
     ?? throw new InvalidOperationException("ConnectionStrings:Shizu is not configured.");
-builder.Services.AddDbContext<ShizuDbContext>(o => o.UseNpgsql(connectionString));
+// Pool metrics tag connections by data source name; unnamed, Npgsql uses the
+// raw connection string (secrets included) as db.client.connection.pool.name.
+builder.Services.AddDbContext<ShizuDbContext>(o =>
+    o.UseNpgsql(
+        connectionString,
+        npgsql => npgsql.ConfigureDataSource(source => source.Name = "shizuappstore")));
 
 builder.Services.Configure<IconsOptions>(builder.Configuration.GetSection("Icons"));
 builder.Services.Configure<AssetLinksOptions>(builder.Configuration.GetSection("AssetLinks"));
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddSingleton<MarkdownRenderer>();
+builder.Services.AddSingleton<ShizuWebMetrics>();
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient<IAppReleaseProvider, LatestReleaseProvider>(client =>
 {
@@ -36,7 +44,55 @@ builder.Services.AddOutputCache(options =>
             DeviceDetection.IsAndroid(context.Request) ? "android" : "other")));
 });
 
+// Prometheus scraping (GET /metrics): the built-in ASP.NET Core, Kestrel,
+// outbound HTTP, EF Core and Npgsql meters for this process. The token comes
+// from Metrics:Token or SHIZU_METRICS_TOKEN; without one the endpoint is not
+// mapped, and Metrics:Enabled=false opts out of collection altogether. The
+// singleton is built lazily so tests can swap it via DI.
+var metricsEnabled = (builder.Configuration.GetSection("Metrics").Get<MetricsOptions>() ?? new()).Enabled;
+builder.Services.AddSingleton(_ =>
+{
+    var options = builder.Configuration.GetSection("Metrics").Get<MetricsOptions>() ?? new();
+    options.Token ??= Environment.GetEnvironmentVariable("SHIZU_METRICS_TOKEN");
+    return options;
+});
+if (metricsEnabled)
+{
+    builder.Services.AddOpenTelemetry().WithMetrics(metrics =>
+    {
+        metrics.AddMeter(
+            "Microsoft.AspNetCore.Hosting",
+            "Microsoft.AspNetCore.Server.Kestrel",
+            "System.Net.Http",
+            "Microsoft.EntityFrameworkCore",
+            "Npgsql",
+            ShizuWebMetrics.MeterName);
+
+        metrics.AddRuntimeInstrumentation();
+
+        // Latency buckets suited to a cached, latency-sensitive site rather
+        // than the SDK's wide defaults.
+        metrics.AddView(
+            "http.server.request.duration",
+            new ExplicitBucketHistogramConfiguration
+            {
+                Boundaries =
+                [
+                    0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25,
+                    0.5, 0.75, 1, 2.5, 5, 7.5, 10,
+                ],
+            });
+
+        metrics.AddPrometheusExporter();
+    });
+}
+
 var app = builder.Build();
+
+// Metrics options resolved through DI so tests can swap the singleton;
+// configuration snapshots taken at registration time would ignore that.
+var metricsOptions = app.Services.GetRequiredService<MetricsOptions>();
+var metricsToken = metricsOptions.Token;
 
 if (!app.Environment.IsDevelopment())
 {
@@ -44,6 +100,24 @@ if (!app.Environment.IsDevelopment())
 }
 
 app.UseStaticFiles();
+
+// The scrape endpoint exposes operational internals, so it stays behind a
+// bearer token even though the storefront itself is public.
+if (metricsOptions.Enabled && !string.IsNullOrEmpty(metricsToken))
+{
+    app.UseWhen(
+        context => context.Request.Path == "/metrics",
+        branch => branch.Use(async (context, next) =>
+        {
+            if (!MetricsAuth.IsValidToken(context.Request, metricsToken))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            await next(context);
+        }));
+}
 
 // Public storefront: same-origin scripts only. Inline styles stay allowed
 // because mdui sets style attributes for ripple and layout.
@@ -56,6 +130,9 @@ app.Use(async (context, next) =>
     context.Response.Headers.XContentTypeOptions = "nosniff";
     await next(context);
 });
+
+// Before the output cache so pages served from it still count.
+app.UseMiddleware<AppViewMetricsMiddleware>();
 
 app.UseOutputCache();
 
@@ -103,6 +180,18 @@ app.MapGet("/healthz", (HttpContext context) =>
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(new { status = "ok" });
 });
+
+if (metricsOptions.Enabled && !string.IsNullOrEmpty(metricsToken))
+{
+    // The scrape itself is excluded from HTTP metrics: scrapes are operator
+    // traffic and would otherwise be the most regular series in the store.
+    app.MapPrometheusScrapingEndpoint("/metrics").DisableHttpMetrics();
+}
+else if (metricsOptions.Enabled)
+{
+    app.Logger.LogWarning(
+        "Metrics are enabled but no metrics token is configured; /metrics is not mapped.");
+}
 
 app.Run();
 

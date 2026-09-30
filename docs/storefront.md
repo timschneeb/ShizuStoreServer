@@ -34,6 +34,7 @@ only uses the data layer; that is accepted for the compile-time safety.
 | `GET /icons/{sha}.png` | Physical icon file from `Icons:StorePath` (the API's `/opt/shizuappstore/icons`). 64-hex check -> 400, missing -> 404, `Cache-Control: public, max-age=86400, immutable`. |
 | `GET /.well-known/assetlinks.json` | App Link verification for `me.timschneeberger.shizustore`, fingerprints from config. |
 | `GET /healthz` | `{"status":"ok"}`, `no-store`. |
+| `GET /metrics` | Prometheus text exposition (OpenTelemetry built-in HTTP/Kestrel/EF Core/Npgsql/runtime meters). Requires `Authorization: Bearer <token>` (`Metrics:Token` or `SHIZU_METRICS_TOKEN`) -> 401 otherwise; the route is not mapped without a token. Not rate-limited, not output-cached. |
 
 Detail rendering mirrors the API (`AppMapper` semantics) and the client UI:
 `displayName` fallback, primary download first then `versionCode` desc,
@@ -76,6 +77,7 @@ output-cached for 60 seconds, varying by Android vs other User-Agent so the
 | `Icons:StorePath` | `/opt/shizuappstore/icons` | `/home/tim/.local/share/shizu-dev/icons` |
 | `AssetLinks:PackageName` | `me.timschneeberger.shizustore` | same |
 | `AssetLinks:Fingerprints` | release signing cert SHA-256 (list) | release fingerprint |
+| `Metrics:Token` | token from `appsettings.Production.json` (or `SHIZU_METRICS_TOKEN`); no token leaves `/metrics` unmapped | unset, `/metrics` unmapped |
 
 ## Local development
 
