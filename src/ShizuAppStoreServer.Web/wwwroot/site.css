@@ -682,6 +682,15 @@ mdui-card.surface-card:hover {
     background-color: rgba(var(--mdui-color-on-surface), 0.08);
 }
 
+/* Row cards bleed 12px into the page gutter so the ripple gets room beyond
+   the icon while the leading icons stay on the page's content line. */
+.detail-section > mdui-card.surface-card,
+.detail-section > .section-summary > mdui-card.surface-card,
+.detail-links > mdui-card.surface-card {
+    width: calc(100% + 24px);
+    margin: 0 -12px;
+}
+
 .section-header {
     display: flex;
     align-items: center;
