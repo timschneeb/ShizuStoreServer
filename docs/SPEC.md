@@ -85,11 +85,12 @@ middleware (after response compression, before `UseOutputCache`) and records
 one row per request whose `User-Agent` is not a ShizuStore client
 (`ShizuStore/<major>.<minor>.<patch>`; debug builds send
 `ShizuStore (Debug)/<version>` and nightly builds append `-<commit>`, both
-still match); requests without the header count as
-non-client. Scope is **every** path: `/v1/*`, `/icons/*`, `/healthz`,
-404s, cache hits and 429s. Three exceptions are never logged: `GET /`, the
+still match; the web frontend sends `ShizuStoreWeb/...`); requests without the
+header count as non-client. Scope is almost every path: `/v1/*`, `/healthz`,
+404s, cache hits and 429s. Four exceptions are never logged: `GET /`, the
 browser-facing redirect to the project repo (browsers, bots and scanners hit
-it constantly and it says nothing about API use), operator `/v1/admin/*`
+it constantly and it says nothing about API use), `/icons/*` (browser and
+proxy icon fetches say nothing about API use either), operator `/v1/admin/*`
 traffic, and requests whose client IP
 (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop, else the socket
 peer) appears in the comma-separated `RequestLog:ExcludedIps` list. The row stores the request line, all
@@ -1439,7 +1440,7 @@ all environments; Scalar UI is development-only.
 | `UserAgentTracking:Enabled` | `true` | Anonymous per-UA request stats, DB-only (§2) |
 | `UserAgentTracking:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `UserAgentTracking:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
-| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/`, `/v1/admin/*` and excluded IPs, DB-only (§2) |
+| `RequestLog:Enabled` | `true` | Log non-ShizuStore requests on all paths except `/`, `/icons/*`, `/v1/admin/*` and excluded IPs, DB-only (§2) |
 | `RequestLog:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `RequestLog:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
 | `RequestLog:ExcludedIps` | `""` | Comma-separated client IPs (IPv4 or IPv6) that are never logged |

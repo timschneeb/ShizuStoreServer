@@ -7,9 +7,10 @@ using Microsoft.Net.Http.Headers;
 namespace ShizuAppStoreServer.Tracking;
 
 /// <summary>
-/// Records every request whose User-Agent is not a ShizuStore client, on every
-/// path: icons, health, 404s and 429s included. Three exceptions stay out of
-/// the log: the bare host (the browser-facing redirect to the project repo),
+/// Records every request whose User-Agent is not a ShizuStore client, on almost
+/// every path: health, 404s and 429s included. Four exceptions stay out of the
+/// log: the bare host (the browser-facing redirect to the project repo),
+/// <c>/icons</c> (browser and proxy icon fetches say nothing about API use),
 /// operator <c>/v1/admin/*</c> traffic, and client IPs on the configured
 /// exclusion list (<c>RequestLog:ExcludedIps</c>). Registered next to the UA
 /// middleware (after response compression, before the output cache), so cache
@@ -50,10 +51,11 @@ public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
         }
     }
 
-    // Root is a browser entry point and admin traffic is operator-only;
-    // neither says anything about how the public API is used.
+    // Root is a browser entry point, /icons serves image tags regardless of
+    // how the API is used, and admin traffic is operator-only; none of them
+    // says anything about how the public API is used.
     private static bool IsExcluded(PathString path) =>
-        path == "/" || path.StartsWithSegments("/v1/admin");
+        path == "/" || path.StartsWithSegments("/icons") || path.StartsWithSegments("/v1/admin");
 
     /// <summary>
     /// Real client IP for the exclusion list. Cloudflare rewrites

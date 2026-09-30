@@ -40,7 +40,7 @@ public sealed class RequestLoggingTests(ShizuApiFactory factory) : IClassFixture
     }
 
     [Fact]
-    public async Task LogsEveryEndpointIncludingIconsAndHealth()
+    public async Task LogsEveryEndpointExceptIcons()
     {
         await ResetAsync();
         var client = factory.NewClient();
@@ -53,11 +53,11 @@ public sealed class RequestLoggingTests(ShizuApiFactory factory) : IClassFixture
         await RequestLogFlush.NowAsync(factory);
 
         var rows = await factory.QueryAsync(db => db.RequestLogs.OrderBy(x => x.Id).ToListAsync());
-        Assert.Equal(4, rows.Count);
+        Assert.Equal(3, rows.Count);
         Assert.Equal(
-            [$"/icons/{new string('a', 64)}.png", "/healthz", "/v1/meta", "/does-not-exist"],
+            ["/healthz", "/v1/meta", "/does-not-exist"],
             rows.Select(r => r.Path));
-        Assert.Equal([404, 200, 200, 404], rows.Select(r => (int)r.StatusCode));
+        Assert.Equal([200, 200, 404], rows.Select(r => (int)r.StatusCode));
         Assert.Equal(HttpStatusCode.NotFound, icon.StatusCode);
         Assert.Equal(HttpStatusCode.OK, health.StatusCode);
         Assert.Equal(HttpStatusCode.OK, meta.StatusCode);
@@ -74,6 +74,8 @@ public sealed class RequestLoggingTests(ShizuApiFactory factory) : IClassFixture
         await ClientWithAgent(factory, "ShizuStore/1.1.0-abc1234").GetAsync("/v1/meta");
         await ClientWithAgent(factory, "ShizuStore/1.1.0 (Android 14; Pixel 8)").GetAsync("/v1/meta");
         await ClientWithAgent(factory, "ShizuStore (Debug)/1.1.0").GetAsync("/v1/meta");
+        await ClientWithAgent(factory, "ShizuStoreWeb/1.0").GetAsync("/v1/meta");
+        await ClientWithAgent(factory, "ShizuStoreWeb/2.3.4").GetAsync("/v1/meta");
         await ClientWithAgent(factory, "ShizuStore/latest").GetAsync("/v1/meta");
 
         await RequestLogFlush.NowAsync(factory);
@@ -281,6 +283,12 @@ public sealed class ClientUserAgentMatcherTests
     [InlineData("ShizuStore/10.20.30", true)]
     [InlineData("ShizuStore (Debug)/1.1.0", true)]
     [InlineData("ShizuStore (Debug)/1.1.0 (Android 14; Pixel 8)", true)]
+    [InlineData("ShizuStoreWeb/1.0", true)]
+    [InlineData("ShizuStoreWeb/2.3.4", true)]
+    [InlineData("ShizuStoreWeb/", true)]
+    [InlineData("ShizuStoreWeb", false)]
+    [InlineData("shizustoreweb/1.0", false)]
+    [InlineData("Mozilla/5.0 ShizuStoreWeb/1.0", false)]
     [InlineData("ShizuStore/latest", false)]
     [InlineData("ShizuStore/1.1", false)]
     [InlineData("ShizuStore/", false)]

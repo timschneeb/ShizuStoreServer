@@ -2,10 +2,10 @@ namespace ShizuAppStoreServer.Core.Data;
 
 /// <summary>
 /// One request whose User-Agent is not a ShizuStore client (table
-/// <c>request_logs</c>). Covers every endpoint including <c>/icons</c>,
-/// <c>/healthz</c> and <c>/v1/admin</c>, and stores the request line plus all
-/// request headers verbatim (no redaction, no truncation). Written only by the
-/// in-process request-log worker; no endpoint reads or writes it.
+/// <c>request_logs</c>). Covers every endpoint except <c>/</c>, <c>/icons</c>
+/// and <c>/v1/admin</c>, and stores the request line plus all request headers
+/// verbatim (no redaction, no truncation). Written only by the in-process
+/// request-log worker; no endpoint reads or writes it.
 /// </summary>
 public sealed class RequestLog
 {
