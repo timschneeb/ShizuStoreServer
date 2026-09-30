@@ -103,22 +103,6 @@ flush failures are logged and never kill the host. There is no body to store
 (no endpoint accepts one). DB-only, no endpoint, no pruning: rows are kept
 until an operator deletes them.
 
-Scraper poisoning: `ResponsePoisonFilter` (global MVC action filter) gives
-requests whose `User-Agent` matches a configured prefix (`Poison:UserAgents`,
-case-insensitive) doctored `GET /v1/apps` and `GET /v1/apps/{slug}` payloads:
-list rows are cross-pollinated or replaced with plausible random values while
-identity fields (slug, name, listing) stay intact; detail requests serve a
-random other served row with the same availability as their data source
-(identity fields and URLs still answer for the requested slug, category and
-package data stay the donor's so they remain coherent), download URLs/hashes
-are broken, and permission/screenshot/download lists lose entries. The filter
-also strips `If-None-Match` for those callers, so they
-can never revalidate a clean ETag into a 304. `SkipPoisonedRequestsPolicy`
-is attached to the `apps-list` and `app-detail` output-cache policies only:
-matching requests bypass both cache lookup and storage, so a poisoned body
-is never served from the cache and a poisoned request never replaces the
-cached clean entry. All other endpoints and User-Agents are untouched.
-
 Startup gate: after `builder.Build()`, the host probes
 `aapt2 version`, `apksigner --version` (30s/60s timeouts),
 `gradle --version` (2min), and `git --version` (30s) and **refuses to boot**
@@ -1414,8 +1398,8 @@ rather than persisting them.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. Poisoned User-Agents get doctored rows and bypass the cache (§2). |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. Poisoned User-Agents get a random other row's doctored downloads/lists, never a 304, and bypass the cache (§2). |
+| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
@@ -1452,8 +1436,6 @@ all environments; Scalar UI is development-only.
 |---|---|---|
 | `Api:RateLimitPerMinute` | `100` | Fixed-window limit per client IP |
 | `Api:EnableOutputCache` | `true` | Server-side GET caching (tests disable it) |
-| `Poison:Enabled` | `true` | Doctored list/detail payloads for scraper User-Agents (§2) |
-| `Poison:UserAgents` | `["python-httpx/0.28.1"]` | User-Agent prefixes (case-insensitive) that get poisoned |
 | `UserAgentTracking:Enabled` | `true` | Anonymous per-UA request stats, DB-only (§2) |
 | `UserAgentTracking:FlushInterval` | `00:00:10` | Buffer flush period; also flushed on shutdown |
 | `UserAgentTracking:MaxBufferedHits` | `2000` | Bounded hit buffer; overflow is dropped |
@@ -1557,8 +1539,7 @@ all environments; Scalar UI is development-only.
 - Test-host rules learned the hard way: swap option singletons via
   DI (minimal-hosting `ConfigureAppConfiguration` overrides never
   reach `Program.cs`); output cache has no request-driven bypass
-  (tests re-register no-op policies; the poisoned-UA policy in §2 is
-  the only sanctioned bypass); never put `[ResponseCache]`
+  (tests re-register no-op policies); never put `[ResponseCache]`
   on the icons action; no `ORDER BY`/`Max`/`Where` over
   `DateTimeOffset` in LINQ shared with SQLite tests - sort and
   filter those in memory (Npgsql translates the same LINQ fine).

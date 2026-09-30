@@ -34,26 +34,23 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
     private readonly SqliteConnection _connection = new("DataSource=:memory:");
     private readonly int _rateLimitPerMinute;
     private readonly string? _adminSecret;
-    private readonly bool _enableOutputCache;
     private readonly string _excludedIps;
 
     public string IconDir { get; } =
         Path.Combine(Path.GetTempPath(), "shizu-test-icons-" + Guid.NewGuid().ToString("N"));
 
     public ShizuApiFactory()
-        : this(rateLimitPerMinute: 100_000, adminSecret: "test-admin-secret", enableOutputCache: false)
+        : this(rateLimitPerMinute: 100_000, adminSecret: "test-admin-secret")
     {
     }
 
     internal ShizuApiFactory(
         int rateLimitPerMinute,
         string? adminSecret,
-        bool enableOutputCache = false,
         string excludedIps = "")
     {
         _rateLimitPerMinute = rateLimitPerMinute;
         _adminSecret = adminSecret;
-        _enableOutputCache = enableOutputCache;
         _excludedIps = excludedIps;
         Directory.CreateDirectory(IconDir);
         _connection.Open();
@@ -117,19 +114,15 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
 
             // Disable output caching: replace every production policy with a
             // no-op (re-adding a policy name overwrites the earlier one).
-            // Caching suites opt out so they exercise the real policies.
-            if (!_enableOutputCache)
+            services.AddOutputCache(o =>
             {
-                services.AddOutputCache(o =>
-                {
-                    o.AddPolicy("apps-list", NoOutputCachePolicy.Instance);
-                    o.AddPolicy("app-detail", NoOutputCachePolicy.Instance);
-                    o.AddPolicy("categories", NoOutputCachePolicy.Instance);
-                    o.AddPolicy("changes", NoOutputCachePolicy.Instance);
-                    o.AddPolicy("issues", NoOutputCachePolicy.Instance);
-                    o.AddPolicy("meta", NoOutputCachePolicy.Instance);
-                });
-            }
+                o.AddPolicy("apps-list", NoOutputCachePolicy.Instance);
+                o.AddPolicy("app-detail", NoOutputCachePolicy.Instance);
+                o.AddPolicy("categories", NoOutputCachePolicy.Instance);
+                o.AddPolicy("changes", NoOutputCachePolicy.Instance);
+                o.AddPolicy("issues", NoOutputCachePolicy.Instance);
+                o.AddPolicy("meta", NoOutputCachePolicy.Instance);
+            });
         });
     }
 
