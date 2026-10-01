@@ -1,0 +1,20 @@
+# Copy this file to contact-points.yaml in the same directory on the Grafana
+# host, fill in the bot token and chat id, and keep that copy out of version
+# control. Create a bot with @BotFather, send it a message, and read the chat
+# id from https://api.telegram.org/bot<token>/getUpdates.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: shizu-telegram
+    receivers:
+      - uid: shizu-telegram
+        type: telegram
+        disableResolveMessage: false
+        settings:
+          bottoken: <telegram-bot-token>
+          chatid: "<telegram-chat-id>"
+          # HTML parse mode is the Grafana default, but keep it explicit
+          # because the template in templates.yaml emits HTML tags.
+          parse_mode: HTML
+          message: '{{ template "shizu.telegram.message" . }}'

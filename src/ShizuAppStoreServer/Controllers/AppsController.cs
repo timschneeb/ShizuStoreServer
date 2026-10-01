@@ -1,8 +1,10 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Sentry;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
 
@@ -185,6 +187,9 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<AppDetailDto>> Detail(string slug, CancellationToken ct = default)
     {
+        // Group traces and any failure by app.
+        SentrySdk.ConfigureScope(scope => scope.SetTag("app.slug", slug));
+
         var app = await db.Apps.AsNoTracking()
             .Include(a => a.Category).ThenInclude(c => c!.Parent)
             .Include(a => a.Parent)
@@ -225,6 +230,19 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
     public async Task<ActionResult<InstallRecordedDto>> RecordInstall(string slug, CancellationToken ct = default)
     {
         var (versionCode, installType) = await ReadInstallReportAsync(ct);
+
+        SentrySdk.ConfigureScope(scope =>
+        {
+            scope.SetTag("app.slug", slug);
+            scope.SetTag("install.type", installType);
+            scope.SetTag("install.version_code", versionCode.ToString(CultureInfo.InvariantCulture));
+        });
+        SentrySdk.AddBreadcrumb("install reported", "install", data: new Dictionary<string, string>
+        {
+            ["slug"] = slug,
+            ["version_code"] = versionCode.ToString(CultureInfo.InvariantCulture),
+            ["install_type"] = installType,
+        });
 
         // ExecuteUpdate is expression-based, so the timestamp is captured
         // into a local first; both columns land in one atomic UPDATE.

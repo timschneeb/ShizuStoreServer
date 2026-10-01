@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OpenTelemetry.Metrics;
+using Sentry;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Web.Configuration;
 using ShizuAppStoreServer.Web.Rendering;
@@ -8,6 +9,24 @@ using ShizuAppStoreServer.Web.Services;
 using ShizuAppStoreServer.Web.Tracking;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Sentry: errors, request traces and structured logs. The storefront shares
+// the API's project, split by the service tag. The DSN is server-side only
+// (Sentry:Dsn or Sentry__Dsn); an empty DSN disables the SDK, which keeps
+// local runs offline, and Testing skips it entirely.
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    builder.WebHost.UseSentry(options =>
+    {
+        options.Dsn = builder.Configuration["Sentry:Dsn"];
+        options.SendDefaultPii = false;
+        options.CaptureFailedRequests = false;
+        options.TracesSampleRate = builder.Configuration.GetValue("Sentry:TracesSampleRate", 0.2);
+        options.EnableLogs = builder.Configuration.GetValue("Sentry:EnableLogs", true);
+        options.Debug = builder.Configuration.GetValue("Sentry:Debug", false);
+        options.DefaultTags["service"] = "storefront";
+    });
+}
 
 builder.Services.AddRazorPages();
 

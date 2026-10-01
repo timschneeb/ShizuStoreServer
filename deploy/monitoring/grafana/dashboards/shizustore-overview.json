@@ -347,7 +347,7 @@
         },
         {
           "refId": "C",
-          "expr": "label_join(sum by (job, http_route) (rate(http_server_request_duration_seconds_count{job=~\"shizu-api|shizustore-web\",http_route!=\"\",http_response_status_code=~\"[45]..\"}[$__rate_interval])) / sum by (job, http_route) (rate(http_server_request_duration_seconds_count{job=~\"shizu-api|shizustore-web\",http_route!=\"\"}[$__rate_interval])), \"service_path\", \" \", \"job\", \"http_route\")",
+          "expr": "label_join((sum by (job, http_route) (rate(http_server_request_duration_seconds_count{job=~\"shizu-api|shizustore-web\",http_route!=\"\",http_response_status_code=~\"[45]..\"}[$__rate_interval])) or (0 * sum by (job, http_route) (rate(http_server_request_duration_seconds_count{job=~\"shizu-api|shizustore-web\",http_route!=\"\"}[$__rate_interval])))) / sum by (job, http_route) (rate(http_server_request_duration_seconds_count{job=~\"shizu-api|shizustore-web\",http_route!=\"\"}[$__rate_interval])), \"service_path\", \" \", \"job\", \"http_route\")",
           "format": "table",
           "instant": true,
           "datasource": { "type": "prometheus", "uid": "prometheus" }

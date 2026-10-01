@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry.Metrics;
 using Scalar.AspNetCore;
+using Sentry;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
@@ -21,6 +22,26 @@ using ShizuAppStoreServer.Sync;
 using ShizuAppStoreServer.Tracking;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Sentry: errors, request traces and structured logs. The API and the
+// storefront share one project, split by the service tag. The DSN is
+// server-side only (Sentry:Dsn or Sentry__Dsn); an empty DSN disables the
+// SDK, which keeps local runs offline, and Testing skips it entirely.
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    builder.WebHost.UseSentry(options =>
+    {
+        options.Dsn = builder.Configuration["Sentry:Dsn"];
+        options.SendDefaultPii = false;
+        // Upstream forge/CDN errors are expected here and would only add noise.
+        options.CaptureFailedRequests = false;
+        options.TracesSampleRate = builder.Configuration.GetValue("Sentry:TracesSampleRate", 0.2);
+        options.EnableLogs = builder.Configuration.GetValue("Sentry:EnableLogs", true);
+        options.Debug = builder.Configuration.GetValue("Sentry:Debug", false);
+        options.DefaultTags["service"] = "api";
+        options.AddEventProcessor(new JobContextEventProcessor());
+    });
+}
 
 // A worker exception must never take the API down. The hosted workers catch
 // per iteration; this covers the gaps (for example a request-level timeout
@@ -269,6 +290,7 @@ builder.Services.AddSingleton<DbJobSink>();
 builder.Services.AddSingleton<IJobSink>(sp => sp.GetRequiredService<DbJobSink>());
 builder.Services.AddSingleton<MetricsJobSink>();
 builder.Services.AddSingleton<IJobSink>(sp => sp.GetRequiredService<MetricsJobSink>());
+builder.Services.AddSingleton<IJobSink, SentryJobSink>();
 if (!string.IsNullOrWhiteSpace(enrichment.RunLogPath))
 {
     builder.Services.AddSingleton<IJobSink>(sp => new FileJobSink(
@@ -433,6 +455,10 @@ if (args.Contains("--refresh-icons"))
             Metadata: new { force = refreshForce, errors = refresh.Errors.Count }),
             CancellationToken.None);
 
+        // One-shots never start the web host, so its lifetime flush does not
+        // cover them; without this the queued Sentry events die with the process.
+        await SentrySdk.FlushAsync(TimeSpan.FromSeconds(5));
+
         return refresh.Failed > 0 ? 1 : 0;
     }
     finally
@@ -478,6 +504,8 @@ if (args.Contains("--sync-once"))
             app.Logger.LogWarning("Manual sync failure: {Failure}", failure);
         }
 
+        await SentrySdk.FlushAsync(TimeSpan.FromSeconds(5));
+
         return syncResult.Failed > 0 ? 1 : 0;
     }
     finally
@@ -499,6 +527,7 @@ if (args.Contains("--render-usage-logs"))
         : usageAnalysis.LogPath ?? string.Empty;
     var renderedLogs = UsageAnalysisLogWriter.RenderDirectory(logDir, app.Logger);
     app.Logger.LogInformation("Rendered {Count} usage log page(s) in {Dir}.", renderedLogs, logDir);
+    await SentrySdk.FlushAsync(TimeSpan.FromSeconds(5));
     return renderedLogs > 0 ? 0 : 1;
 }
 

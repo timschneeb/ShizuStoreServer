@@ -1,0 +1,317 @@
+# Provisioned alert rules for the ShizuStore services. Grafana applies this
+# file on start and on Admin API reload; provisioned rules are read-only in
+# the UI. Queries target the provisioned Prometheus datasource (uid
+# "prometheus"). The notification policy routes these to the shizu-telegram
+# contact point (policies.yaml).
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: shizu-health
+    folder: ShizuStore
+    interval: 1m
+    rules:
+      - uid: shizu-api-scrape-down
+        title: ShizuStore API scrape down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: up{job="shizu-api"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: Prometheus cannot scrape the ShizuStore API metrics endpoint.
+          description: up{job="shizu-api"} has been below 1 for 2 minutes.
+        labels:
+          service: shizu-api
+          severity: critical
+
+      - uid: shizu-api-p95-latency
+        title: ShizuStore API p95 latency high
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="shizu-api"}[5m])))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1.5
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: ShizuStore API p95 latency has been above 1.5 seconds.
+          description: Kept above the threshold for 10 minutes. Check sync or enrichment activity and database health on srv1.
+        labels:
+          service: shizu-api
+          severity: warning
+
+      - uid: shizu-api-sync-stalled
+        title: ShizuStore sync stalled
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 2700
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: increase(shizu_jobs_runs_total{job="shizu-api",job_kind="sync",job_status="succeeded"}[45m])
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: No successful ShizuStore sync pass in the last 45 minutes.
+          description: The fast sync loop runs every 15 minutes. Check the API journal and the job log on srv1.
+        labels:
+          service: shizu-api
+          severity: warning
+
+      - uid: shizustore-web-scrape-down
+        title: ShizuStore storefront scrape down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: up{job="shizustore-web"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: Prometheus cannot scrape the ShizuStore storefront metrics endpoint.
+          description: up{job="shizustore-web"} has been below 1 for 2 minutes.
+        labels:
+          service: shizustore-web
+          severity: critical
+
+      - uid: shizustore-web-p95-latency
+        title: ShizuStore storefront p95 latency high
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="shizustore-web"}[5m])))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1.5
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: ShizuStore storefront p95 latency has been above 1.5 seconds.
+          description: Kept above the threshold for 10 minutes. Check the web unit and its database access on srv1.
+        labels:
+          service: shizustore-web
+          severity: warning
+
+      - uid: shizustore-web-5xx
+        title: ShizuStore storefront 5xx responses
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(increase(http_server_request_duration_seconds_count{job="shizustore-web",http_response_status_code=~"5.."}[5m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: The ShizuStore storefront is returning 5xx responses.
+          description: More than zero 5xx responses in the last 5 minutes, sustained for 5 minutes.
+        labels:
+          service: shizustore-web
+          severity: warning

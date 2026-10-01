@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.AspNetCore.OutputCaching;
+using Sentry;
 using ShizuAppStoreServer.Web.Mapping;
 using ShizuAppStoreServer.Web.Rendering;
 using ShizuAppStoreServer.Web.Services;
@@ -28,6 +29,9 @@ public sealed class AppModel(CatalogService catalog, MarkdownRenderer markdown) 
 
     public async Task<IActionResult> OnGetAsync(string slug, CancellationToken ct)
     {
+        // Group traces and any failure by app, 404s included.
+        SentrySdk.ConfigureScope(scope => scope.SetTag("app.slug", slug));
+
         var app = await catalog.GetAppAsync(slug, ct);
         if (app is null)
         {

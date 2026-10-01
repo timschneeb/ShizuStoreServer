@@ -40,13 +40,21 @@ services:
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
+      # Alert notifications link back to Grafana. The default root URL points
+      # at localhost, whose host has no dot, and Telegram drops anchor
+      # entities to such hosts, leaving plain unclickable text.
+      GF_SERVER_ROOT_URL: https://grafana.timschneeberger.me
+      GF_SERVER_DOMAIN: grafana.timschneeberger.me
+      # Soft heap cap: at the cgroup limit the Go runtime thrashes instead of
+      # returning 200s. 512m hit that wall under a 5s-refresh dashboard.
+      GOMEMLIMIT: 900MiB
     ports:
       - 3001:3000
     volumes:
       - /home/tim/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - /home/tim/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
-    mem_limit: 512m
+    mem_limit: 1g
     restart: unless-stopped
 
 volumes:

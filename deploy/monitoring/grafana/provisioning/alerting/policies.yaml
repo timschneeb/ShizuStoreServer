@@ -1,0 +1,14 @@
+# Root notification policy: everything routes to the Telegram contact point
+# defined in contact-points.yaml. The policy tree is a single resource, so
+# this file replaces existing policies when applied.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: shizu-telegram
+    group_by:
+      - alertname
+      - service
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

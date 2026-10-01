@@ -16,7 +16,7 @@ dotnet test tests/ShizuAppStoreServer.Web.Tests/ShizuAppStoreServer.Web.Tests.cs
 
 ## Rules
 
-- Done means: build with 0 warnings 0 errors, full suite green (676 Core + 147 Api + 44 Web).
+- Done means: build with 0 warnings 0 errors, full suite green (676 Core + 148 Api + 45 Web).
 - The storefront (`src/ShizuAppStoreServer.Web/`, `docs/storefront.md`) reads the
   database read-only through Core's `ShizuDbContext`. Never add migrations or writes
   there, and never route it through the public API.

@@ -118,7 +118,10 @@ in-box meters `Microsoft.AspNetCore.Hosting`,
 instrumentation and the custom `ShizuAppStore` meter: `shizu.jobs.runs` and
 `shizu.jobs.duration` per job kind/trigger/status (recorded by every job sink,
 so CLI one-shots included), `shizu.installs.reported` per install-report type,
-and the `shizu.catalog.apps` gauge per availability. The Npgsql pool is named
+`shizu.app.views` per app slug for successful detail responses (API
+`GET /v1/apps/{slug}` and storefront `/apps/{slug}`, recorded by middleware
+registered before the output cache so cached responses still count), and the
+`shizu.catalog.apps` gauge per availability. The Npgsql pool is named
 `shizuappstore` so `db.client.connection.pool.name` never carries the raw
 connection string. The scrape itself is
 excluded from HTTP metrics (`DisableHttpMetrics`; `/healthz` too), is never
@@ -1467,6 +1470,9 @@ all environments; Scalar UI is development-only.
 | `RequestLog:ExcludedIps` | `""` | Comma-separated client IPs (IPv4 or IPv6) that are never logged |
 | `Metrics:Enabled` | `true` | OpenTelemetry metrics and `GET /metrics`; `false` skips the registration entirely |
 | `Metrics:Token` | `null` | Bearer token for `/metrics`; falls back to `SHIZU_METRICS_TOKEN`, then the admin token; no token leaves the route unmapped |
+| `Sentry:Dsn` | `null` | Sentry DSN, kept server-side only (`Sentry__Dsn` env also works); empty leaves the SDK disabled and tests via the `Testing` environment never initialize it |
+| `Sentry:TracesSampleRate` | `0.2` | Fraction of HTTP requests traced |
+| `Sentry:EnableLogs` | `true` | Mirror `Information`+ logs as Sentry structured logs; `Logging:Sentry:LogLevel` filters EF Core SQL and outbound HTTP to Warning |
 | `Jobs:MinLevel` | `Debug` | Lowest job-event level the DB sink stores; raise it to trim volume |
 | `Jobs:ChannelCapacity` | `20000` | Bounded job-event buffer; overflow increments `events_dropped` |
 | `Jobs:FlushIntervalSeconds` | `1` | DB sink flush period |

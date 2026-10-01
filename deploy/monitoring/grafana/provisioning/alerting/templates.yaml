@@ -1,0 +1,19 @@
+# Telegram-friendly notification template. The Telegram contact point uses
+# parse_mode HTML, so bold uses <b> and links use <a href>; the stock Grafana
+# template is Markdown-ish and leaves ** markers and bare URLs unrendered.
+# Referenced from contact-points.yaml as
+# message: '{{ template "shizu.telegram.message" . }}'.
+apiVersion: 1
+
+templates:
+  - orgId: 1
+    name: shizu-telegram
+    template: |
+      {{ define "shizu.telegram.message" -}}
+      {{ if eq .Status "firing" }}<b>Firing</b>{{ else }}<b>Resolved</b>{{ end }}: <b>{{ .CommonLabels.alertname }}</b>
+      {{ range .Alerts -}}
+      {{ if .Annotations.summary }}{{ .Annotations.summary }}{{ end }}
+      {{ if .Annotations.description }}{{ .Annotations.description }}{{ end }}
+      {{ if .GeneratorURL }}<a href="{{ .GeneratorURL }}">Open in Grafana</a>{{ end }}
+      {{ end -}}
+      {{ end }}

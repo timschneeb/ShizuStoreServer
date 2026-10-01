@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Sentry;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Sync;
@@ -82,6 +83,15 @@ public sealed class AdminController(
         {
             // Non-JSON bodies are fine, the token already authenticated them.
         }
+
+        // Group this operator action in traces and any error report.
+        SentrySdk.ConfigureScope(scope =>
+        {
+            scope.SetTag("admin.sync.full", full ? "true" : "false");
+            scope.SetTag("admin.sync.icons", icons ? "true" : "false");
+        });
+        SentrySdk.AddBreadcrumb(
+            reason is null ? "sync requested" : $"sync requested: {reason}", "admin");
 
         db.SyncRequests.Add(new SyncRequest
         {

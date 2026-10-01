@@ -463,6 +463,30 @@ The Prometheus stack that scrapes both targets lives in `deploy/monitoring/`
 (see the next section). Scrape credentials are read from files
 (`credentials_file`), so tokens are never inlined in the Prometheus config.
 
+## Sentry
+
+Both processes report errors, traces and structured logs to one shared Sentry
+project, split by a `service` tag (`api` / `storefront`); the environment tag
+comes from ASP.NET Core (`Production` / `Development`). The DSN is never
+committed: an empty DSN leaves the SDK disabled, so development runs and the
+hermetic test suites stay offline.
+
+- API: `Sentry:Dsn` in `/opt/shizuappstore/app/appsettings.Production.json`,
+  or `Sentry__Dsn` in `/etc/shizuappstore/env`.
+- Storefront: `Sentry:Dsn` in `/opt/shizustore-web/app/appsettings.Production.json`.
+
+```json
+{ "Sentry": { "Dsn": "https://<key>@o<org>.ingest.sentry.io/<project>" } }
+```
+
+`Sentry:TracesSampleRate` samples request transactions (default `0.2`).
+`Sentry:EnableLogs` mirrors `Information`+ logs; `Logging:Sentry:LogLevel`
+still quiets EF Core SQL commands and outbound HTTP logs. Job runs add
+breadcrumbs for start/skip/finish and capture failed or interrupted runs as
+events, tagged with `job.kind`, `job.trigger` and `job.run_id`.
+`Sentry:Debug=true` prints the SDK diagnostics and is meant only to verify a
+fresh setup.
+
 ## Monitoring stack (zbox)
 
 Grafana + Prometheus + node_exporter run as one Docker Compose stack on `zbox`
@@ -471,7 +495,11 @@ Grafana + Prometheus + node_exporter run as one Docker Compose stack on `zbox`
 `https://shizustore.com/metrics` (own token), plus host metrics from the
 sidecar node_exporter (job `node-zbox`) and from srv1's node_exporter (job
 `node-srv1`). Grafana listens on host port `3001` (`3000` is taken by
-lanraragi) and is reachable on the LAN and tailnet only. No alerts yet.
+lanraragi) and is reachable on the LAN and tailnet only. Unified alerting is
+provisioned from `grafana/provisioning/alerting/`: six ShizuStore health rules
+(API and storefront scrape down, p95 latency, sync stalled, storefront 5xx)
+delivered to a Telegram contact point. `GF_SERVER_ROOT_URL` must stay the
+public Grafana hostname or Telegram drops the message link.
 
 srv1 side: install `prometheus-node-exporter`, add the basic-auth `web.yml`,
 point the unit at it via `/etc/conf.d/prometheus-node-exporter` (files under

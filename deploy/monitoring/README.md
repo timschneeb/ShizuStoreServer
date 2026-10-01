@@ -13,7 +13,8 @@ Prometheus + Grafana + node_exporter running as a Docker Compose stack on
 
 Grafana listens on `3001` (host port `3000` is taken by lanraragi) and is
 reachable at `http://<zbox-lan-ip>:3001` and `http://<zbox-tailscale-ip>:3001`.
-Prometheus binds `127.0.0.1:9090` on zbox only. Alerts are not configured.
+Prometheus binds `127.0.0.1:9090` on zbox only. Grafana unified alerting
+delivers the ShizuStore health rules to Telegram (see Alerts).
 
 ## srv1 (node_exporter)
 
@@ -58,6 +59,11 @@ container, so the compose supplies Grafana's variables inline; the CLI reads
 the same value from `.env` next to the compose file. The community dashboards come from
 `grafana/dashboards/fetch-dashboards.sh` (downloads 19924, 19925, 1860 and
 patches them for provisioning); `shizustore-overview.json` is maintained here.
+It has a KPI band (24h requests per service, error rate, active requests), HTTP
+request panels (rate, p95, error rate, connections, methods), a
+requests/latency/errors-by-path table, a top-apps table from
+`shizu_app_views_total` (client and webstore sources), and job/install/host
+rows.
 
 Token sources:
 
@@ -67,6 +73,28 @@ Token sources:
   `/opt/shizustore-web/app/appsettings.Production.json` on srv1.
 - `node-srv1.pass`: the plaintext behind the bcrypt hash in srv1's
   `/etc/prometheus-node-exporter/web.yml`.
+
+## Alerts (Grafana unified alerting)
+
+Provisioned from `grafana/provisioning/alerting/`:
+
+- `rules.yaml`: folder `ShizuStore`, group `shizu-health`, 1m interval. API
+  scrape down, API p95 above 1.5s, sync stalled (no successful sync pass in
+  45m), storefront scrape down, storefront p95, storefront 5xx.
+- `policies.yaml`: root route to `shizu-telegram`, grouped by alertname and
+  service.
+- `templates.yaml`: `shizu.telegram.message`, an HTML message with a bold
+  state and an explicit `<a href>` link.
+- `contact-points.example.yaml`: copy to `contact-points.yaml` on the Grafana
+  host only, fill in the bot token and chat id, and keep it out of version
+  control. The settings are `parse_mode: HTML` and
+  `message: '{{ template "shizu.telegram.message" . }}'`.
+
+Telegram drops `<a>` anchors whose host has no dot, so `GF_SERVER_ROOT_URL`
+and `GF_SERVER_DOMAIN` must be the public Grafana hostname (the compose sets
+`https://grafana.timschneeberger.me`); that is what makes the "Open in
+Grafana" link clickable. Rules are read-only in the UI: edit the files, then
+reload with `POST /api/admin/provisioning/alerting/reload`.
 
 ## Verification
 

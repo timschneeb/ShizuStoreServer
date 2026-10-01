@@ -34,7 +34,7 @@ only uses the data layer; that is accepted for the compile-time safety.
 | `GET /icons/{sha}.png` | Physical icon file from `Icons:StorePath` (the API's `/opt/shizuappstore/icons`). 64-hex check -> 400, missing -> 404, `Cache-Control: public, max-age=86400, immutable`. |
 | `GET /.well-known/assetlinks.json` | App Link verification for `me.timschneeberger.shizustore`, fingerprints from config. |
 | `GET /healthz` | `{"status":"ok"}`, `no-store`. |
-| `GET /metrics` | Prometheus text exposition (OpenTelemetry built-in HTTP/Kestrel/EF Core/Npgsql/runtime meters). Requires `Authorization: Bearer <token>` (`Metrics:Token` or `SHIZU_METRICS_TOKEN`) -> 401 otherwise; the route is not mapped without a token. Not rate-limited, not output-cached. |
+| `GET /metrics` | Prometheus text exposition (OpenTelemetry built-in HTTP/Kestrel/EF Core/Npgsql/runtime meters plus the custom `shizu.app.views` counter per app slug). Requires `Authorization: Bearer <token>` (`Metrics:Token` or `SHIZU_METRICS_TOKEN`) -> 401 otherwise; the route is not mapped without a token. Not rate-limited, not output-cached. |
 
 Detail rendering mirrors the API (`AppMapper` semantics) and the client UI:
 `displayName` fallback, primary download first then `versionCode` desc,
@@ -78,6 +78,9 @@ output-cached for 60 seconds, varying by Android vs other User-Agent so the
 | `AssetLinks:PackageName` | `me.timschneeberger.shizustore` | same |
 | `AssetLinks:Fingerprints` | release signing cert SHA-256 (list) | release fingerprint |
 | `Metrics:Token` | token from `appsettings.Production.json` (or `SHIZU_METRICS_TOKEN`); no token leaves `/metrics` unmapped | unset, `/metrics` unmapped |
+| `Sentry:Dsn` | DSN from `appsettings.Production.json`; empty leaves the SDK disabled | unset, disabled |
+| `Sentry:TracesSampleRate` | `0.2` | `0.2` |
+| `Sentry:EnableLogs` | `true` | `true` |
 
 ## Local development
 
@@ -108,7 +111,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now shizustore-web.service
 ```
 
-`appsettings.Production.json` carries the database password and is never
+`appsettings.Production.json` carries the database password, the metrics
+token and the Sentry DSN, and is never
 overwritten by the deploy script. Recurring deploys from the repo root:
 
 ```bash
