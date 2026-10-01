@@ -63,8 +63,12 @@ All `/v1/*` controllers carry `[EnableRateLimiting("api")]`. `/healthz` and
 immutable static assets requested in bulk by list screens, so the edge caches
 them instead of the origin enforcing a limit. The `api` policy is a
 per-IP (fallback `"unknown"`) fixed window: 100 req/min by default, no queue -
-excess gets 429. `ApiOptions` is resolved per request (not captured),
-so tests can swap the registration per suite.
+excess gets 429. The partition key resolves like the request log
+(`CF-Connecting-IP`, else the first `X-Forwarded-For` hop, else the socket
+peer) because the tunnel makes every socket peer loopback; the per-IP
+guarantee therefore depends on Cloudflare overwriting its header and on
+Kestrel being reachable only through the tunnel. `ApiOptions` is resolved
+per request (not captured), so tests can swap the registration per suite.
 
 Anonymous usage stats: `UserAgentTrackingMiddleware` sits right after
 response compression and **before** `UseOutputCache`, so it sees every

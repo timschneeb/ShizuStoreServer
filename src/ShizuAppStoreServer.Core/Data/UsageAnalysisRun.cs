@@ -66,6 +66,13 @@ public sealed class UsageAnalysisRun
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
 
+    /// <summary>
+    /// UTC date of <see cref="FinishedAt"/>; null while the run retries or has
+    /// not finished. DateOnly so report queries can bound windows in SQL
+    /// instead of loading every finished run.
+    /// </summary>
+    public DateOnly? FinishedDay { get; set; }
+
     /// <summary>Earliest time the worker may claim this row.</summary>
     public DateTimeOffset NextAttemptAt { get; set; }
 }

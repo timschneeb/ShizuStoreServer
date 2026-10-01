@@ -191,7 +191,9 @@ public sealed class SyncService(
             var freshIds = (await PollChangedAsync(ct)).Except(dueIds).ToList();
             if (dueIds.Count == 0 && freshIds.Count == 0)
             {
-                _jobs.Skipped(start, "nothing due");
+                // Keep the observed head on the row: the next tick compares
+                // against it, and /v1/meta and /v1/issues read it.
+                _jobs.Skipped(start with { Reference = head }, "nothing due");
                 return new SyncPassResult(
                     effectiveTrigger, head, 0, 0, 0, 0, 0, 0, 0, 0, 0, true, null);
             }

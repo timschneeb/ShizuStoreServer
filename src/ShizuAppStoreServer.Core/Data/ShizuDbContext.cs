@@ -321,12 +321,15 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
             e.Property(x => x.StartedAt).HasColumnName("started_at");
             e.Property(x => x.FinishedAt).HasColumnName("finished_at");
+            // DateOnly mirror so report queries can bound finished runs in SQL.
+            e.Property(x => x.FinishedDay).HasColumnName("finished_day").HasColumnType("date");
             e.Property(x => x.NextAttemptAt).HasColumnName("next_attempt_at").IsRequired();
             // At most one active run per app; enforce in the database because
             // claim and enqueue race across worker slots and enrichment scopes.
             e.HasIndex(x => x.AppId).IsUnique().HasFilter("status in ('Pending', 'Running')");
             e.HasIndex(x => new { x.Status, x.NextAttemptAt });
             e.HasIndex(x => new { x.AppId, x.CreatedAt });
+            e.HasIndex(x => x.FinishedDay);
         });
 
         b.Entity<AppVersion>(e =>
@@ -523,6 +526,9 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             e.Property(x => x.SeenAt).HasColumnName("seen_at").IsRequired();
             e.HasIndex(x => x.SeenAt);
+            // DateOnly mirror so report queries can filter by day in SQL.
+            e.Property(x => x.SeenDay).HasColumnName("seen_day").HasColumnType("date").IsRequired();
+            e.HasIndex(x => x.SeenDay);
             e.Property(x => x.Method).HasColumnName("method").IsRequired();
             e.Property(x => x.Path).HasColumnName("path").IsRequired();
             e.Property(x => x.QueryString).HasColumnName("query_string");

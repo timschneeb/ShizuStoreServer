@@ -561,6 +561,11 @@ verify from a client with `curl https://shizustore.timschneeberger.me/v1/apps`.
 If the hostname ever gets a Zero Trust Access application, remember the
 API must stay reachable without a login prompt.
 
+The rate limiter partitions on the resolved client IP (`CF-Connecting-IP`,
+else the first `X-Forwarded-For` hop, else the socket peer), so per-IP
+limits work through the tunnel; they presume Cloudflare keeps overwriting
+that header and that Kestrel stays loopback-only.
+
 The same tunnel also fronts the public storefront at
 `https://shizustore.com` (`http://localhost:5139`, unit
 `shizustore-web.service`). That is a separate app and unit, documented in

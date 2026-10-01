@@ -12,6 +12,12 @@ public sealed class RequestLog
     public long Id { get; set; }
     public DateTimeOffset SeenAt { get; set; }
 
+    /// <summary>
+    /// UTC date of <see cref="SeenAt"/>. DateOnly so report queries can
+    /// filter and group in SQL; DateTimeOffset does not translate on SQLite.
+    /// </summary>
+    public DateOnly SeenDay { get; set; }
+
     public string Method { get; set; } = "";
     public string Path { get; set; } = "";
     public string? QueryString { get; set; }

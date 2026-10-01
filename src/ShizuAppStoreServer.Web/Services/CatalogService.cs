@@ -55,6 +55,20 @@ public sealed class CatalogService(ShizuDbContext db)
             .ToListAsync(ct);
 
     /// <summary>
+    /// Slug and change time of every app whose detail page renders; excluded
+    /// rows are the only ones that page hides.
+    /// </summary>
+    public Task<List<SitemapEntry>> GetSitemapEntriesAsync(CancellationToken ct = default) =>
+        db.Apps.AsNoTracking()
+            .Where(a => a.Availability != Availability.Excluded)
+            .OrderBy(a => a.Slug)
+            .Select(a => new SitemapEntry(a.Slug, a.UpdatedAt))
+            .ToListAsync(ct);
+
+    /// <summary>One sitemap URL source row.</summary>
+    public sealed record SitemapEntry(string Slug, DateTimeOffset UpdatedAt);
+
+    /// <summary>
     /// Filtered and sorted list page, mirroring the client's AppListQueryBuilder
     /// (main listing, non-excluded, search over name/description/package).
     /// </summary>

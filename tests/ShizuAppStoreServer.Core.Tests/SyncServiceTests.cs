@@ -163,6 +163,36 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task SkippedPassKeepsHeadAndTheNextPassSkipsAgain()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var head = Head();
+
+        Assert.False((await Service().RunAsync("scheduled", fullRecheck: false, T0)).Skipped);
+
+        var second = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
+        Assert.True(second.Skipped);
+        Assert.Equal(head, second.HeadCommit);
+
+        // The skipped row must carry the observed head, or the next tick reads
+        // a null lastHead and re-parses the whole list; /v1/meta and
+        // /v1/issues also read this reference for listCommit/headCommit.
+        var afterSecond = _db.JobRuns.OrderBy(r => r.Id).Last();
+        Assert.Equal(JobStatus.Skipped, afterSecond.Status);
+        Assert.Equal(head, afterSecond.Reference);
+
+        var third = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(32));
+        Assert.True(third.Skipped);
+        Assert.Equal(3, _db.JobRuns.Count());
+        Assert.Equal(3, _runner.Calls.Count);
+    }
+
+    [Fact]
     public async Task WebhookRequestForcesPassAndIsMarkedProcessed()
     {
         if (!InitRepo())

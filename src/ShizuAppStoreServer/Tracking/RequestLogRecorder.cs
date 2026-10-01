@@ -20,6 +20,7 @@ public static class RequestLogRecorder
         db.RequestLogs.AddRange(hits.Select(h => new RequestLog
         {
             SeenAt = h.SeenAt,
+            SeenDay = DateOnly.FromDateTime(h.SeenAt.UtcDateTime),
             Method = h.Method,
             Path = h.Path,
             QueryString = h.QueryString,

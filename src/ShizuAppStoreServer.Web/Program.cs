@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OpenTelemetry.Metrics;
@@ -206,6 +208,26 @@ app.MapGet("/healthz", (HttpContext context) =>
 {
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(new { status = "ok" });
+});
+
+app.MapGet("/sitemap.xml", async (HttpContext context, CatalogService catalog, CancellationToken ct) =>
+{
+    var entries = await catalog.GetSitemapEntriesAsync(ct);
+    var xml = new StringBuilder();
+    xml.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    xml.Append("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    foreach (var entry in entries)
+    {
+        // Slugs are ASCII [a-z0-9-] by construction, so no XML escaping is needed.
+        xml.Append("  <url><loc>").Append(SiteUrls.PublicBase).Append("/apps/").Append(entry.Slug)
+            .Append("</loc><lastmod>")
+            .Append(entry.UpdatedAt.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+            .Append("</lastmod></url>\n");
+    }
+
+    xml.Append("</urlset>\n");
+    context.Response.Headers.CacheControl = "public, max-age=3600";
+    return Results.Text(xml.ToString(), "application/xml", Encoding.UTF8);
 });
 
 if (metricsOptions.Enabled && !string.IsNullOrEmpty(metricsToken))

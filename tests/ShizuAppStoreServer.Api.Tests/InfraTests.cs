@@ -178,6 +178,62 @@ public sealed class RateLimitTests : IClassFixture<ShizuApiFactory>, IDisposable
     }
 
     [Fact]
+    public async Task PartitionsByForwardedClientIp()
+    {
+        await _factory.ResetAsync(_ => { });
+        var client = _factory.NewClient();
+
+        // Three permits for one Cloudflare client IP...
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Equal(HttpStatusCode.OK, (await Meta(client, cfConnectingIp: "203.0.113.1")).StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.TooManyRequests,
+            (await Meta(client, cfConnectingIp: "203.0.113.1")).StatusCode);
+
+        // ...and a fresh bucket for a different one, which shares the loopback
+        // socket peer under the old partition key.
+        Assert.Equal(HttpStatusCode.OK, (await Meta(client, cfConnectingIp: "203.0.113.2")).StatusCode);
+    }
+
+    [Fact]
+    public async Task PartitionsByFirstForwardedForHop()
+    {
+        await _factory.ResetAsync(_ => { });
+        var client = _factory.NewClient();
+
+        // Without CF-Connecting-IP the first X-Forwarded-For hop is the key.
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Equal(HttpStatusCode.OK,
+                (await Meta(client, forwardedFor: "198.51.100.9, 172.16.0.1")).StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.TooManyRequests,
+            (await Meta(client, forwardedFor: "198.51.100.9, 172.16.0.1")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await Meta(client, forwardedFor: "198.51.100.10")).StatusCode);
+    }
+
+    private static Task<HttpResponseMessage> Meta(
+        HttpClient client, string? cfConnectingIp = null, string? forwardedFor = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, "/v1/meta");
+        if (cfConnectingIp is not null)
+        {
+            request.Headers.TryAddWithoutValidation("CF-Connecting-IP", cfConnectingIp);
+        }
+
+        if (forwardedFor is not null)
+        {
+            request.Headers.TryAddWithoutValidation("X-Forwarded-For", forwardedFor);
+        }
+
+        return client.SendAsync(request);
+    }
+
+    [Fact]
     public async Task IconsAreNotRateLimited()
     {
         await _factory.ResetAsync(_ => { });

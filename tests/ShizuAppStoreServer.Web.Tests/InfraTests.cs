@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using ShizuAppStoreServer.Core.Data;
 
 namespace ShizuAppStoreServer.Web.Tests;
 
@@ -130,5 +131,38 @@ public sealed class InfraTests(WebAppFactory factory) : IClassFixture<WebAppFact
         Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
         Assert.Contains("immutable", response.Headers.CacheControl?.ToString());
         Assert.Equal(4, (await response.Content.ReadAsByteArrayAsync()).Length);
+    }
+
+    [Fact]
+    public async Task Sitemap_ListsRenderedDetailPages()
+    {
+        await factory.ResetAsync(db =>
+        {
+            db.Add(Seeds.Category(1, "tools", "Tools"));
+            db.Add(Seeds.App(1, "foo", "Foo", 1));
+            var gone = Seeds.App(2, "gone", "Gone", 1);
+            gone.Availability = Availability.Excluded;
+            db.Add(gone);
+        });
+
+        var response = await factory.NewClient().GetAsync("/sitemap.xml");
+        var xml = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/xml", response.Content.Headers.ContentType?.MediaType);
+        Assert.Contains("<loc>https://shizustore.com/apps/foo</loc>", xml);
+        Assert.Contains("<lastmod>2026-02-01</lastmod>", xml);
+        Assert.DoesNotContain("gone", xml);
+        Assert.Contains("max-age=3600", response.Headers.CacheControl?.ToString());
+    }
+
+    [Fact]
+    public async Task Robots_PointsAtSitemap()
+    {
+        await factory.ResetAsync(_ => { });
+
+        var robots = await factory.NewClient().GetStringAsync("/robots.txt");
+
+        Assert.Contains("Sitemap: https://shizustore.com/sitemap.xml", robots);
     }
 }

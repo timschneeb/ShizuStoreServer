@@ -56,6 +56,7 @@ public sealed class UsageAnalysisRunner(
                 run.Status = UsageAnalysisStatus.Failed;
                 run.Error = "interrupted by a restart and out of retries";
                 run.FinishedAt = now;
+                run.FinishedDay = DateOnly.FromDateTime(now.UtcDateTime);
                 parked++;
             }
             else
@@ -232,6 +233,7 @@ public sealed class UsageAnalysisRunner(
             run.Status = UsageAnalysisStatus.Succeeded;
             run.Error = null;
             run.FinishedAt = finishedAt;
+            run.FinishedDay = DateOnly.FromDateTime(finishedAt.UtcDateTime);
             var coverage = result.Coverage;
             log?.LogInformation(
                 "Usage analysis succeeded for {Slug} in {Turns} turns, {Tools} tools, {Input}+{Output} tokens, ${Cost:F4}; surface {Surface}/{SurfaceTotal}, call sites {SitesRead}/{Sites}, {Rounds} coverage round(s), {SymbolTools} symbol tool call(s).",
@@ -247,6 +249,7 @@ public sealed class UsageAnalysisRunner(
             run.Error = Truncate(error ?? "analysis failed", 1024);
             run.NextAttemptAt = finishedAt + options.RetryBackoff * Math.Max(1, run.Attempts);
             run.FinishedAt = terminal ? finishedAt : null;
+            run.FinishedDay = terminal ? DateOnly.FromDateTime(finishedAt.UtcDateTime) : null;
             log?.LogInformation(
                 "Usage analysis attempt {Attempt} for {Slug} failed: {Error}",
                 run.Attempts, app.Slug, run.Error);

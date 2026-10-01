@@ -30,15 +30,17 @@ only uses the data layer; that is accepted for the compile-time safety.
 |---|---|
 | `GET /` | Landing page: hero icon, subtitle linking to the awesome-shizuku list, Download APK / GitHub / Browse apps buttons with icons, and a screenshot strip hotlinked from the ShizuStore catalog entry with the full-screen viewer. The app banner below the header is suppressed here. |
 | `GET /apps` | Searchable app list: search box plus category, sort and price filter chips; the category filter opens a scrollable chip cloud, the other two open menus; a recommended toggle; sorted by most starred by default, 48 rows per page with numbered pagination. |
-| `GET /apps/{slug}` | Detail page modeled on the client's Android detail screen: header with icon/name/author/version, tag chips (the category chip links to the filtered app list), stats strip, availability call to action, tonal notices (Play-only, billing, closed source), tracker card, about/usage/changelog/permissions dialogs with sanitized markdown, screenshots, link rows, collapsible sources (each candidate labelled with its ABI, or Universal for a fat build)/app information/signature, and "More from this developer" / "More from this category" carousels. Unknown or `excluded` slugs -> 404 rendered as the client's "App no longer available" placeholder. |
+| `GET /apps/{slug}` | Detail page modeled on the client's Android detail screen: header with icon/name/author/version, tag chips (the category chip links to the filtered app list), stats strip, availability call to action, tonal notices (Play-only, billing, closed source), tracker card, about/usage/changelog/permissions dialogs with sanitized markdown, screenshots, link rows, collapsible sources (each candidate labelled with its ABI, or Universal for a fat build), and "More from this developer" / "More from this category" carousels. Unknown or `excluded` slugs -> 404 rendered as the client's "App no longer available" placeholder. |
 | `GET /icons/{sha}.png` | Physical icon file from `Icons:StorePath` (the API's `/opt/shizuappstore/icons`). 64-hex check -> 400, missing -> 404, `Cache-Control: public, max-age=86400, immutable`. |
 | `GET /.well-known/assetlinks.json` | App Link verification for `me.timschneeberger.shizustore`, fingerprints from config. |
 | `GET /healthz` | `{"status":"ok"}`, `no-store`. |
+| `GET /sitemap.xml` | One URL per rendered app detail page (non-`excluded`), `lastmod` from the app's `updated_at`, `Cache-Control: public, max-age=3600`. |
+| `GET /robots.txt` | Static file pointing crawlers at `/sitemap.xml`. |
 | `GET /metrics` | Prometheus text exposition (OpenTelemetry built-in HTTP/Kestrel/EF Core/Npgsql/runtime meters plus the custom `shizu.app.views` counter per app slug). Requires `Authorization: Bearer <token>` (`Metrics:Token` or `SHIZU_METRICS_TOKEN`) -> 401 otherwise; the route is not mapped without a token. Not rate-limited, not output-cached. |
 
 Detail rendering mirrors the API (`AppMapper` semantics) and the client UI:
 `displayName` fallback, primary download first then `versionCode` desc,
-category path root-to-leaf, space-joined signature sets, tracker tag grouping.
+category path root-to-leaf, tracker tag grouping.
 Tag chips follow the client's order (stars off `direct_apk`, category, min
 SDK, relative update age, license, Dhizuku) plus list-screen extras
 (recommended, trial, root, type). Availability drives the call to action

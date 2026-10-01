@@ -66,12 +66,6 @@ public sealed class AppDetailView(App app)
 
     public int? MinSdk => Primary?.MinSdk;
 
-    public int? TargetSdk => Primary?.TargetSdk;
-
-    public IReadOnlyList<string> Abis => Primary?.Abis ?? [];
-
-    public int LocaleCount => Primary?.Locales.Count ?? 0;
-
     public bool RequiresDhizuku => Primary?.DhizukuDeclared ?? false;
 
     public bool IsClosedSource => App.Listing == Listing.ClosedSource;
@@ -79,16 +73,6 @@ public sealed class AppDetailView(App app)
     public string TypeLabel => Label(App.Type);
 
     public string SourceLabel => Label(App.SourceKind);
-
-    public string? SignerDn => Primary?.SignerDn;
-
-    public string? SignerScheme => Primary?.SignerScheme;
-
-    public string? SignerKeyAlgorithm => Primary?.SignerKeyAlgorithm;
-
-    public IReadOnlyList<string> SigSha256 => SplitSet(Primary?.SigSha256);
-
-    public IReadOnlyList<string> SigMd5 => SplitSet(Primary?.SigMd5);
 
     public IReadOnlyList<Category> CategoryPath => BuildCategoryPath(App.Category);
 
@@ -425,9 +409,4 @@ public sealed class AppDetailView(App app)
 
         return order.Select(name => new TrackerGroup(name, tags[name])).ToList();
     }
-
-    private static IReadOnlyList<string> SplitSet(string? value) =>
-        string.IsNullOrWhiteSpace(value)
-            ? []
-            : value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 }

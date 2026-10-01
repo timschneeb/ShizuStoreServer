@@ -5,18 +5,6 @@ namespace ShizuAppStoreServer.Web.Mapping;
 /// <summary>Human-readable formatting for page values.</summary>
 public static class Display
 {
-    public static string Text(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value;
-
-    public static string Count(long? value) =>
-        value is { } number ? number.ToString("N0", CultureInfo.InvariantCulture) : "-";
-
-    public static string Date(DateTimeOffset? value) =>
-        value is { } moment ? moment.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : "-";
-
-    public static string Bytes(long? value) => value is { } bytes && bytes > 0 ? FormatBytes(bytes) : "-";
-
-    public static string Sdk(int? api) => api is { } level && level > 0 ? $"API {level}" : "-";
-
     private static readonly Dictionary<int, string> AndroidVersions = new()
     {
         [1] = "1.0", [2] = "1.1", [3] = "1.5", [4] = "1.6", [5] = "2.0", [6] = "2.0.1", [7] = "2.1",
@@ -129,20 +117,4 @@ public static class Display
 
     private static string Plural(int count, string unit) =>
         count == 1 ? $"{count} {unit} ago" : $"{count} {unit}s ago";
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] units = ["B", "KB", "MB", "GB", "TB"];
-        double size = bytes;
-        var unit = 0;
-        while (size >= 1024 && unit < units.Length - 1)
-        {
-            size /= 1024;
-            unit++;
-        }
-
-        return unit == 0
-            ? $"{bytes} B"
-            : $"{size.ToString("0.#", CultureInfo.InvariantCulture)} {units[unit]}";
-    }
 }

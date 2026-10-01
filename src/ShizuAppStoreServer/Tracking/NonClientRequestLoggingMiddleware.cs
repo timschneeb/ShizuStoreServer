@@ -26,7 +26,7 @@ public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
     {
         if (IsExcluded(context.Request.Path)
             || ClientUserAgentMatcher.IsClient(context.Request.Headers.UserAgent.ToString())
-            || options.IsExcludedIp(ClientIp(context)))
+            || options.IsExcludedIp(ClientIp.Resolve(context)))
         {
             await next(context);
             return;
@@ -62,24 +62,11 @@ public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
         || path.StartsWithSegments("/v1/admin")
         || path == "/metrics";
 
-    /// <summary>
-    /// Real client IP for the exclusion list. Cloudflare rewrites
-    /// <c>CF-Connecting-IP</c>, so it wins over the client-supplied
-    /// <c>X-Forwarded-For</c>; the socket peer is the last resort.
-    /// </summary>
-    private static string? ClientIp(HttpContext context)
-    {
-        var request = context.Request;
-        return Header(request, "CF-Connecting-IP")
-            ?? FirstHop(Header(request, "X-Forwarded-For"))
-            ?? context.Connection.RemoteIpAddress?.ToString();
-    }
-
     private static RequestLogHit Capture(HttpContext context, int statusCode, int durationMs)
     {
         var request = context.Request;
         var host = request.Host.HasValue ? request.Host.Value : null;
-        var forwardedFor = Header(request, "X-Forwarded-For");
+        var forwardedFor = ClientIp.Header(request, "X-Forwarded-For");
         var rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget;
         if (string.IsNullOrEmpty(rawTarget))
         {
@@ -99,15 +86,15 @@ public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
             SerializeHeaders(request),
             (short)statusCode,
             durationMs,
-            Header(request, HeaderNames.UserAgent),
-            Header(request, "Origin"),
+            ClientIp.Header(request, HeaderNames.UserAgent),
+            ClientIp.Header(request, "Origin"),
             context.Connection.RemoteIpAddress?.ToString(),
             // Cloudflare Tunnel terminates the connection locally, so the
             // socket peer is loopback; CF-Connecting-IP carries the real client.
-            Header(request, "CF-Connecting-IP") ?? FirstHop(forwardedFor),
+            ClientIp.Header(request, "CF-Connecting-IP") ?? ClientIp.FirstHop(forwardedFor),
             forwardedFor,
-            Header(request, "CF-Ray"),
-            Header(request, "CF-IPCountry"),
+            ClientIp.Header(request, "CF-Ray"),
+            ClientIp.Header(request, "CF-IPCountry"),
             context.TraceIdentifier);
     }
 
@@ -141,22 +128,5 @@ public sealed class NonClientRequestLoggingMiddleware(RequestDelegate next)
         }
 
         return JsonSerializer.Serialize(headers);
-    }
-
-    private static string? Header(HttpRequest request, string name)
-    {
-        var value = request.Headers[name].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
-
-    private static string? FirstHop(string? forwardedFor)
-    {
-        if (string.IsNullOrWhiteSpace(forwardedFor))
-        {
-            return null;
-        }
-
-        var comma = forwardedFor.IndexOf(',');
-        return (comma >= 0 ? forwardedFor[..comma] : forwardedFor).Trim();
     }
 }

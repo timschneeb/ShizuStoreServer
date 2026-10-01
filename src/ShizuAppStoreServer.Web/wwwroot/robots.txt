@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://shizustore.com/sitemap.xml

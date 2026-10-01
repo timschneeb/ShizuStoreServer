@@ -85,7 +85,10 @@ builder.Services.AddRateLimiter(o =>
         var limit = Math.Max(1,
             httpContext.RequestServices.GetRequiredService<ApiOptions>().RateLimitPerMinute);
         return RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            // The tunnel terminates on loopback, so partitioning on the socket
+            // peer would put every client in one bucket; resolve the forwarded
+            // client IP the same way the request log does.
+            partitionKey: ClientIp.Resolve(httpContext) ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = limit,
