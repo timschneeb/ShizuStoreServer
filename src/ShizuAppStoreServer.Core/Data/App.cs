@@ -106,6 +106,16 @@ public sealed class App
     public string? FullDescription { get; set; }
 
     /// <summary>
+    /// Direct raw markdown URL of <see cref="FullDescription"/> (GitHub
+    /// raw.githubusercontent.com or GitLab <c>/-/raw/</c> route), so clients
+    /// can refetch the current README instead of rendering the stored
+    /// snapshot. Null for Play descriptions and sources without a raw route.
+    /// Server-only: sent on the detail endpoint, never in summaries or the
+    /// change feed.
+    /// </summary>
+    public string? ReadmeUrl { get; set; }
+
+    /// <summary>
     /// Latest release notes: the release markdown body for GitHub/GitLab, or
     /// the F-Droid/Izzy index long description when the source publishes no
     /// release notes. Server-only: sent on the detail endpoint, never in

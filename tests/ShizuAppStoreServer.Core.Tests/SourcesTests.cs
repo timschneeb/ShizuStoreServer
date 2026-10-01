@@ -120,6 +120,15 @@ public sealed class SourcesTests
         }
     }
 
+    /// <summary>GitHub README API answer with inline base64 content, as the client requests it.</summary>
+    private static string ReadmeJson(string markdown, string path = "README.md") =>
+        new JsonObject
+        {
+            ["path"] = path,
+            ["encoding"] = "base64",
+            ["content"] = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(markdown)),
+        }.ToJsonString();
+
     private static string ReleasesJson() => new JsonArray(
         new JsonObject
         {
@@ -384,14 +393,41 @@ public sealed class SourcesTests
     [Fact]
     public async Task ReadsReadmeMarkdown()
     {
+        var markdown = "# Hi\n\n```kt\nval x = 1\n```\n";
         var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent("# Hi\n\n```kt\nval x = 1\n```\n"),
+            Content = new StringContent(ReadmeJson(markdown)),
         });
 
-        Assert.Equal(
-            "# Hi\n\n```kt\nval x = 1\n```\n",
-            await Client(stub).GetReadmeMarkdownAsync("o", "r"));
+        var document = (await Client(stub).GetReadmeMarkdownAsync("o", "r"))!;
+        Assert.Equal(markdown, document.Markdown);
+        Assert.Equal("https://raw.githubusercontent.com/o/r/HEAD/README.md", document.RawUrl);
+    }
+
+    [Fact]
+    public async Task ReadsReadmeAboveInlineLimitViaDownloadUrl()
+    {
+        var markdown = "# Huge\n";
+        var stub = new StubHandler(request =>
+        {
+            if (request.RequestUri!.Host == "raw.githubusercontent.com")
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(markdown),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"path":"docs/README.md","encoding":"none","content":"","download_url":"https://raw.githubusercontent.com/o/r/main/docs/README.md"}"""),
+            };
+        });
+
+        var document = (await Client(stub).GetReadmeMarkdownAsync("o", "r"))!;
+        Assert.Equal(markdown, document.Markdown);
+        Assert.Equal("https://raw.githubusercontent.com/o/r/HEAD/docs/README.md", document.RawUrl);
     }
 
     [Fact]
@@ -415,10 +451,10 @@ public sealed class SourcesTests
             };
         });
 
-        Assert.Equal(
-            "# Linked\n",
-            await Client(stub).GetLinkedMarkdownAsync(
-                "https://github.com/o/r/blob/main/README_EN.md"));
+        var document = (await Client(stub).GetLinkedMarkdownAsync(
+            "https://github.com/o/r/blob/main/README_EN.md"))!;
+        Assert.Equal("# Linked\n", document.Markdown);
+        Assert.Equal("https://raw.githubusercontent.com/o/r/main/README_EN.md", document.RawUrl);
     }
 
     [Fact]
@@ -931,9 +967,9 @@ public sealed class SourcesTests
             };
         });
 
-        Assert.Equal(
-            "# FMD Android\n\nFind your device.\n",
-            await GitLabClient(stub).GetReadmeMarkdownAsync("o/r"));
+        var document = (await GitLabClient(stub).GetReadmeMarkdownAsync("o/r"))!;
+        Assert.Equal("# FMD Android\n\nFind your device.\n", document.Markdown);
+        Assert.Equal("https://gitlab.com/o/r/-/raw/master/README.md", document.RawUrl);
     }
 
     [Fact]
@@ -950,10 +986,10 @@ public sealed class SourcesTests
             };
         });
 
-        Assert.Equal(
-            "# EN\n",
-            await GitLabClient(stub).GetLinkedMarkdownAsync(
-                "https://gitlab.com/o/r/-/blob/master/README_EN.md"));
+        var document = (await GitLabClient(stub).GetLinkedMarkdownAsync(
+            "https://gitlab.com/o/r/-/blob/master/README_EN.md"))!;
+        Assert.Equal("# EN\n", document.Markdown);
+        Assert.Equal("https://gitlab.com/o/r/-/raw/master/README_EN.md", document.RawUrl);
     }
 
     [Fact]

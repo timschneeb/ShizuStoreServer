@@ -153,40 +153,25 @@ public sealed class AppEnricher(
         return trimmed.Length > MaxChangelogChars ? trimmed[..MaxChangelogChars] : trimmed;
     }
 
-    // GitHub's old rendered README HTML is recognizable by its wrapper tags; a
-    // refetch replaces it with markdown. The markers are rendered-only, so raw
-    // markdown (which may embed <p align="...">) never matches and is not
-    // refetched on every pass. Play descriptions arrive as plain text and never
-    // match either.
-    private static bool NeedsReadmeRefresh(string? value) =>
-        string.IsNullOrEmpty(value)
-        || value.Contains("id=\"readme\"", StringComparison.Ordinal)
-        || value.Contains("data-path=", StringComparison.Ordinal)
-        || value.Contains("class=\"markdown-body\"", StringComparison.Ordinal)
-        || value.Contains("class=\"markdown-heading\"", StringComparison.Ordinal)
-        || value.Contains("class=\"highlight", StringComparison.Ordinal);
-
     /// <summary>
     /// Raw markdown, not rendered HTML: the client renders markdown. When the
     /// list entry links a markdown README directly (localized README_EN.md on
     /// projects whose landing README is non-English), that file wins over the
-    /// repo default and is refetched every pass, so rows enriched before this
-    /// pick existed heal. The default fetch keeps its legacy-HTML gate.
+    /// repo default. Both are refetched every pass so the stored snapshot and
+    /// the client's live refetch URL stay current; a failed fetch keeps the
+    /// previous text.
     /// </summary>
     private async Task RefreshFullDescriptionAsync(
-        App app, Func<Task<string?>> fetchLinked, Func<Task<string?>> fetchDefault)
+        App app, Func<Task<ReadmeDocument?>> fetchLinked, Func<Task<ReadmeDocument?>> fetchDefault)
     {
-        if (ReadmeLink.IsReadme(app.Url)
-            && await fetchLinked() is { Length: > 0 } linked)
-        {
-            SetFullDescription(app, linked);
-            return;
-        }
+        var document = ReadmeLink.IsReadme(app.Url)
+            ? await fetchLinked() ?? await fetchDefault()
+            : await fetchDefault();
 
-        if (NeedsReadmeRefresh(app.FullDescription)
-            && await fetchDefault() is { Length: > 0 } readme)
+        if (document is { Markdown.Length: > 0 })
         {
-            SetFullDescription(app, readme);
+            SetFullDescription(app, document.Markdown);
+            app.ReadmeUrl = document.RawUrl;
         }
     }
 
@@ -2055,6 +2040,7 @@ public sealed class AppEnricher(
             Stars = root.Stars,
             DownloadTotal = root.DownloadTotal,
             FullDescription = root.FullDescription,
+            ReadmeUrl = root.ReadmeUrl,
             Changelog = root.Changelog,
             ChangelogUrl = root.ChangelogUrl,
             AddedAt = now,
@@ -2583,27 +2569,38 @@ public sealed class AppEnricher(
 
     /// <summary>
     /// Rank for same-version flavor twins: stable release builds beat debug,
-    /// test, beta and terminal builds; equal rank keeps the incumbent.
+    /// test, beta and terminal builds; equal rank keeps the incumbent. Matches
+    /// whole filename tokens so a name like <c>app-latest.apk</c> does not
+    /// count as a test build.
     /// </summary>
     private static int ArtifactRank(string url)
     {
         var name = url[(url.LastIndexOf('/') + 1)..];
+        var tokens = name.Split(
+            ['-', '_', '.', ' ', '+', '(', ')', '[', ']'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         var rank = 0;
-        if (name.Contains("release", StringComparison.OrdinalIgnoreCase))
+        if (tokens.Any(t => t.Equals("release", StringComparison.OrdinalIgnoreCase)))
         {
             rank += 2;
         }
 
-        if (name.Contains("debug", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("test", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("beta", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("terminal", StringComparison.OrdinalIgnoreCase))
+        if (tokens.Any(t => t.Equals("debug", StringComparison.OrdinalIgnoreCase)
+            || t.Equals("test", StringComparison.OrdinalIgnoreCase)
+            || t.Equals("beta", StringComparison.OrdinalIgnoreCase)
+            || t.Equals("terminal", StringComparison.OrdinalIgnoreCase)))
         {
             rank -= 2;
         }
 
         return rank;
     }
+
+    /// <summary>Ranks by the file the client installs, the archive entry when
+    /// the APK is served inside a zip.</summary>
+    private static int ArtifactRank(AppDownload row) =>
+        ArtifactRank(row.ArchiveEntry is { Length: > 0 } entry ? entry : row.ApkUrl);
 
     /// <summary>
     /// A release newer than the one already recorded means a version bump may
@@ -3010,6 +3007,16 @@ public sealed class AppEnricher(
                     return aTag ? a : b;
                 }
             }
+        }
+
+        // A release-named artifact beats debug/test/beta/terminal builds even
+        // when the latter carry a higher version code: a debug APK must never
+        // become the fresh-install default.
+        var aRank = ArtifactRank(a);
+        var bRank = ArtifactRank(b);
+        if (aRank != bRank)
+        {
+            return aRank > bRank ? a : b;
         }
 
         var av = a.VersionCode ?? -1;
@@ -4120,6 +4127,9 @@ public sealed class AppEnricher(
             app.FullDescription = details.FullDescription.Length > MaxFullDescriptionChars
                 ? details.FullDescription[..MaxFullDescriptionChars]
                 : details.FullDescription;
+            // Play text is not markdown and has no raw route; drop a stale
+            // README URL so clients never refetch the wrong document.
+            app.ReadmeUrl = null;
         }
     }
 

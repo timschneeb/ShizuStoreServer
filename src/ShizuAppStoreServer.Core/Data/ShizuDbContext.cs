@@ -175,6 +175,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.AuthorUrl).HasColumnName("author_url").HasMaxLength(2000);
             e.Property(x => x.AuthorKey).HasColumnName("author_key").HasMaxLength(200);
             e.Property(x => x.FullDescription).HasColumnName("full_description");
+            e.Property(x => x.ReadmeUrl).HasColumnName("readme_url").HasMaxLength(2000);
             e.Property(x => x.Changelog).HasColumnName("changelog");
             e.Property(x => x.ChangelogUrl).HasColumnName("changelog_url").HasMaxLength(2000);
             // Screenshot URLs share the Permissions list encoding: newline

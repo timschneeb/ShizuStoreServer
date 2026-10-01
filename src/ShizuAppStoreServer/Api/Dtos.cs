@@ -122,6 +122,7 @@ public sealed record AppDetailDto(
     string? AuthorUrl,
     IReadOnlyList<string> Permissions,
     string? FullDescription,
+    string? ReadmeUrl,
     string? Changelog,
     string? ChangelogUrl,
     IReadOnlyList<string> Screenshots,

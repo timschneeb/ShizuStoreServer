@@ -58,6 +58,10 @@ The app store can handle app variants with different signatures automatically (e
 ### Which file is used
 
 - A `.apk` asset whose name contains `release` is preferred, otherwise the largest `.apk`.
+- The served default keeps that class order across candidates: a release-named
+  APK beats a debug/test/beta build even when their signing certificates differ
+  (so they are separate downloads). Only same-class candidates fall back to
+  version code, architecture and source order.
 - If the release has no `.apk` but a `.zip`, it will try to extract it and the best APK
   inside is analyzed.
 - Every other `.apk` asset of the release is analyzed as a candidate, so a
@@ -65,6 +69,12 @@ The app store can handle app variants with different signatures automatically (e
 - If a release contains multiple `.apk` assets with different package names and different app names, the server will create separate app entries for them (see below).
 - An app is excluded only when none of its recorded builds declare the Shizuku permission (APK badging or the F-Droid index manifest).
 - GitLab release descriptions can link APKs directly, instead of an attached release asset. Those links are collected as candidates too.
+
+The full description shown in the app is the repository README (or a markdown
+README linked directly by the list entry). The server refreshes it on every
+enrichment pass and publishes the direct raw markdown URL as `readmeUrl` on the
+detail endpoint, which the Shizu Store client uses to fetch the live copy; apps
+without a README fall back to the store description.
 
 #### Multi-app repos and flavor builds
 

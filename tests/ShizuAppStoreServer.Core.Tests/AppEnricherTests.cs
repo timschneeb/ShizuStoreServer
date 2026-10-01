@@ -249,6 +249,18 @@ public sealed class AppEnricherTests : IDisposable
         return response;
     }
 
+    /// <summary>GitHub README API answer with inline base64 content.</summary>
+    private static HttpResponseMessage ReadmeJson(string markdown, string path = "README.md") =>
+        new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonObject
+            {
+                ["path"] = path,
+                ["encoding"] = "base64",
+                ["content"] = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(markdown)),
+            }.ToJsonString()),
+        };
+
     private App NewApp(string slug, string name, string url, string? sourceUrl = null, bool excludeOverride = false)
     {
         var category = new Category
@@ -1050,7 +1062,7 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
-    public async Task RefetchesLegacyRenderedReadmeButKeepsMarkdown()
+    public async Task RefetchesReadmeOnEveryPass()
     {
         var zip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
@@ -1062,10 +1074,7 @@ public sealed class AppEnricherTests : IDisposable
             if (request.RequestUri!.AbsolutePath.EndsWith("/readme", StringComparison.Ordinal))
             {
                 readmeCalls++;
-                return new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new StringContent("# Fresh\n\n```kt\nval x = 1\n```\n"),
-                };
+                return ReadmeJson("# Fresh\n\n```kt\nval x = 1\n```\n");
             }
 
             return JsonReleases(
@@ -1084,13 +1093,16 @@ public sealed class AppEnricherTests : IDisposable
             "<div id=\"readme\" class=\"md\" data-path=\"README.md\"><p>rendered</p></div>";
         await enricher.EnrichAsync(legacy, T0);
         Assert.Equal("# Fresh\n\n```kt\nval x = 1\n```\n", legacy.FullDescription);
+        Assert.Equal("https://raw.githubusercontent.com/papergray/Legacy/HEAD/README.md", legacy.ReadmeUrl);
         Assert.Equal(1, readmeCalls);
 
+        // Stored markdown is refreshed too, not treated as final.
         var markdown = NewApp("markdown", "Markdown", "https://github.com/papergray/Markdown");
         markdown.FullDescription = "# Already";
         await enricher.EnrichAsync(markdown, T0);
-        Assert.Equal("# Already", markdown.FullDescription);
-        Assert.Equal(1, readmeCalls);
+        Assert.Equal("# Fresh\n\n```kt\nval x = 1\n```\n", markdown.FullDescription);
+        Assert.Equal("https://raw.githubusercontent.com/papergray/Markdown/HEAD/README.md", markdown.ReadmeUrl);
+        Assert.Equal(2, readmeCalls);
     }
 
     [Fact]
@@ -1137,6 +1149,7 @@ public sealed class AppEnricherTests : IDisposable
         await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
 
         Assert.Equal("# Linked\n", app.FullDescription);
+        Assert.Equal("https://raw.githubusercontent.com/ChaoMixian/vFlow/master/README_EN.md", app.ReadmeUrl);
         Assert.Equal(1, linkedCalls);
         Assert.Equal(0, readmeCalls);
     }
@@ -1157,10 +1170,7 @@ public sealed class AppEnricherTests : IDisposable
             if (request.RequestUri.AbsolutePath.EndsWith("/readme", StringComparison.Ordinal))
             {
                 readmeCalls++;
-                return new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new StringContent("# Default\n"),
-                };
+                return ReadmeJson("# Default\n");
             }
 
             return JsonReleases(
@@ -1180,6 +1190,7 @@ public sealed class AppEnricherTests : IDisposable
         await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
 
         Assert.Equal("# Default\n", app.FullDescription);
+        Assert.Equal("https://raw.githubusercontent.com/ChaoMixian/vFlow/HEAD/README.md", app.ReadmeUrl);
         Assert.Equal(1, readmeCalls);
     }
 
@@ -1739,6 +1750,7 @@ public sealed class AppEnricherTests : IDisposable
         var app = NewApp("plays-details", "Play Details",
             "https://play.google.com/store/apps/details?id=com.ysy.switcherfiveg",
             "https://github.com/example/switcher");
+        app.ReadmeUrl = "https://raw.githubusercontent.com/example/switcher/HEAD/README.md";
 
         var result = await BuildEnricher(github, downloads, aapt2, play: play).EnrichAsync(app, T0);
 
@@ -1752,6 +1764,8 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("play:7220530116384657977", app.AuthorKey);
         Assert.Equal("2.6.0-new", app.VersionName);
         Assert.Equal("NOTE: This app only supports HyperOS & MIUI system.", app.FullDescription);
+        // Play copy replaces the README; the stale raw route must not survive.
+        Assert.Null(app.ReadmeUrl);
         Assert.Equal(DateTimeOffset.Parse("2026-07-22T00:00:00Z"), app.VersionUpdatedAt);
         Assert.Equal(IconProcessor.ProcessRawImage(iconBytes)!.Sha256, app.IconHash);
         Assert.Equal(0, play.Calls);
@@ -2208,6 +2222,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
         Assert.Equal(522, app.Stars);
         Assert.Equal("# FMD Android\n\nFind your device.\n", app.FullDescription);
+        Assert.Equal("https://gitlab.com/o/r/-/raw/master/README.md", app.ReadmeUrl);
         Assert.Equal("## 1.0\n- First release", app.Changelog);
         Assert.Equal("https://gitlab.com/o/r/-/releases/v1.0", app.ChangelogUrl);
         Assert.Equal("android.permission.INTERNET", Assert.Single(app.Permissions));
@@ -5645,6 +5660,42 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(0, downloadsSecond.Calls);
         Assert.Equal(0, aapt2Second.Calls);
         Assert.Single(queue.Calls);
+    }
+
+    [Fact]
+    public async Task ReleaseApkBeatsDebugSiblingWithDifferentSigner()
+    {
+        var releaseZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var debugZip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        const string releaseUrl = "https://cdn.example/app-release.apk";
+        const string debugUrl = "https://cdn.example/app-debug.apk";
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJsonMultiAssets(("app-release.apk", releaseUrl, releaseZip.Length), ("app-debug.apk", debugUrl, debugZip.Length)),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("release") ? releaseZip : debugZip;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "42"));
+        // The two assets carry different signing certs, so they land in
+        // separate rows and the old version/ABI/source tie-break served the
+        // debug sibling that was analyzed last.
+        var signerCalls = 0;
+        var signer = new FakeSignerRunner(_ => signerCalls++ == 0 ? SignerOutputA : SignerOutputB);
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: signer);
+        var app = NewApp("siblings", "Siblings", "https://github.com/example/siblings");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(2, downloads.Calls);
+        Assert.Equal(2, _db.Downloads.Local.Count(d => d.AppId == app.Id));
+        var primary = Primary(app);
+        Assert.Equal(releaseUrl, primary.ApkUrl);
+        Assert.Equal(
+            "980ceb20fd248b13eb6e224d73b3dfcd722ab120dfa6632ae8528e7be1cfd6c9",
+            primary.SigSha256);
     }
 
     [Fact]

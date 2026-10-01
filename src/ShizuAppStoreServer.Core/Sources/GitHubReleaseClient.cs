@@ -32,21 +32,22 @@ public interface IGitHubReleaseClient : IAppSource
         Task.FromResult<GitHubRepoStats?>(null);
 
     /// <summary>
-    /// Raw README markdown via <c>GET /repos/{owner}/{repo}/readme</c>
-    /// (<c>application/vnd.github.raw</c>). The client renders markdown, so the
-    /// server ships the source, not GitHub's rendered HTML. Null on any failure.
-    /// Default impl keeps test doubles simple.
+    /// README markdown via <c>GET /repos/{owner}/{repo}/readme</c>, plus the
+    /// raw.githubusercontent.com URL the client can refetch live. The client
+    /// renders markdown, so the server ships the source, not GitHub's rendered
+    /// HTML. Null on any failure. Default impl keeps test doubles simple.
     /// </summary>
-    Task<string?> GetReadmeMarkdownAsync(string owner, string repo, CancellationToken ct = default) =>
-        Task.FromResult<string?>(null);
+    Task<ReadmeDocument?> GetReadmeMarkdownAsync(string owner, string repo, CancellationToken ct = default) =>
+        Task.FromResult<ReadmeDocument?>(null);
 
     /// <summary>
     /// Markdown of a README the list entry links directly (localized
-    /// <c>README_EN.md</c> on projects whose landing README is non-English).
-    /// Null on any failure. Default impl keeps test doubles simple.
+    /// <c>README_EN.md</c> on projects whose landing README is non-English),
+    /// plus its raw URL. Null on any failure. Default impl keeps test doubles
+    /// simple.
     /// </summary>
-    Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
-        Task.FromResult<string?>(null);
+    Task<ReadmeDocument?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+        Task.FromResult<ReadmeDocument?>(null);
 
     /// <summary>
     /// Every non-draft release, newest first, each with its own assets. Used
@@ -318,7 +319,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         }
     }
 
-    public async Task<string?> GetReadmeMarkdownAsync(string owner, string repo, CancellationToken ct = default)
+    public async Task<ReadmeDocument?> GetReadmeMarkdownAsync(string owner, string repo, CancellationToken ct = default)
     {
         try
         {
@@ -327,7 +328,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
                 $"https://api.github.com/repos/{owner}/{repo}/readme");
             request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
             request.Headers.Accept.Clear();
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.raw"));
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
 
             using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!response.IsSuccessStatusCode)
@@ -335,10 +336,42 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
                 return null;
             }
 
-            return await response.Content.ReadAsStringAsync(ct);
+            using var document = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct), default, ct);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || ReadString(document.RootElement, "path") is not { Length: > 0 } path)
+            {
+                return null;
+            }
+
+            // HEAD keeps the link valid across default-branch renames.
+            var rawUrl = $"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}";
+            if (ReadString(document.RootElement, "encoding") == "base64"
+                && ReadString(document.RootElement, "content") is { Length: > 0 } content)
+            {
+                var bytes = Convert.FromBase64String(content.Replace("\n", string.Empty, StringComparison.Ordinal));
+                return new ReadmeDocument(System.Text.Encoding.UTF8.GetString(bytes), rawUrl);
+            }
+
+            // Files above the API's inline limit report no base64 content; the
+            // download_url still serves the raw bytes.
+            if (ReadString(document.RootElement, "download_url") is not { Length: > 0 } downloadUrl)
+            {
+                return null;
+            }
+
+            using var raw = await _http.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!raw.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            return new ReadmeDocument(await raw.Content.ReadAsStringAsync(ct), rawUrl);
         }
         catch (Exception ex) when (ex is HttpRequestException
             or TaskCanceledException
+            or JsonException
+            or FormatException
             or InvalidOperationException)
         {
             if (ct.IsCancellationRequested)
@@ -350,7 +383,7 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         }
     }
 
-    public Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+    public Task<ReadmeDocument?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
         ReadmeLink.FetchAsync(_http, url, ct);
 
     public async Task<RepoTree?> GetRepoTreeAsync(string owner, string repo, CancellationToken ct = default)

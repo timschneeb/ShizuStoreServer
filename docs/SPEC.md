@@ -183,7 +183,10 @@ bundle` is rebuilt per deploy, never committed.
     analysis only, never F-Droid index metadata; recorded for every
     analyzed build whatever its source),
     `full_description` (GitHub/GitLab README markdown, or scraped plain-text Play
-    description, sent only on the detail endpoint), `changelog` (latest release
+    description, sent only on the detail endpoint), `readme_url` (direct raw
+    markdown URL of the stored README so clients can pull the live copy; null
+    for Play text or when the forge exposes no raw route; sent only on the
+    detail endpoint), `changelog` (latest release
     notes: GitHub release `body` or GitLab release `description` markdown, else
     the F-Droid/Izzy index application `<desc>` long description; empty after a
     checked pass with none; sent only on the detail endpoint), `changelog_url`
@@ -510,8 +513,11 @@ Conditional source requests replay the stored `enrich_etag` via
 parses with `EntityTagHeaderValue.TryParse`: GitHub weak validators
 (`W/"..."`) are replayed and malformed tags are skipped instead of
 throwing (one bad tag previously failed that app's pass forever). A 304
-reuses the prior result; forge 304s still refresh `stars`, the GitLab
-README while missing, and a list-linked README on every pass). Rows with
+reuses the prior result; forge 304s and checksum-skip paths still refresh
+`stars` and the README on every pass: the repo default (or the list-linked
+file) is refetched and its raw URL restamped even when the stored markdown
+already came from the same route, so neither the snapshot nor the client's
+live link goes stale). Rows with
 a fully analyzed build on
 record (SHA-256 identity) but blank permissions re-analyze once: the
 F-Droid path never persisted them before, and the same-asset and 304
@@ -597,7 +603,8 @@ F-Droid/Izzy build can take the primary slot.
   /projects/{urlencoded-path}`) refreshes `stars` from `star_count` on
   every pass, even when the release list fails; the README comes from
   the project's `readme_url` through `/repository/files/…/raw`
-  (markdown source, like GitHub). Every `.apk` link becomes a
+  (markdown source, like GitHub), and the raw URL built from the same
+  path/branch is recorded for clients. Every `.apk` link becomes a
   candidate (primary plus per-architecture siblings, analyzed through
   the shared release pipeline). No `.apk` link → F-Droid fallback,
   else `Failed`.
@@ -1177,7 +1184,10 @@ claimed by the matching candidate instead of spawning a twin.
 `is_primary` marks the default candidate for fresh installs / clients
 with no fingerprint match. Selection: non-F-Droid sources first
 (GitHub/GitLab/Izzy/Codeberg/Other all count as forge-like), then a
-row carrying the `release_tag` of the release just scanned, then
+row carrying the `release_tag` of the release just scanned, then the
+artifact filename class (a `release`-named APK beats a debug/test/beta/
+terminal build; tokens are matched whole, so `latest` is not a test
+build), then
 higher `version_code`, then ABI (`null` universal first, then
 `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then others), then a
 non-null `sig_sha256` (an analyzed identity beats an index-only
@@ -1191,7 +1201,9 @@ never observes two primaries at once, and a row set that lost the flag
 is rebuilt from the stored rows on the next pass without downloading
 anything. This keeps a release that ships only
 per-architecture APKs (BiliDownOut-style) from defaulting to whichever
-asset happens to be largest.
+asset happens to be largest, and keeps a same-version debug sibling
+with a different signing key (its own row) from becoming the
+fresh-install default.
 
 Client contract: hash the installed app's signing cert and filter
 `downloads[]` to candidates whose `sigSha256`/`sigMd5` match
@@ -1422,7 +1434,9 @@ requested permissions, aapt2-sourced only), `fullDescription` (GitHub/GitLab
 README markdown, or plain-text Play description, capped at 200k chars; when
 the list entry's `app.Url` is itself a markdown README, e.g. a localized
 `README_EN.md` on a non-English landing page, that linked file wins over the
-repo default) and
+repo default), `readmeUrl` (direct raw markdown URL of the snapshot, so
+clients can fetch the live README themselves; null when the description is
+Play text or no raw route exists) and
 `changelog` (latest release notes: GitHub release `body` or GitLab release
 `description` markdown, else the F-Droid/Izzy index `<desc>`, capped at 100k
 chars), `changelogUrl` (browser release page the notes came from, null for
@@ -1436,7 +1450,7 @@ rather than persisting them.
 | Endpoint | Behavior |
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `readme_url`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |

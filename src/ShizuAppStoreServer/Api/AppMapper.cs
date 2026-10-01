@@ -110,6 +110,7 @@ public static class AppMapper
             a.AuthorUrl,
             a.Permissions,
             a.FullDescription,
+            a.ReadmeUrl,
             a.Changelog,
             a.ChangelogUrl,
             a.Screenshots,

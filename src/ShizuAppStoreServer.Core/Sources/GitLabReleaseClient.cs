@@ -30,20 +30,21 @@ public interface IGitLabReleaseClient : IAppSource
 
     /// <summary>
     /// Raw README markdown: the project's <c>readme_url</c> resolves to a
-    /// repository file fetched through <c>/repository/files/…/raw</c>. Null
-    /// on any failure (including no README). Default impl keeps test
-    /// doubles simple.
+    /// repository file fetched through <c>/repository/files/…/raw</c>, plus
+    /// the GitLab raw web route clients can refetch live. Null on any failure
+    /// (including no README). Default impl keeps test doubles simple.
     /// </summary>
-    Task<string?> GetReadmeMarkdownAsync(string projectPath, CancellationToken ct = default) =>
-        Task.FromResult<string?>(null);
+    Task<ReadmeDocument?> GetReadmeMarkdownAsync(string projectPath, CancellationToken ct = default) =>
+        Task.FromResult<ReadmeDocument?>(null);
 
     /// <summary>
     /// Markdown of a README the list entry links directly (localized
-    /// <c>README_EN.md</c> on projects whose landing README is non-English).
-    /// Null on any failure. Default impl keeps test doubles simple.
+    /// <c>README_EN.md</c> on projects whose landing README is non-English),
+    /// plus its raw URL. Null on any failure. Default impl keeps test doubles
+    /// simple.
     /// </summary>
-    Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
-        Task.FromResult<string?>(null);
+    Task<ReadmeDocument?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+        Task.FromResult<ReadmeDocument?>(null);
 
     /// <summary>
     /// Recursive blob listing via <c>GET /projects/{id}/repository/tree</c>
@@ -214,7 +215,7 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
         }
     }
 
-    public async Task<string?> GetReadmeMarkdownAsync(string projectPath, CancellationToken ct = default)
+    public async Task<ReadmeDocument?> GetReadmeMarkdownAsync(string projectPath, CancellationToken ct = default)
     {
         try
         {
@@ -262,7 +263,9 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
                 return null;
             }
 
-            return await raw.Content.ReadAsStringAsync(ct);
+            var rawPath = string.Join('/', filePath.Split('/').Select(Uri.EscapeDataString));
+            var rawUrl = $"https://gitlab.com/{projectPath}/-/raw/{Uri.EscapeDataString(branch)}/{rawPath}";
+            return new ReadmeDocument(await raw.Content.ReadAsStringAsync(ct), rawUrl);
         }
         catch (Exception ex) when (ex is HttpRequestException
             or TaskCanceledException
@@ -278,7 +281,7 @@ public sealed class GitLabReleaseClient : IGitLabReleaseClient
         }
     }
 
-    public Task<string?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
+    public Task<ReadmeDocument?> GetLinkedMarkdownAsync(string url, CancellationToken ct = default) =>
         ReadmeLink.FetchAsync(_http, url, ct);
 
     public async Task<RepoTree?> GetRepoTreeAsync(string projectPath, CancellationToken ct = default)

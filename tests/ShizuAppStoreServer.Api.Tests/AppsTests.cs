@@ -275,6 +275,7 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
                 authorUrl: "https://github.com/papergray",
                 permissions: ["android.permission.INTERNET"],
                 fullDescription: "# Readme",
+                readmeUrl: "https://raw.githubusercontent.com/example/authored/HEAD/README.md",
                 changelog: "## 1.0",
                 changelogUrl: "https://github.com/example/authored/releases/tag/v1.0",
                 screenshots: ["https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png"]));
@@ -290,6 +291,7 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Equal("https://github.com/papergray", detail.AuthorUrl);
         Assert.Equal(["android.permission.INTERNET"], detail.Permissions);
         Assert.Equal("# Readme", detail.FullDescription);
+        Assert.Equal("https://raw.githubusercontent.com/example/authored/HEAD/README.md", detail.ReadmeUrl);
         Assert.Equal("## 1.0", detail.Changelog);
         Assert.Equal("https://github.com/example/authored/releases/tag/v1.0", detail.ChangelogUrl);
         Assert.Equal(["https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png"], detail.Screenshots);

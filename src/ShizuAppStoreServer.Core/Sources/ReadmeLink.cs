@@ -64,10 +64,11 @@ public static class ReadmeLink
     }
 
     /// <summary>
-    /// Fetches the markdown behind a linked README. Null on any failure, the
-    /// same fail-soft contract as the forge clients' README fetches.
+    /// Fetches the markdown behind a linked README, together with the raw URL
+    /// clients can refetch. Null on any failure, the same fail-soft contract
+    /// as the forge clients' README fetches.
     /// </summary>
-    public static async Task<string?> FetchAsync(HttpClient http, string? url, CancellationToken ct = default)
+    public static async Task<ReadmeDocument?> FetchAsync(HttpClient http, string? url, CancellationToken ct = default)
     {
         var rawUrl = ToRawUrl(url);
         if (rawUrl is null)
@@ -83,7 +84,7 @@ public static class ReadmeLink
                 return null;
             }
 
-            return await response.Content.ReadAsStringAsync(ct);
+            return new ReadmeDocument(await response.Content.ReadAsStringAsync(ct), rawUrl);
         }
         catch (Exception ex) when (ex is HttpRequestException
             or TaskCanceledException
