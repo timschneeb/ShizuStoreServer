@@ -75,6 +75,7 @@ output-cached for 60 seconds, varying by Android vs other User-Agent so the
 |---|---|---|
 | `ConnectionStrings:Shizu` | `Host=localhost;Database=shizuappstore;Username=shizu` (password only in `appsettings.Production.json` on the host) | `Host=127.0.0.1;Port=55432;...` |
 | `Icons:StorePath` | `/opt/shizuappstore/icons` | `/home/tim/.local/share/shizu-dev/icons` |
+| `Enrichment:FdroidRepoBase` / `IzzyRepoBase` / `IzzyRepoBaseFallback` | same mirror bases as the API's config; stored mirror download URLs are rewritten to canonical upstream in every link | unset, canonical upstream |
 | `AssetLinks:PackageName` | `me.timschneeberger.shizustore` | same |
 | `AssetLinks:Fingerprints` | release signing cert SHA-256 (list) | release fingerprint |
 | `Metrics:Token` | token from `appsettings.Production.json` (or `SHIZU_METRICS_TOKEN`); no token leaves `/metrics` unmapped | unset, `/metrics` unmapped |
@@ -112,8 +113,9 @@ sudo systemctl enable --now shizustore-web.service
 ```
 
 `appsettings.Production.json` carries the database password, the metrics
-token and the Sentry DSN, and is never
-overwritten by the deploy script. Recurring deploys from the repo root:
+token, the Sentry DSN and the repo mirror bases (they must match the API's
+`Enrichment` values, or download links keep pointing at a mirror), and is
+never overwritten by the deploy script. Recurring deploys from the repo root:
 
 ```bash
 ./deploy/deploy-web.sh <ssh-host>

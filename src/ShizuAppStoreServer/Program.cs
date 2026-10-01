@@ -179,22 +179,10 @@ if (metricsEnabled)
 var enrichment = builder.Configuration.GetSection("Enrichment").Get<EnrichmentOptions>() ?? new();
 enrichment.GitHubToken ??= Environment.GetEnvironmentVariable("SHIZU_GITHUB_TOKEN");
 enrichment.GitLabToken ??= Environment.GetEnvironmentVariable("SHIZU_GITLAB_TOKEN");
-if (!string.IsNullOrWhiteSpace(enrichment.FdroidRepoBase))
-{
-    // f-droid.org throttles datacenter IPs to a few hundred KB/s, which
-    // starves the 60MB index; production points this at a mirror instead.
-    FdroidRepos.FDroidBase = enrichment.FdroidRepoBase.TrimEnd('/') + "/";
-}
-
-if (!string.IsNullOrWhiteSpace(enrichment.IzzyRepoBase))
-{
-    FdroidRepos.IzzyBase = enrichment.IzzyRepoBase.TrimEnd('/') + "/";
-}
-
-if (!string.IsNullOrWhiteSpace(enrichment.IzzyRepoBaseFallback))
-{
-    FdroidRepos.IzzyBaseFallback = enrichment.IzzyRepoBaseFallback.TrimEnd('/') + "/";
-}
+// Repo mirrors are a server-side fetch optimization: f-droid.org throttles
+// datacenter IPs, which starves the 60MB index, and the Izzy host refuses
+// them outright. Published apkUrls stay canonical (see FdroidRepos).
+FdroidRepos.Configure(enrichment.FdroidRepoBase, enrichment.IzzyRepoBase, enrichment.IzzyRepoBaseFallback);
 
 builder.Services.AddSingleton(enrichment);
 ConfigureEnrichmentClients(builder.Services, enrichment);

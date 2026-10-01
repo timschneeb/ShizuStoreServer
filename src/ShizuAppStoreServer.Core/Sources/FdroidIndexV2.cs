@@ -115,7 +115,8 @@ public static class FdroidIndexV2Parser
                 manifest?.NativeCode?.FirstOrDefault(),
                 description,
                 certificates.Count > 0 ? CertFingerprint.Join(certificates) : null,
-                permissions is { Count: > 0 } ? permissions : null));
+                permissions is { Count: > 0 } ? permissions : null,
+                Added: AddedDate(version?.Added)));
         }
 
         return releases
@@ -176,6 +177,16 @@ public static class FdroidIndexV2Parser
     private static string? NullIfBlank(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value;
 
+    /// <summary>
+    /// Index <c>added</c> is Unix milliseconds; negative values and values
+    /// beyond <see cref="DateTimeOffset.MaxValue"/> read as absent so a
+    /// malformed index cannot fail the parse.
+    /// </summary>
+    private static DateTimeOffset? AddedDate(long? unixMs) =>
+        unixMs is >= 0 and <= 253402300799999
+            ? DateTimeOffset.FromUnixTimeMilliseconds(unixMs.Value)
+            : null;
+
     private sealed class RepoDto { [JsonPropertyName("packages")] public Dictionary<string, PackageDto?>? Packages { get; set; } }
     private sealed class PackageDto
     {
@@ -192,6 +203,8 @@ public static class FdroidIndexV2Parser
     private sealed class LocalizedFileDto { [JsonPropertyName("name")] public string? Name { get; set; } }
     private sealed class VersionDto
     {
+        /// <summary>Publish time in Unix milliseconds.</summary>
+        [JsonPropertyName("added")] public long? Added { get; set; }
         [JsonPropertyName("file")] public FileDto? File { get; set; }
         [JsonPropertyName("manifest")] public ManifestDto? Manifest { get; set; }
     }

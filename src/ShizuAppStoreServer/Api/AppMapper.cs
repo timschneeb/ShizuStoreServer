@@ -1,4 +1,5 @@
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Api;
 
@@ -179,7 +180,7 @@ public static class AppMapper
     private static DownloadDto ToDownload(AppDownload d) => new(
         ApiEnums.ToApiString(d.Source),
         d.PackageName,
-        d.ApkUrl,
+        FdroidRepos.ClientDownloadUrl(d.ApkUrl),
         d.ArchiveEntry,
         d.VersionCode,
         d.VersionName,

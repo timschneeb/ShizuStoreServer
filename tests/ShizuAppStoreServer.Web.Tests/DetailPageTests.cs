@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Web.Mapping;
 
@@ -199,6 +201,35 @@ public sealed class DetailPageTests(WebAppFactory factory) : IClassFixture<WebAp
         Assert.DoesNotContain("id=\"app-nudge\"", desktop);
         Assert.Contains("id=\"app-nudge\"", android);
         Assert.Contains(WebAppFactory.ApkUrl, android);
+    }
+
+    [Fact]
+    public async Task Detail_RewritesMirrorDownloadUrlsToCanonicalUpstream()
+    {
+        // The storefront must apply the same repo base overrides as the API,
+        // or download links keep pointing at the .apk-refusing mirror.
+        const string mirror = "https://mirror.example/fdroid/repo/";
+        using var custom = factory.WithWebHostBuilder(builder =>
+            builder.UseSetting("Enrichment:FdroidRepoBase", mirror));
+
+        using (var scope = custom.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ShizuDbContext>();
+            await db.Database.EnsureDeletedAsync();
+            await db.Database.EnsureCreatedAsync();
+            db.Add(Seeds.Category(1, "tools", "Tools"));
+            db.Add(Seeds.App(1, "foo", "Foo", 1));
+            db.Add(Seeds.Download(1, $"{mirror}com.example.foo_10.apk"));
+            // A second row so the Sources section renders too, not just the
+            // primary "Download APK" button.
+            db.Add(Seeds.Download(1, $"{mirror}com.example.foo_10_arm64.apk", primary: false));
+            await db.SaveChangesAsync();
+        }
+
+        var html = await GetBodyAsync(custom.CreateClient(), "/apps/foo");
+
+        Assert.Contains("href=\"https://f-droid.org/repo/com.example.foo_10.apk\"", html);
+        Assert.DoesNotContain(mirror, html);
     }
 
     [Fact]

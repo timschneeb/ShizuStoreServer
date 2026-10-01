@@ -1940,6 +1940,7 @@ public sealed class AppEnricherTests : IDisposable
               },
               "versions": {
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                  "added": 1720872254000,
                   "file": {
                     "name": "/com.example.app_20.apk",
                     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -2427,9 +2428,9 @@ public sealed class AppEnricherTests : IDisposable
         // No APK was analyzed, so no signing-cert MD5 is recorded.
         Assert.Null(primary.SigMd5);
         Assert.Null(app.LastError);
-        // F-Droid publishes no release dates, so the app stays unknown and sorts
-        // last under "recently updated".
-        Assert.Null(app.VersionUpdatedAt);
+        // The index version's `added` timestamp is the only release date
+        // these repos publish; it feeds "recently updated" like a forge one.
+        Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(1720872254000), app.VersionUpdatedAt);
         // metadata.description is the only changelog text the index has.
         Assert.Equal("A <b>plain</b> summary of the app.", app.Changelog);
         // Icon is the mirrored repo PNG, normalized to 192px.
@@ -3002,6 +3003,30 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.UpToDate, (await second.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(0, downloads.Calls);
         Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
+    public async Task FdroidIndexDateHealsOnUnchangedIndex()
+    {
+        // Rows enriched before the index date was parsed carry no
+        // VersionUpdatedAt; the unchanged-index fast path must backfill it and
+        // move updated_at (the changes feed keys on that) without re-fetching
+        // the APK.
+        var (first, _, _) = FdroidHappyPath();
+        var app = NewApp("fddate", "FdDate", "https://f-droid.org/packages/com.example.app/");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        app.VersionUpdatedAt = null;
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        var (second, _, downloads) = FdroidHappyPath();
+        var now = T0 + TimeSpan.FromDays(1);
+        var result = await second.EnrichAsync(app, now);
+
+        Assert.Equal(EnrichOutcome.UpToDate, result.Outcome);
+        Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(1720872254000), app.VersionUpdatedAt);
+        Assert.Equal(now, app.UpdatedAt);
+        Assert.Equal(0, downloads.Calls);
     }
 
     /// <summary>F-Droid wiring with a downloadable APK: index fetch + full analysis.</summary>

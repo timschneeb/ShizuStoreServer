@@ -3164,6 +3164,27 @@ public sealed class AppEnricher(
         }
     }
 
+    /// <summary>
+    /// Stamps the served build's publish time from the repo index. Forge
+    /// releases carry the date themselves, but F-Droid-compatible repos
+    /// publish it only as the version entry's <c>added</c>; without this
+    /// those apps never sort under "recently updated". Newer wins, so a
+    /// forge date already ahead of the index build is kept.
+    /// </summary>
+    private static void StampFdroidDate(App app, FdroidPackageInfo package, DateTimeOffset now)
+    {
+        if (package.Added is not { } added
+            || (app.VersionUpdatedAt is not null && app.VersionUpdatedAt >= added))
+        {
+            return;
+        }
+
+        app.VersionUpdatedAt = added;
+        // The changes feed keys "updated" on updated_at, so a backfilled date
+        // must move it or incremental clients never refetch the detail.
+        app.UpdatedAt = now;
+    }
+
     private async Task<EnrichResult> EnrichFromFdroidAsync(
         App app, string repoBase, string packageId, DateTimeOffset now, CancellationToken ct)
     {
@@ -3250,6 +3271,9 @@ public sealed class AppEnricher(
             && !NeedsAnalysisHeal(current)
             && siblingsRecorded)
         {
+            // Heals the release date on rows enriched before the index date
+            // was parsed; everything else about the row is already current.
+            StampFdroidDate(app, package, now);
             app.EnrichEtag = indexEtag;
             app.LastCheckedAt = now;
             return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "index unchanged" };
@@ -3334,8 +3358,7 @@ public sealed class AppEnricher(
 
         await AddVersionRowAsync(app, versionCode, versionName, apkUrl, false, now, ct);
 
-        // F-Droid publishes no release dates, so VersionUpdatedAt stays unknown
-        // and the app sorts last under "recently updated".
+        StampFdroidDate(app, package, now);
 
         await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
         await ResolveForgeCandidateFromSourceAsync(app, package.SourceUrl, now, ct);

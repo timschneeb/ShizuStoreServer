@@ -58,6 +58,7 @@ public sealed class FdroidTests
               },
               "versions": {
                 "AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111": {
+                  "added": 1720872254000,
                   "file": {
                     "name": "/com.example.app_20.apk",
                     "sha256": "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
@@ -151,10 +152,12 @@ public sealed class FdroidTests
         var packages = data.Packages["com.example.app"];
         Assert.Equal(2, packages.Count);
         Assert.Equal(10, packages[1].VersionCode);
+        Assert.Null(packages[1].Added);
         var app = packages[0];
         Assert.Equal("com.example.app", app.PackageName);
         Assert.Equal(20, app.VersionCode);
         Assert.Equal("2.0", app.VersionName);
+        Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(1720872254000), app.Added);
         Assert.Equal("com.example.app_20.apk", app.ApkName);
         Assert.Equal("aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111", app.Sha256);
         Assert.Equal(1234567, app.Size);
@@ -233,6 +236,34 @@ public sealed class FdroidTests
     }
 
     [Fact]
+    public void RewritesMirrorDownloadUrlsToCanonicalUpstream()
+    {
+        // Mirrors exist for server-side fetches only; some refuse .apk
+        // requests from non-F-Droid agents, so clients and browsers get the
+        // canonical upstream URL for every configured base.
+        const string fauMirror = "https://ftp.fau.de/fdroid/repo/";
+        const string izzyMirror = "https://mirror.example/izzy/";
+        Assert.Equal(
+            "https://f-droid.org/repo/com.example.app_20.apk",
+            FdroidRepos.ClientDownloadUrl(fauMirror + "com.example.app_20.apk", fauMirror, null, null));
+        Assert.Equal(
+            "https://apt.izzysoft.de/fdroid/repo/com.example.app_20.apk",
+            FdroidRepos.ClientDownloadUrl(
+                izzyMirror + "com.example.app_20.apk", FdroidRepos.DefaultFDroidBase, izzyMirror, null));
+        Assert.Equal(
+            "https://apt.izzysoft.de/fdroid/repo/com.example.app_20.apk",
+            FdroidRepos.ClientDownloadUrl(
+                "https://fallback.example/repo/com.example.app_20.apk", null, null, "https://fallback.example/repo/"));
+        Assert.Equal(
+            "https://github.com/Example/App/releases/download/v2/app.apk",
+            FdroidRepos.ClientDownloadUrl(
+                "https://github.com/Example/App/releases/download/v2/app.apk", fauMirror, null, null));
+        Assert.Equal(
+            "https://f-droid.org/repo/com.example.app_20.apk",
+            FdroidRepos.ClientDownloadUrl("https://f-droid.org/repo/com.example.app_20.apk"));
+    }
+
+    [Fact]
     public async Task RevalidatesWithCachedEtag()
     {
         // Once-per-run semantics (request-volume fix): the first call of a run
@@ -303,6 +334,24 @@ public sealed class FdroidTests
         var provider = new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(stub)));
 
         Assert.Null(await provider.GetPackageAsync(FdroidRepos.FDroidBase, "com.example.app", "\"old\""));
+    }
+
+    [Fact]
+    public async Task RefetchesIndexWhen304HasNoCache()
+    {
+        // A stored seed ETag can only be revalidated against a cached body;
+        // without one the 304 carries no package data, so the provider falls
+        // back to one unconditional read instead of reporting the package absent.
+        var stub = new StubHandler(request =>
+            request.Headers.IfNoneMatch.ToString().Length > 0
+                ? new HttpResponseMessage(HttpStatusCode.NotModified)
+                : IndexV2Response());
+        var provider = new FdroidIndexProvider(new FdroidRepoClient(new HttpClient(stub)));
+
+        var result = (await provider.GetPackageAsync(FdroidRepos.FDroidBase, "com.example.app", "\"old\"")).Value;
+
+        Assert.Equal(20, result.Package!.VersionCode);
+        Assert.Equal(2, stub.Calls);
     }
 
     [Fact]

@@ -3,12 +3,20 @@ using Microsoft.Extensions.Options;
 using OpenTelemetry.Metrics;
 using Sentry;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Sources;
 using ShizuAppStoreServer.Web.Configuration;
 using ShizuAppStoreServer.Web.Rendering;
 using ShizuAppStoreServer.Web.Services;
 using ShizuAppStoreServer.Web.Tracking;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Download links are rewritten back to canonical upstream, so the storefront
+// needs the same repo base overrides the API enriches with; mirrors are for
+// server-side fetches only (see FdroidRepos.ClientDownloadUrl).
+var enrichment = builder.Configuration.GetSection("Enrichment").Get<EnrichmentOptions>() ?? new();
+FdroidRepos.Configure(enrichment.FdroidRepoBase, enrichment.IzzyRepoBase, enrichment.IzzyRepoBaseFallback);
 
 // Sentry: errors, request traces and structured logs. The storefront shares
 // the API's project, split by the service tag. The DSN is server-side only

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Web.Mapping;
 
@@ -30,6 +31,10 @@ public sealed class AppDetailView(App app)
     public App App { get; } = app;
 
     public AppDownload? Primary { get; } = app.Downloads.FirstOrDefault(d => d.IsPrimary);
+
+    /// <summary>Primary download link, rewritten to canonical upstream (see FdroidRepos).</summary>
+    public string? PrimaryDownloadUrl =>
+        Primary?.ApkUrl is { Length: > 0 } url ? FdroidRepos.ClientDownloadUrl(url) : null;
 
     public IReadOnlyList<AppDownload> Downloads { get; } = app.Downloads
         .OrderByDescending(d => d.IsPrimary)
@@ -287,7 +292,7 @@ public sealed class AppDetailView(App app)
                 Origin: OriginLabel(d),
                 Package: d.PackageName ?? PackageName ?? "-",
                 IsPrimary: d.IsPrimary,
-                DownloadUrl: d.ApkUrl,
+                DownloadUrl: FdroidRepos.ClientDownloadUrl(d.ApkUrl),
                 ArchiveEntry: d.ArchiveEntry,
                 AbiLabel: AbiLabel(d)))
             .ToList();

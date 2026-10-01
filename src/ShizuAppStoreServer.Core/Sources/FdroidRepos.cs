@@ -37,6 +37,30 @@ public static class FdroidRepos
         kind == SourceKind.Izzy ? IzzyBase : FDroidBase;
 
     /// <summary>
+    /// Applies configured repo base overrides. Every host that publishes
+    /// downloads (API and storefront) must call this with the same values,
+    /// otherwise <see cref="ClientDownloadUrl(string)"/> cannot map stored
+    /// mirror URLs back to canonical upstream.
+    /// </summary>
+    public static void Configure(string? fdroidBase, string? izzyBase, string? izzyFallback)
+    {
+        if (!string.IsNullOrWhiteSpace(fdroidBase))
+        {
+            FDroidBase = fdroidBase.TrimEnd('/') + "/";
+        }
+
+        if (!string.IsNullOrWhiteSpace(izzyBase))
+        {
+            IzzyBase = izzyBase.TrimEnd('/') + "/";
+        }
+
+        if (!string.IsNullOrWhiteSpace(izzyFallback))
+        {
+            IzzyBaseFallback = izzyFallback.TrimEnd('/') + "/";
+        }
+    }
+
+    /// <summary>
     /// Icon URL from the repo-root-relative <c>metadata.icon.name</c>, e.g.
     /// <c>/pkg/en-US/icon.png</c>. Unlike the legacy <c>index.xml</c> layout
     /// there is no shared icon directory to fall back to.
@@ -45,6 +69,38 @@ public static class FdroidRepos
     [
         $"{repoBase.TrimEnd('/')}/{iconFile.TrimStart('/')}",
     ];
+
+    /// <summary>Canonical upstream URL for a download stored against the configured repo bases.</summary>
+    public static string ClientDownloadUrl(string apkUrl) =>
+        ClientDownloadUrl(apkUrl, FDroidBase, IzzyBase, IzzyBaseFallback);
+
+    /// <summary>
+    /// Rewrites an <c>apkUrl</c> on a configured repo base back to the
+    /// canonical upstream host. Mirrors exist for server-side fetches only
+    /// (f-droid.org throttles datacenter IPs) and some refuse .apk requests
+    /// that do not look like the F-Droid client, so client-facing output and
+    /// browsers always use upstream. Bases are parameters so tests can pin
+    /// them without touching process-wide configuration.
+    /// </summary>
+    public static string ClientDownloadUrl(
+        string apkUrl, string? fdroidBase, string? izzyBase, string? izzyFallback) =>
+        RewriteBase(apkUrl, fdroidBase, DefaultFDroidBase)
+        ?? RewriteBase(apkUrl, izzyBase, DefaultIzzyBase)
+        ?? RewriteBase(apkUrl, izzyFallback, DefaultIzzyBase)
+        ?? apkUrl;
+
+    private static string? RewriteBase(string apkUrl, string? mirrorBase, string upstreamBase)
+    {
+        if (string.IsNullOrEmpty(mirrorBase))
+        {
+            return null;
+        }
+
+        var prefix = mirrorBase.TrimEnd('/') + "/";
+        return apkUrl.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? upstreamBase.TrimEnd('/') + "/" + apkUrl[prefix.Length..]
+            : null;
+    }
 }
 
 /// <summary>One release of an app in a repo <c>index-v2.json</c>.</summary>
@@ -70,4 +126,10 @@ public sealed record FdroidPackageInfo(
     /// </summary>
     string? SigSha256 = null,
     /// <summary>Declared permission names from <c>manifest.usesPermission</c>.</summary>
-    IReadOnlyList<string>? Permissions = null);
+    IReadOnlyList<string>? Permissions = null,
+    /// <summary>
+    /// Publish time from the version entry's <c>added</c> field (Unix ms).
+    /// The only release date these repos publish; null when absent or out of
+    /// range.
+    /// </summary>
+    DateTimeOffset? Added = null);

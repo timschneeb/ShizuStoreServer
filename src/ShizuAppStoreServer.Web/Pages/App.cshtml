@@ -22,7 +22,7 @@
 else
 {
     var storeUrl = view.App.StoreUrl;
-    var apkUrl = view.Primary?.ApkUrl;
+    var apkUrl = view.PrimaryDownloadUrl;
     var versionLine = string.Join(
         " · ",
         new[] { view.VersionName, view.SourceLabel }.Where(part => !string.IsNullOrWhiteSpace(part)));

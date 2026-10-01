@@ -1387,13 +1387,22 @@ versions only), so F-Droid-primary apps have none. `sort=stars`/
 `sort=downloads` order by them (nulls last on descending).
 
 `versionUpdatedAt` (summary + detail) is the release date of the
-currently served APK version: GitHub `published_at` or GitLab
-`released_at`; F-Droid-primary apps and sources that publish no date
-stay null (they sort last). It only advances when a newer primary version
-is served, so metadata-only refreshes (icon, stars, desc) never move
-it. The server's `sort=updated` still orders by `updated_at`; clients
-use `versionUpdatedAt` for their "Recently updated" list so metadata
+currently served APK version: GitHub `published_at`, GitLab
+`released_at`, or the F-Droid-compatible index version's `added`
+timestamp for F-Droid/Izzy primaries. Sources that publish no date stay
+null (they sort last). It only advances when a newer primary version is
+served, so metadata-only refreshes (icon, stars, desc) never move it;
+backfilling the date on a row enriched before this field was parsed
+bumps `updated_at` once so incremental clients refetch the detail. The
+server's `sort=updated` still orders by `updated_at`; clients use
+`versionUpdatedAt` for their "Recently updated" list so metadata
 churn does not surface as a new version.
+
+Every published `apkUrl` (API and storefront) is the canonical upstream
+URL (`f-droid.org`, `apt.izzysoft.de`), never a configured server-side
+mirror: mirrors only feed the server's enrichment fetches, because
+f-droid.org throttles datacenter IPs and some mirrors refuse `.apk`
+requests that do not look like the F-Droid client.
 
 `listUpdatedAt` (summary + detail) is the last add or edit of the
 awesome-list entry from git history, with `[silent]` commits excluded.
@@ -1479,9 +1488,9 @@ all environments; Scalar UI is development-only.
 | `Enrichment:Aapt2Path` / `ApksignerPath` | `aapt2` / `apksigner` | Binaries, verified at startup |
 | `Enrichment:GradlePath` | `gradle` | Gradle binary for icon renders, verified at startup |
 | `Enrichment:IconToolDir` | `tools/icon-render` | Paparazzi tool checkout |
-| `Enrichment:FdroidRepoBase` | `null` (upstream f-droid.org) | F-Droid repo base override; set a mirror such as `https://ftp.fau.de/fdroid/repo/` on hosts that f-droid.org throttles |
-| `Enrichment:IzzyRepoBase` | `null` (upstream apt.izzysoft.de) | IzzyOnDroid base override; the official host refuses datacenter IPs, production uses `https://izzy.katastima.org/fdroid/repo/` |
-| `Enrichment:IzzyRepoBaseFallback` | `null` | Second Izzy mirror tried once when the primary base fails; production uses `https://izzy.zw.is/fdroid/repo/` |
+| `Enrichment:FdroidRepoBase` | `null` (upstream f-droid.org) | F-Droid repo base override; set a mirror such as `https://ftp.fau.de/fdroid/repo/` on hosts that f-droid.org throttles. Server-side only: published `apkUrl`s are canonical upstream |
+| `Enrichment:IzzyRepoBase` | `null` (upstream apt.izzysoft.de) | IzzyOnDroid base override; the official host refuses datacenter IPs, production uses `https://izzy.katastima.org/fdroid/repo/`. Server-side only: published `apkUrl`s are canonical upstream |
+| `Enrichment:IzzyRepoBaseFallback` | `null` | Second Izzy mirror tried once when the primary base fails; production uses `https://izzy.zw.is/fdroid/repo/`. Server-side only: published `apkUrl`s are canonical upstream |
 | `Enrichment:PaparazziTimeout` | `15min` | Per-icon render timeout |
 | `Enrichment:BatchIconsOnFullPass` | `false` | Full rechecks resolve rasters only and batch-render XML icons after enrichment; fast passes render per icon |
 | `Enrichment:IconBatchChunkSize` | `50` | Most icons one batch Gradle invocation renders; chunks run with `--no-daemon` and a failed chunk only fails its own apps |

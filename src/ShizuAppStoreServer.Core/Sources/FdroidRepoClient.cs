@@ -238,6 +238,14 @@ public sealed class FdroidIndexProvider(FdroidRepoClient client)
             // every app in the pass.
             _validatedIndex[repoBase] = 0;
             var fetched = await client.GetIndexV2Async(repoBase, cached?.Etag ?? seedEtag, ct);
+            if (fetched is null && cached is null && seedEtag is not null)
+            {
+                // A 304 to a stored seed ETag is only meaningful against a
+                // cached body; without one this process has no index data at
+                // all (and no backfill can run), so read it once unconditionally.
+                fetched = await client.GetIndexV2Async(repoBase, null, ct);
+            }
+
             if (fetched is not null)
             {
                 var data = FdroidIndexV2Parser.Parse(fetched.Value.Json);
