@@ -19,6 +19,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<RemovedApp> RemovedApps => Set<RemovedApp>();
     public DbSet<PackageException> PackageExceptions => Set<PackageException>();
     public DbSet<AppDownloadExclusion> AppDownloadExclusions => Set<AppDownloadExclusion>();
+    public DbSet<AppUnlistOverride> AppUnlistOverrides => Set<AppUnlistOverride>();
     public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
     public DbSet<ClientUserAgent> ClientUserAgents => Set<ClientUserAgent>();
     public DbSet<ClientUserAgentDay> ClientUserAgentDays => Set<ClientUserAgentDay>();
@@ -456,6 +457,18 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.AppSlug).HasColumnName("app_slug").HasMaxLength(200).IsRequired();
             e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(256).IsRequired();
             e.HasIndex(x => new { x.AppSlug, x.PackageName }).IsUnique();
+            e.Property(x => x.Note).HasColumnName("note").HasMaxLength(500);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+        });
+
+        b.Entity<AppUnlistOverride>(e =>
+        {
+            e.ToTable("app_unlist_overrides");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.AppSlug).HasColumnName("app_slug").HasMaxLength(200).IsRequired();
+            e.HasIndex(x => x.AppSlug).IsUnique();
             e.Property(x => x.Note).HasColumnName("note").HasMaxLength(500);
             e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();

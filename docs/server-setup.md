@@ -687,6 +687,29 @@ curl -fsS -X POST https://shizustore.timschneeberger.me/v1/admin/sync \
   -d '{"reason":"full check without icon rendering","full":true,"icons":false}'
 ```
 
+Operator unlists hide an entry from the API and the storefront, keep its
+downloads and install history, and write a `removed[]` tombstone so synced
+clients drop it. Insert the override, then drain a full pass (the sync trigger
+above); the nightly 03:00 UTC pass also applies it:
+
+```bash
+sudo -u postgres psql -d shizuappstore -c "
+INSERT INTO app_unlist_overrides (app_slug, note, created_at, updated_at)
+VALUES ('shizuku-thedjchi-s-fork', 'Abandoned; unlisted by the operator', now(), now())
+ON CONFLICT (app_slug) DO UPDATE SET note = EXCLUDED.note, updated_at = now();"
+```
+
+Deleting the row and draining another full pass restores the entry (reason
+cleared, tombstone removed, re-enrichment forced):
+
+```bash
+sudo -u postgres psql -d shizuappstore -c \
+  "DELETE FROM app_unlist_overrides WHERE app_slug = 'shizuku-thedjchi-s-fork';"
+```
+
+While unlisted, `GET /v1/apps/{slug}` returns 404 and the next
+`/v1/changes?since=` carries the slug in `removed[]`.
+
 To force every client to drop its cached catalog and pull a fresh one
 (after a server-side repair left dead rows in local caches), stamp the
 purge flag. Clients wipe only their app list and downloads; favourites

@@ -17,6 +17,7 @@ The client has a setting to show these entries which is off by default.
 | New release on GitHub/GitLab/F-Droid/IzzyOnDroid | within 30 minutes (+ analysis time) |
 | New release on Play/Codeberg/other sites | within 24 hours |
 | List entry added/edited | within 30 minutes (+ analysis time) |
+| Entry hidden or restored by an operator | applied by the next full catalog pass (usually the nightly one) |
 | Metadata refresh (GitHub stars, etc.) | within 24 hours |
 | New screenshots added or removed | F-Droid/Izzy shots refresh within 24 hours; the app repo is re-scanned every week and dead URLs are cleared on the next scan |
 
@@ -24,6 +25,11 @@ A new entry is created hidden and becomes visible only after its first
 successful check, so an app never appears in the store without its icon,
 description or download link. A failed first check keeps it hidden and
 retries with the normal failure backoff.
+
+An operator can also hide an entry server-side (for example an abandoned
+project whose package conflicts with a maintained app). Hiding keeps the
+entry's install statistics and can be lifted again later; it is independent
+of the list.
 
 ## How the server finds releases
 

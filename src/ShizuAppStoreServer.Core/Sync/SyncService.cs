@@ -22,6 +22,7 @@ public sealed record SyncPassResult(
     int DrainedRequests,
     int ParseWarnings,
     int ArchivedChanged,
+    int UnlistedChanged,
     bool Skipped,
     string? Error)
 {
@@ -101,6 +102,9 @@ public sealed class SyncService(
     /// <summary>Exclusion reason for apps listed in <c>pages/ARCHIVED.md</c>.</summary>
     public const string ArchivedReason = "Archived in the upstream list.";
 
+    /// <summary>Exclusion reason for apps unlisted through <c>app_unlist_overrides</c>.</summary>
+    public const string UnlistedReason = "Unlisted by the operator.";
+
     private const string ReadmePath = "README.md";
     private const string ClosedSourcePath = "pages/CLOSED_SOURCE.md";
     private const string ArchivedPath = "pages/ARCHIVED.md";
@@ -130,7 +134,7 @@ public sealed class SyncService(
                     CancellationToken.None);
             }
 
-            return new SyncPassResult(trigger, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, error);
+            return new SyncPassResult(trigger, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, error);
         }
     }
 
@@ -195,7 +199,7 @@ public sealed class SyncService(
                 // against it, and /v1/meta and /v1/issues read it.
                 _jobs.Skipped(start with { Reference = head }, "nothing due");
                 return new SyncPassResult(
-                    effectiveTrigger, head, 0, 0, 0, 0, 0, 0, 0, 0, 0, true, null);
+                    effectiveTrigger, head, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, true, null);
             }
 
             await using var dueSession = _jobs.Begin(start with { ItemCount = dueIds.Count + freshIds.Count });
@@ -209,7 +213,7 @@ public sealed class SyncService(
                 await ApplyShizukuFilterAsync(ct);
                 return await FinishRunAsync(dueSession, effectiveTrigger, head,
                     0, 0, 0, enriched, upToDate, failed,
-                    [], [], false, 0, now, ct, failedMessages);
+                    [], [], false, 0, 0, now, ct, failedMessages);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -250,7 +254,8 @@ public sealed class SyncService(
             }
 
             var counts = await upserter.UpsertAsync([mainDoc, closedDoc], history, now, ct);
-            var (archivedChanged, archivedWarnings) = await ApplyArchivedAsync(ct);
+            var (archivedChanged, archivedWarnings, archivedUrls) = await ApplyArchivedAsync(ct);
+            var unlistedChanged = await ApplyUnlistedAsync(archivedUrls, ct);
             var parseWarnings = mainDoc.Warnings
                 .Concat(closedDoc.Warnings)
                 .Concat(archivedWarnings)
@@ -304,7 +309,7 @@ public sealed class SyncService(
             return await FinishRunAsync(session, effectiveTrigger, head,
                 counts.Added, counts.Updated, counts.Removed,
                 full.Enriched, full.UpToDate, full.Failed,
-                pendingIds, parseWarnings, true, archivedChanged, now, ct, full.FailedMessages);
+                pendingIds, parseWarnings, true, archivedChanged, unlistedChanged, now, ct, full.FailedMessages);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -324,7 +329,7 @@ public sealed class SyncService(
         await session.FinishAsync(
             new JobFinish(JobStatus.Failed, Summary: "pass failed", Error: error),
             CancellationToken.None);
-        return new SyncPassResult(trigger, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, error);
+        return new SyncPassResult(trigger, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, error);
     }
 
     private static JobTrigger ParseTrigger(string trigger) => trigger.ToLowerInvariant() switch
@@ -353,9 +358,12 @@ public sealed class SyncService(
     {
         var rows = await db.Apps.AsNoTracking()
             .Where(a => a.RootAppId == null)
-            .Select(a => new { a.Id, a.LastCheckedAt, a.LastError })
+            .Select(a => new { a.Id, a.LastCheckedAt, a.LastError, a.ExcludedReason })
             .ToListAsync(ct);
         return rows
+            // Operator unlists are hidden on purpose: the recheck window would
+            // otherwise re-enrich and re-publish them.
+            .Where(r => r.ExcludedReason != UnlistedReason)
             .Where(r => r.LastCheckedAt is null
                 || r.LastCheckedAt + (r.LastError is null
                     ? enrichment.SuccessRecheckInterval
@@ -457,14 +465,17 @@ public sealed class SyncService(
     /// <summary>
     /// <c>pages/ARCHIVED.md</c> is an exclusion list: entries found
     /// there are hidden from clients; entries that reappear upstream have the
-    /// flag cleared and are forced through re-enrichment.
+    /// flag cleared and are forced through re-enrichment. Operator unlists
+    /// (<see cref="UnlistedReason"/>) outrank it: those rows are left alone
+    /// here and the URL set is returned so <see cref="ApplyUnlistedAsync"/>
+    /// can hand a restored row back to the archived state.
     /// </summary>
-    private async Task<(int Changed, List<ParseWarning> Warnings)> ApplyArchivedAsync(CancellationToken ct)
+    private async Task<(int Changed, List<ParseWarning> Warnings, HashSet<string> Urls)> ApplyArchivedAsync(CancellationToken ct)
     {
         var path = Path.Combine(options.ListPath, ArchivedPath);
         if (!File.Exists(path))
         {
-            return (0, []);
+            return (0, [], new HashSet<string>(StringComparer.Ordinal));
         }
 
         var archived = new AwesomeListParser().Parse(await File.ReadAllTextAsync(path, ct), "archived", allowUncategorized: true);
@@ -487,7 +498,7 @@ public sealed class SyncService(
         {
             var isArchived = urls.Contains(app.Url)
                 || (app.SourceUrl is not null && urls.Contains(app.SourceUrl));
-            if (isArchived && app.ExcludedReason != ArchivedReason)
+            if (isArchived && app.ExcludedReason != ArchivedReason && app.ExcludedReason != UnlistedReason)
             {
                 app.Availability = Availability.Excluded;
                 app.ExcludedReason = ArchivedReason;
@@ -511,7 +522,117 @@ public sealed class SyncService(
             await db.SaveChangesAsync(ct);
         }
 
-        return (changed, archived.Warnings);
+        return (changed, archived.Warnings, urls);
+    }
+
+    /// <summary>
+    /// <c>app_unlist_overrides</c> is an operator exclusion list: entries found
+    /// there are hidden from clients while the upstream list still carries
+    /// them; deleting the row restores the entry. The state is the same shape
+    /// as the archived exclude (<see cref="Availability.Excluded"/> plus a
+    /// reason), so every read path drops the row, but the operator reason
+    /// keeps due selection from resurrecting it and outranks upstream reasons.
+    /// </summary>
+    private async Task<int> ApplyUnlistedAsync(ISet<string> archivedUrls, CancellationToken ct)
+    {
+        // The pass clock can be minutes stale by the time the row is stamped;
+        // the tombstone must carry the commit time or a client that synced
+        // mid-pass holds a cursor past removed_at and never sees the removal.
+        var commitNow = DateTimeOffset.UtcNow;
+        var slugs = (await db.AppUnlistOverrides.AsNoTracking()
+                .Select(o => o.AppSlug)
+                .ToListAsync(ct))
+            .ToHashSet(StringComparer.Ordinal);
+        var tombstones = await db.RemovedApps
+            .ToDictionaryAsync(t => t.Slug, StringComparer.Ordinal);
+        var apps = await db.Apps.ToListAsync(ct);
+
+        // Variants are listed and served as their own rows, so unlisting a root
+        // must hide its children too, or a companion build would stay available.
+        var rootIds = apps
+            .Where(a => slugs.Contains(a.Slug))
+            .Select(a => a.Id)
+            .ToHashSet();
+        var unlistedIds = apps
+            .Where(a => rootIds.Contains(a.Id)
+                || (a.RootAppId is { } rootAppId && rootIds.Contains(rootAppId)))
+            .Select(a => a.Id)
+            .ToHashSet();
+
+        var session = JobContext.Current;
+        var changed = 0;
+        var tombstonesChanged = false;
+        foreach (var app in apps.Where(a => unlistedIds.Contains(a.Id)))
+        {
+            if (app.Availability != Availability.Excluded || app.ExcludedReason != UnlistedReason)
+            {
+                app.Availability = Availability.Excluded;
+                app.ExcludedReason = UnlistedReason;
+                app.UpdatedAt = commitNow;
+                changed++;
+                session.Decision($"unlisted: excluded '{app.Slug}'",
+                    new { app.PackageName }, JobEventLevel.Info, appId: app.Id, slug: app.Slug);
+            }
+
+            // Same reasoning as the Shizuku gate: the delta feed drops excluded
+            // rows, so the tombstone is the only signal that tells a client
+            // which cached the app to delete it.
+            if (!tombstones.ContainsKey(app.Slug))
+            {
+                var tombstone = new RemovedApp
+                {
+                    Slug = app.Slug,
+                    Name = app.Name,
+                    Listing = app.Listing,
+                    RemovedAt = commitNow,
+                };
+                tombstones[app.Slug] = tombstone;
+                db.RemovedApps.Add(tombstone);
+                tombstonesChanged = true;
+            }
+        }
+
+        // Deleted override rows restore the entry. A row still in ARCHIVED.md
+        // hands the exclusion over to the archived reason instead of
+        // resurfacing for one pass.
+        foreach (var app in apps)
+        {
+            if (app.ExcludedReason != UnlistedReason || unlistedIds.Contains(app.Id))
+            {
+                continue;
+            }
+
+            if (archivedUrls.Contains(app.Url)
+                || (app.SourceUrl is not null && archivedUrls.Contains(app.SourceUrl)))
+            {
+                app.ExcludedReason = ArchivedReason;
+                changed++;
+                session.Decision($"unlisted: handed back to archived '{app.Slug}'",
+                    new { app.PackageName, app.Url }, appId: app.Id, slug: app.Slug);
+                continue;
+            }
+
+            app.ExcludedReason = null;
+            app.LastCheckedAt = null; // force re-enrichment (re-classifies availability)
+            app.LastError = null;
+            app.UpdatedAt = commitNow;
+            if (tombstones.Remove(app.Slug, out var cleared))
+            {
+                db.RemovedApps.Remove(cleared);
+                tombstonesChanged = true;
+            }
+
+            changed++;
+            session.Decision($"unlisted: restored '{app.Slug}'",
+                new { app.PackageName, app.Url }, appId: app.Id, slug: app.Slug);
+        }
+
+        if (changed > 0 || tombstonesChanged)
+        {
+            await db.SaveChangesAsync(ct);
+        }
+
+        return changed;
     }
 
     private static void CollectUrls(ParsedEntry entry, HashSet<string> urls)
@@ -891,7 +1012,7 @@ public sealed class SyncService(
         int added, int updated, int removed,
         int enriched, int upToDate, int failed,
         IReadOnlyList<long> drainedIds, IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse,
-        int archivedChanged, DateTimeOffset started, CancellationToken ct,
+        int archivedChanged, int unlistedChanged, DateTimeOffset started, CancellationToken ct,
         IReadOnlyList<string>? failedMessages = null)
     {
         var now = DateTimeOffset.UtcNow;
@@ -971,6 +1092,7 @@ public sealed class SyncService(
                     drained = drainedIds.Count,
                     parseWarnings = parseWarnings.Count,
                     archivedChanged,
+                    unlistedChanged,
                     issueCount = issues.Count,
                     parse = parseIssues,
                     enrich = enrichIssues,
@@ -980,7 +1102,7 @@ public sealed class SyncService(
 
         return new SyncPassResult(trigger, head, added, updated, removed,
             enriched, upToDate, failed, drainedIds.Count, parseIssues,
-            archivedChanged, false, null)
+            archivedChanged, unlistedChanged, false, null)
         {
             FailedMessages = failedMessages ?? [],
         };

@@ -338,6 +338,145 @@ public sealed class SyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task UnlistedAppIsExcludedTombstonedAndNeverResurrected()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        await SeedUnlistAsync("tuner");
+
+        var unlisted = await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal(1, unlisted.UnlistedChanged);
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+        Assert.Equal(SyncService.UnlistedReason, tuner.ExcludedReason);
+        var tombstone = Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+        Assert.Equal(tuner.Name, tombstone.Name);
+        Assert.Equal(tuner.Listing, tombstone.Listing);
+
+        // Stale enough to be due, but the operator reason keeps it out of
+        // selection so the recheck window cannot re-enrich and re-publish it.
+        tuner.LastCheckedAt = T0.AddHours(-100);
+        await _db.SaveChangesAsync();
+        var callsBefore = _runner.Calls.Count;
+        var due = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(17));
+
+        Assert.True(due.Skipped);
+        Assert.Equal(callsBefore, _runner.Calls.Count);
+
+        // Re-running the full pass does not duplicate the tombstone.
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(32));
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+    }
+
+    [Fact]
+    public async Task RemovingUnlistOverrideRestoresAndReenriches()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+        var unlistRow = await SeedUnlistAsync("tuner");
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        var before = DateTimeOffset.UtcNow;
+        _db.AppUnlistOverrides.Remove(unlistRow);
+        await _db.SaveChangesAsync();
+        Commit("2026-01-10T10:00:00+00:00", ("README.md", ReadmeV1 + "\n"), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        var callsBefore = _runner.Calls.Count;
+        var restored = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddHours(1));
+
+        Assert.Equal(1, restored.UnlistedChanged);
+        _db.ChangeTracker.Clear();
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        Assert.Null(tuner.ExcludedReason);
+        Assert.True(tuner.UpdatedAt >= before);
+        Assert.DoesNotContain(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+        // Clearing nulled LastCheckedAt mid-pass, forcing re-enrichment (the
+        // fake stamps it again, proof the app was re-run, not skipped).
+        Assert.Contains(_runner.Calls.Skip(callsBefore), c => c.AppId == tuner.Id);
+    }
+
+    [Fact]
+    public async Task UnlistingRootAlsoHidesItsVariants()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        var variant = new App
+        {
+            Slug = "com-acme-plugin",
+            Name = tuner.Name,
+            Url = tuner.Url,
+            Listing = tuner.Listing,
+            Type = tuner.Type,
+            CategoryId = tuner.CategoryId,
+            AddedAt = T0,
+            UpdatedAt = T0,
+            RootAppId = tuner.Id,
+            PackageName = "com.acme.plugin",
+        };
+        _db.Apps.Add(variant);
+        await _db.SaveChangesAsync();
+        await SeedUnlistAsync("tuner");
+
+        var unlisted = await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        Assert.Equal(2, unlisted.UnlistedChanged);
+        _db.ChangeTracker.Clear();
+        variant = _db.Apps.Single(a => a.Slug == "com-acme-plugin");
+        Assert.Equal(Availability.Excluded, variant.Availability);
+        Assert.Equal(SyncService.UnlistedReason, variant.ExcludedReason);
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "com-acme-plugin");
+    }
+
+    [Fact]
+    public async Task ArchivedRowHandsBackToUnlistAndReturnsToArchived()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00",
+            ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1), ("pages/ARCHIVED.md", ArchivedTuner));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        var unlistRow = await SeedUnlistAsync("tuner");
+        await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        Assert.Equal(SyncService.UnlistedReason, tuner.ExcludedReason);
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+
+        _db.AppUnlistOverrides.Remove(unlistRow);
+        await _db.SaveChangesAsync();
+        Commit("2026-01-10T10:00:00+00:00",
+            ("README.md", ReadmeV1 + "\n"), ("pages/CLOSED_SOURCE.md", ClosedV1), ("pages/ARCHIVED.md", ArchivedTuner));
+        var handedBack = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddHours(1));
+
+        Assert.Equal(1, handedBack.UnlistedChanged);
+        _db.ChangeTracker.Clear();
+        tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        Assert.Equal(SyncService.ArchivedReason, tuner.ExcludedReason);
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+    }
+
+    [Fact]
     public async Task OnlyDueAppsAreEnriched()
     {
         if (!InitRepo())
@@ -702,6 +841,14 @@ public sealed class SyncServiceTests : IDisposable
         await Service().RunAsync("nightly", fullRecheck: true, T0.AddMinutes(32));
 
         Assert.Contains(_runner.Calls.Skip(callsBefore), c => c.AppId == tuner.Id);
+    }
+
+    private async Task<AppUnlistOverride> SeedUnlistAsync(string slug)
+    {
+        var row = new AppUnlistOverride { AppSlug = slug, Note = "test unlist", CreatedAt = T0, UpdatedAt = T0 };
+        _db.AppUnlistOverrides.Add(row);
+        await _db.SaveChangesAsync();
+        return row;
     }
 
     /// <summary>Runs a first pass, then turns the tuner row into an analyzed DirectApk without Shizuku.</summary>

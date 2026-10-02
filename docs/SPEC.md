@@ -415,6 +415,12 @@ bundle` is rebuilt per deploy, never committed.
   optional `note`, timestamps. Applied during enrichment (§5.1), seeded
   with SQL; no admin endpoint. Scoping by `app_slug` keeps the same
   package available on other entries that legitimately ship it.
+- **app_unlist_overrides** - operator overrides that hide a whole list
+  entry: unique `app_slug`, optional `note`, timestamps. Applied by
+  every full pass (§5.1): the entry and its variants are marked
+  `Availability.Excluded` with reason `"Unlisted by the operator."` and
+  tombstoned; deleting the row restores the entry. Seeded with SQL; no
+  admin endpoint.
 - **client_user_agents** - anonymous usage aggregate per `User-Agent`
   string (`user_agent` unique, truncated to 512 chars): `request_count`,
   `first_seen_at`, `last_seen_at`, `last_path` (512 chars, nullable).
@@ -941,6 +947,18 @@ silently undo the exclusion. This is how `shizukuplus` serves only its
 unique-package APK without dropping the drop-in build's package from
 the unrelated Shizuku entry.
 
+Operator unlists (`app_unlist_overrides`, §3) hide a whole entry on a
+full pass: it and its variants are marked `Availability.Excluded` with
+reason `"Unlisted by the operator."` and a `removed[]` tombstone is
+written so cached clients drop them. Downloads, install history and the
+`apps` row stay, so the entry can be restored by deleting the override
+row: the reason is cleared, the tombstone removed, `updated_at` bumped
+and re-enrichment forced, so the entry returns through `updated[]`.
+Unlisted rows are skipped by due selection, so the 24h recheck window
+cannot resurrect them. An operator unlist outranks the `ARCHIVED.md`
+reason: an entry in both stays unlisted until the override is removed,
+then hands back to the archived state.
+
 `KieronQuinn/SmartspacerPlugins` publishes one plugin per GitHub
 release, so the newest-release scan cannot see them: it is a hard-coded
 special case that fetches **all** non-draft releases, flattens their
@@ -1259,7 +1277,8 @@ exception clears the change tracker and closes the run as
    has anything.
 4. Else full pass: read + parse `README.md` (Apps section) →
    history → upsert (the empty closed doc sweeps stale listings) →
-   `ARCHIVED.md` → enrich selection (full re-check: all
+   `ARCHIVED.md` → operator unlist reconciliation
+   (`app_unlist_overrides`) → enrich selection (full re-check: all
    non-excluded with `force=true`; else the client-side due
    window plus poll-changed extras, forced) fanned out per-app through `BulkEnricher` with
    `IEnrichmentRunner` (fresh scope per app, persists its own
