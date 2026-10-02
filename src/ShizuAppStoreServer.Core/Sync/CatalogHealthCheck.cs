@@ -7,12 +7,16 @@ namespace ShizuAppStoreServer.Core.Sync;
 public sealed record QualityIssue(string Rule, long AppId, string Slug, string Message);
 
 /// <summary>
-/// Heuristic data quality checks over the catalog. Hidden rows (excluded and
-/// not yet published) are invisible by design and never checked. Runs read
-/// only, after upsert and enrich.
+/// Heuristic data quality checks over the catalog. Excluded rows are
+/// invisible by design and never checked. Non-excluded rows awaiting their
+/// first successful check are reported as <c>not_published</c> unless they
+/// already carry a <c>last_error</c>, which the run reports as an enrich
+/// issue; every other rule only inspects published rows. Runs read only,
+/// after upsert and enrich.
 /// </summary>
 public static class CatalogHealthCheck
 {
+    public const string NotPublished = "not_published";
     public const string MissingLicense = "missing_license";
     public const string MissingDescription = "missing_description";
     public const string MissingIcon = "missing_icon";
@@ -28,14 +32,31 @@ public static class CatalogHealthCheck
         ShizuDbContext db, DateTimeOffset now, TimeSpan successWindow, CancellationToken ct = default)
     {
         var apps = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded && a.PublishedAt != null)
+            .Where(a => a.Availability != Availability.Excluded)
             .Include(a => a.Downloads)
             .Include(a => a.Versions)
             .ToListAsync(ct);
 
         var issues = new List<QualityIssue>();
+        var published = new List<App>(apps.Count);
         foreach (var app in apps)
         {
+            if (app.PublishedAt is null)
+            {
+                // A row that never passed a check stays hidden from every
+                // public surface. Failed rows already surface as enrich
+                // issues with their error, so report only the silent ones.
+                if (app.LastError is null)
+                {
+                    issues.Add(new QualityIssue(NotPublished, app.Id, app.Slug,
+                        "App has not passed a successful check and is hidden from the store."));
+                }
+
+                continue;
+            }
+
+            published.Add(app);
+
             if (string.IsNullOrWhiteSpace(app.License))
             {
                 issues.Add(new QualityIssue(MissingLicense, app.Id, app.Slug, "Entry has no license tag."));
@@ -106,7 +127,7 @@ public static class CatalogHealthCheck
             }
         }
 
-        AddDuplicatePackageIssues(apps, issues);
+        AddDuplicatePackageIssues(published, issues);
 
         return issues;
     }

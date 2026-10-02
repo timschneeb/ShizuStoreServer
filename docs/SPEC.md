@@ -211,7 +211,8 @@ bundle` is rebuilt per deploy, never committed.
     `last_checked_at`,
     `last_error` (trimmed to 500 chars), `published_at` (null until the
     first successful check; every public read path hides unpublished
-    rows, §5/§8 and `docs/listing-and-metadata.md`).
+    rows, §5/§8 and `docs/listing-and-metadata.md`; the health snapshot
+    reports silent unpublished rows as `not_published`, §7.1).
   - AI usage report (detail-only, null until analyzed; §5.4):
     `usage_short` (one plain sentence for the details row),
     `usage_markdown` (composed GitHub-flavored markdown report for the usage
@@ -1276,7 +1277,11 @@ than the newest recorded stable version, with prerelease history
 and same-version-name (multi-ABI) rows ignored; the encoding has so
 far only been seen in some Flutter apps; excluded rows are
 never checked, and a variant shares its root's check freshness because
-the root's completed pass stamps the whole variant group). Due-only
+the root's completed pass stamps the whole variant group). A
+non-excluded row waiting for its first successful check is reported
+as `not_published` so a pass cannot silently leave it hidden; rows
+with a `last_error` skip that finding because their enrich issue
+already reports them. Due-only
 passes (HEAD unchanged) keep the previous
 parse rows and refresh only enrich + quality rows. Skipped and failed
 passes write no issues (a skipped pass still records its bookkeeping

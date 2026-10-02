@@ -182,6 +182,32 @@ public sealed class CatalogHealthCheckTests : IDisposable
     }
 
     [Fact]
+    public async Task UnpublishedRowsAreFlaggedOnce()
+    {
+        var category = Category();
+        var silent = HealthyApp(category, "silent");
+        silent.PublishedAt = null;
+        silent.LastCheckedAt = null;
+        var failed = HealthyApp(category, "failed");
+        failed.PublishedAt = null;
+        failed.LastError = "boom";
+        var excluded = HealthyApp(category, "archived");
+        excluded.PublishedAt = null;
+        excluded.Availability = Availability.Excluded;
+        _db.Apps.AddRange(silent, failed, excluded);
+        await _db.SaveChangesAsync();
+
+        var issues = await CatalogHealthCheck.CheckAsync(_db, T0.AddHours(1), Window);
+
+        // The other rules assume analyzed data, so an unpublished row reports
+        // only the gate finding; failed rows already surface as enrich
+        // issues and excluded rows are hidden by design.
+        var finding = Assert.Single(issues);
+        Assert.Equal(CatalogHealthCheck.NotPublished, finding.Rule);
+        Assert.Equal("silent", finding.Slug);
+    }
+
+    [Fact]
     public async Task DuplicatePackageFlagsEveryMember()
     {
         var category = Category();
