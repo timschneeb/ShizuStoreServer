@@ -517,7 +517,9 @@ reuses the prior result; forge 304s and checksum-skip paths still refresh
 `stars` and the README on every pass: the repo default (or the list-linked
 file) is refetched and its raw URL restamped even when the stored markdown
 already came from the same route, so neither the snapshot nor the client's
-live link goes stale). Rows with
+live link goes stale). The GitCode special case fetches its releases from
+the mirror but the README from the linked GitHub repo, since the mirror
+publishes none. Rows with
 a fully analyzed build on
 record (SHA-256 identity) but blank permissions re-analyze once: the
 F-Droid path never persisted them before, and the same-asset and 304
@@ -873,7 +875,10 @@ check stamps every live variant's `last_checked_at` too: variants are
 only ever enriched through the root's pass, and the skip paths that
 touch just the root (unchanged release, 304, all-assets-known) would
 otherwise freeze their timestamps until the health snapshot flags them
-stale after two windows. The root's
+stale after two windows. That same stamp mirrors the root's
+`full_description` and `readme_url` onto every variant, so detail
+pages for variant rows offer the same snapshot and live README refetch
+URL as the root instead of a copy frozen at creation time. The root's
 `display_name` and every variant's is the APK's `application-label`;
 when a root has more than one label the label is qualified as
 `label (root list name)` so the extra apps stay traceable to their list

@@ -955,6 +955,61 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("Phone App (Toolbox)", app.DisplayName);
     }
 
+    [Fact]
+    public async Task VariantReadmeMirrorsRootOnLaterPasses()
+    {
+        // Variant rows created before the root had a README route carry no
+        // snapshot or raw URL of their own, and variants never run their own
+        // enrichment, so a later root pass must heal them.
+        var phone = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(200, 200, Color.Blue)));
+        var watch = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(400, 400, Color.Red)));
+        var badgingByHash = new Dictionary<string, string>
+        {
+            [Sha256(phone)] = TestAssets.CannedBadging(package: "com.example.app", versionCode: "1", label: "Phone App"),
+            [Sha256(watch)] = TestAssets.CannedBadging(package: "com.example.plugin", versionCode: "2",
+                label: "Watch Plugin", features: ["android.hardware.type.watch"]),
+        };
+        var readmeAvailable = false;
+        var github = new StubHandler(request => request.RequestUri!.AbsolutePath.Contains("/readme", StringComparison.Ordinal)
+            ? readmeAvailable
+                ? ReadmeJson("# Toolbox\n")
+                : new HttpResponseMessage(HttpStatusCode.NotFound)
+                {
+                    Content = new StringContent("""{"message":"Not Found"}"""),
+                }
+            : JsonReleases(ReleaseJsonMultiAssets(
+                ("app-release.apk", "https://cdn.example/app-release.apk", phone.Length + 10_000),
+                ("plugin-watch-release.apk", "https://cdn.example/plugin-watch-release.apk", watch.Length)), "\"rel-etag\""));
+        var downloads = new StubHandler(request =>
+        {
+            var bytes = request.RequestUri!.AbsolutePath.Contains("plugin", StringComparison.Ordinal)
+                ? watch
+                : phone;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+        });
+        var aapt2 = new FakeAapt2Runner(apkPath => badgingByHash[Sha256(File.ReadAllBytes(apkPath))]);
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("toolbox", "Toolbox", "https://github.com/example/toolbox");
+
+        await enricher.EnrichAsync(app, T0);
+        var variant = Assert.Single(_db.Apps.Local.Where(a => a.RootAppId == app.Id).ToList());
+        Assert.Null(variant.ReadmeUrl);
+
+        // Simulate a row created before the README route existed.
+        variant.FullDescription = null;
+        readmeAvailable = true;
+        Age(app);
+
+        var result = await enricher.EnrichAsync(app, T0, force: true);
+
+        Assert.NotEqual(EnrichOutcome.Failed, result.Outcome);
+        var expected = "https://raw.githubusercontent.com/example/toolbox/HEAD/README.md";
+        Assert.Equal("# Toolbox\n", app.FullDescription);
+        Assert.Equal(expected, app.ReadmeUrl);
+        Assert.Equal("# Toolbox\n", variant.FullDescription);
+        Assert.Equal(expected, variant.ReadmeUrl);
+    }
+
     private static string ReleasesJson(params (string Tag, string Name, string Url, long Size)[] releases)
     {
         var array = new JsonArray();
@@ -3679,7 +3734,9 @@ public sealed class AppEnricherTests : IDisposable
     {
         var zip = TestAssets.BuildApk(
             (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
-        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var github = new StubHandler(request => request.RequestUri!.AbsolutePath.Contains("/readme", StringComparison.Ordinal)
+            ? ReadmeJson("# HLBmerge\n")
+            : throw new InvalidOperationException("must not call GitHub"));
         var downloads = new StubHandler(request =>
         {
             Assert.Equal(
@@ -3708,6 +3765,8 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("v2.0.5", primary.ReleaseTag);
         Assert.Equal("\"gc-etag\"", app.EnrichEtag);
         Assert.NotNull(app.IconHash);
+        Assert.Equal("# HLBmerge\n", app.FullDescription);
+        Assert.Equal("https://raw.githubusercontent.com/molihuan/hlbmerge_flutter/HEAD/README.md", app.ReadmeUrl);
     }
 
     [Fact]
@@ -3715,7 +3774,9 @@ public sealed class AppEnricherTests : IDisposable
     {
         var apk = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
         var url = "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/app-arm64-v8a-release.apk";
-        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var github = new StubHandler(request => request.RequestUri!.AbsolutePath.Contains("/readme", StringComparison.Ordinal)
+            ? ReadmeJson("# HLBmerge\n")
+            : throw new InvalidOperationException("must not call GitHub"));
         var gitcode = new FakeGitCodeClient(() => new SourceRelease("v2.0.5", null, "\"gc-etag\"",
         [
             new SourceAsset("app-arm64-v8a-release.apk", url, Primary: true),
@@ -3744,7 +3805,9 @@ public sealed class AppEnricherTests : IDisposable
     [Fact]
     public async Task GitCodeWithoutApkAssetsFails()
     {
-        var github = new StubHandler(_ => throw new InvalidOperationException("must not call GitHub"));
+        var github = new StubHandler(request => request.RequestUri!.AbsolutePath.Contains("/readme", StringComparison.Ordinal)
+            ? ReadmeJson("# HLBmerge\n")
+            : throw new InvalidOperationException("must not call GitHub"));
         var gitcode = new FakeGitCodeClient(() => new SourceRelease("v2.0.5", null, null,
         [
             new SourceAsset("source.zip",

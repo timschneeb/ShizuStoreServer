@@ -270,6 +270,12 @@ public sealed class AppEnricher(
         {
             variant.LastCheckedAt = now;
             variant.LastError = null;
+            // Variants never run their own EnrichAsync, so they only inherit
+            // the root's README snapshot and raw URL at creation. Mirror them
+            // each pass or rows created before the route existed keep serving
+            // the stale snapshot without a live refetch URL.
+            variant.FullDescription = root.FullDescription;
+            variant.ReadmeUrl = root.ReadmeUrl;
             // Variants never run their own EnrichAsync, so the per-app primary
             // heal cannot reach them; repair here, or a flag lost to an
             // interrupted recompute would stay lost (live 2026-09-25).
@@ -846,6 +852,13 @@ public sealed class AppEnricher(
     private async Task<EnrichResult> EnrichFromGitCodeAsync(
         App app, DateTimeOffset now, CancellationToken ct)
     {
+        // The APK lives on the mirror but the list links the GitHub repo, so
+        // the README still comes from GitHub.
+        await RefreshFullDescriptionAsync(
+            app,
+            () => github.GetLinkedMarkdownAsync(app.Url, ct),
+            () => github.GetReadmeMarkdownAsync(HlbmergeGitHubOwner, HlbmergeGitHubRepo, ct));
+
         SourceRelease release;
         try
         {
