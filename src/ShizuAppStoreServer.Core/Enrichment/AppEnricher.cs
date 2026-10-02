@@ -1335,11 +1335,14 @@ public sealed class AppEnricher(
         // A metadata heal re-analyzes a recorded primary to refill presentation
         // fields; recording it again could rewrite the row's version and flip
         // the primary on a later recompute, so the heal leaves rows untouched.
+        // The APK's badging name can be shell output from broken release
+        // tooling; the release tag is the best label then.
+        var versionName = VersionNames.Resolve(analysis.Badging.VersionName, analysis.ReleaseTag);
         if (recordDownload)
         {
             await UpsertDownloadAsync(target, new DownloadCandidate(
                 analysis.LockSource, null, analysis.ArtifactUrl, analysis.ArchiveEntry,
-                analysis.Badging.VersionCode, analysis.Badging.VersionName,
+                analysis.Badging.VersionCode, versionName,
                 analysis.FileSize, analysis.FileSha256, analysis.SigSha256, analysis.SigMd5,
                 analysis.Badging.MinSdk, analysis.Badging.Abi,
                 TargetSdk: analysis.Badging.TargetSdk,
@@ -1410,7 +1413,7 @@ public sealed class AppEnricher(
         if (recordDownload)
         {
             await AddVersionRowAsync(
-                target, analysis.Badging.VersionCode, analysis.Badging.VersionName, analysis.ArtifactUrl,
+                target, analysis.Badging.VersionCode, versionName, analysis.ArtifactUrl,
                 isPrerelease, now, ct);
         }
 

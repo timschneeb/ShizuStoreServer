@@ -119,6 +119,15 @@ public sealed class BadgingParserTests
     }
 
     [Fact]
+    public void RejectsCommandErrorOutputAsVersionName()
+    {
+        var info = BadgingParser.Parse(
+            "package: name='com.x' versionCode='1' versionName='fatal: No names found, cannot describe anything.'\n");
+
+        Assert.Null(info.VersionName);
+    }
+
+    [Fact]
     public void ParsesSingleNativeAbi()
     {
         var info = BadgingParser.Parse("package: name='com.x' versionCode='1'\nnative-code: 'arm64-v8a'\n");

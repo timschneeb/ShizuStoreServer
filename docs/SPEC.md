@@ -714,7 +714,10 @@ verified signature schemes) → icon chain, XML first at every level (a real vec
 render stays sharp while a stale PNG would fossilize): manifest
 `android:icon` XML staged for Paparazzi, then the manifest raster
 decoded in-house, then a badging XML path, then badging rasters
-(PNG and WebP decoded in-house). XML drawables render through Google
+(PNG and WebP decoded in-house). A badging `versionName` that is
+implausible (shell error output such as `fatal: No names found`, over 48
+characters or carrying control characters) counts as unknown; a forge
+download then falls back to the release tag. XML drawables render through Google
 LayoutLib via the Paparazzi Gradle tool (`tools/icon-render`): a single
 render writes the exact-size bitmap directly (no screen-sized snapshot),
 a failed or timed-out build still contributes a complete PNG when one

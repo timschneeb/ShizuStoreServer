@@ -454,6 +454,30 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task VersionNameCommandOutputFallsBackToReleaseTag()
+    {
+        // DevBay-style build: the APK bakes `git describe` stderr into
+        // versionName; the tag is the only usable label.
+        var zip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v2.0.4", "app-release.apk", "https://cdn.example/app.apk", zip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(
+            versionCode: "1", versionName: "fatal: No names found, cannot describe anything."));
+        var app = NewApp("devbay-launcher", "DevBay-Launcher", "https://github.com/Zoder-Studio/DevBay-Launcher");
+
+        var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal("v2.0.4", Primary(app).VersionName);
+        Assert.Equal("v2.0.4", Assert.Single(app.Versions).VersionName);
+    }
+
+    [Fact]
     public async Task GitHubReleaseBodyBecomesChangelog()
     {
         var (enricher, _, _, _, _) = HappyPath(changelog: "## 1.0\n- First release");

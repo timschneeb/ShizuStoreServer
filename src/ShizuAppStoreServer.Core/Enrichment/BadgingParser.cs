@@ -120,7 +120,9 @@ public static partial class BadgingParser
             versionCode = code;
         }
 
-        var versionName = package.Groups["vname"] is { Success: true } v && v.Value.Length > 0 ? v.Value : null;
+        var versionName = package.Groups["vname"] is { Success: true } v && v.Value.Length > 0
+            ? VersionNames.Sanitize(v.Value)
+            : null;
 
         int? minSdk = null;
         if (SdkLine().Match(output) is { Success: true } sdk
