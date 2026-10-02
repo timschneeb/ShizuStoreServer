@@ -69,6 +69,39 @@ public sealed class UsageAnalysisQueueTests : IDisposable
     }
 
     [Fact]
+    public async Task AnalyzedArtifactHookQueuesFreshRowThatIsStillLinkOnly()
+    {
+        var app = NewApp("fresh");
+        app.Availability = Availability.LinkOnly;
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        // The general policy refuses the row while it still reads LinkOnly.
+        Assert.False(await queue.EnqueueAsync(app, artifactChanged: false, firstAnalysis: true));
+
+        // The artifact hook runs before the same save flips the row; it must queue.
+        Assert.True(await queue.EnqueueForAnalyzedArtifactAsync(app, artifactChanged: false, firstAnalysis: true));
+        await _db.SaveChangesAsync();
+
+        var run = Assert.Single(_db.UsageAnalysisRuns);
+        Assert.Equal(app.Id, run.AppId);
+        Assert.Equal(UsageAnalysisStatus.Pending, run.Status);
+        Assert.Equal(JobTrigger.Auto, run.Trigger);
+    }
+
+    [Fact]
+    public async Task AnalyzedArtifactHookStillRequiresAnAnalyzableRepo()
+    {
+        var app = NewApp("norepo-hook", "https://example.com/download");
+        app.Availability = Availability.LinkOnly;
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.False(await queue.EnqueueForAnalyzedArtifactAsync(app, artifactChanged: true, firstAnalysis: false));
+        Assert.Empty(_db.UsageAnalysisRuns);
+    }
+
+    [Fact]
     public async Task EnqueueSkipsUnchangedArtifact()
     {
         var app = NewApp("unchanged");

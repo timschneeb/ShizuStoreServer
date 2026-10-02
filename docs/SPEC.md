@@ -1031,9 +1031,12 @@ marker scanning survives only as internal context extraction.
 
 - Queue policy: a run is queued when a build is first analyzed, when a new
   APK artifact appears, or through the admin backfill. Routine fast and
-  nightly passes never re-analyze an unchanged app. Only `DirectApk` rows
-  are eligible, root and variant alike: each app row carries its own report,
-  and a variant release refreshes the variant's report. Play-redirect,
+  nightly passes never re-analyze an unchanged app. The artifact hook runs
+  while the row may still read `LinkOnly` (the same save flips it to
+  `DirectApk`), so it requires only an analyzable repo and leaves the
+  availability gate to the general policy. Only `DirectApk` rows
+  are eligible there, root and variant alike: each app row carries its own
+  report, and a variant release refreshes the variant's report. Play-redirect,
   link-only and excluded rows are never analyzed. A row that becomes
   `DirectApk` later is analyzed on its first checksum, and existing reports
   are kept, not deleted.

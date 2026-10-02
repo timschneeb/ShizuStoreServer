@@ -2846,7 +2846,7 @@ public sealed class AppEnricher(
 
         if (usageQueue is not null && (apkChanged || (firstAnalysis && app.UsageAnalyzedAt is null)))
         {
-            await usageQueue.EnqueueAsync(app, apkChanged, firstAnalysis, ct);
+            await usageQueue.EnqueueForAnalyzedArtifactAsync(app, apkChanged, firstAnalysis, ct);
         }
     }
 

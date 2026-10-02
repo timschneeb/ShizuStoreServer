@@ -299,6 +299,10 @@ public sealed class AppEnricherTests : IDisposable
             return Task.FromResult(true);
         }
 
+        public Task<bool> EnqueueForAnalyzedArtifactAsync(
+            App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default) =>
+            EnqueueAsync(app, artifactChanged, firstAnalysis, ct);
+
         public Task<int> BackfillAsync(
             bool onlyMissing, bool includeStale, bool force, string? slug, int? limit, CancellationToken ct = default) =>
             Task.FromResult(0);
@@ -878,6 +882,26 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(app.Id, call.AppId);
         Assert.False(call.ArtifactChanged);
         Assert.True(call.FirstAnalysis);
+    }
+
+    [Fact]
+    public async Task FirstInspectionQueuesThroughTheRealQueueWhileTheRowIsStillLinkOnly()
+    {
+        // A fresh row defaults to LinkOnly and only flips to DirectApk later in
+        // ApplyAnalysisAsync; the artifact hook must queue anyway.
+        var queue = new UsageAnalysisQueue(_db, new UsageAnalysisOptions { Enabled = true });
+        var (enricher, _, _, _, _) = HappyPath(usageQueue: queue);
+        var app = NewApp("usagereal", "UsageReal", "https://github.com/example/usagereal");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal(Availability.DirectApk, app.Availability);
+        // EnrichAsync leaves persistence to its caller; the pass would save here.
+        await _db.SaveChangesAsync();
+        var run = Assert.Single(_db.UsageAnalysisRuns);
+        Assert.Equal(app.Id, run.AppId);
+        Assert.Equal(UsageAnalysisStatus.Pending, run.Status);
     }
 
     [Fact]

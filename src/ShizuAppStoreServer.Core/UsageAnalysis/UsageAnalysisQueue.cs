@@ -23,6 +23,14 @@ public interface IUsageAnalysisQueue
     Task<bool> EnqueueAsync(App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default);
 
     /// <summary>
+    /// Queues a run for an artifact the enricher just analyzed. The call runs
+    /// before the same save flips a fresh row from LinkOnly to DirectApk, so
+    /// the availability gate cannot apply here; the repo demand still does.
+    /// </summary>
+    Task<bool> EnqueueForAnalyzedArtifactAsync(
+        App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default);
+
+    /// <summary>
     /// Operator backfill. <paramref name="onlyMissing"/> queues only apps with
     /// no stored analysis; <paramref name="includeStale"/> queues apps whose
     /// analysis predates the current prompt/analysis generation. Returns the
@@ -42,16 +50,32 @@ public sealed class UsageAnalysisQueue(
     public async Task<bool> EnqueueAsync(
         App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default)
     {
-        if (!options.IsConfigured || (!artifactChanged && !firstAnalysis))
+        if (!options.IsConfigured || (!artifactChanged && !firstAnalysis) || !IsEligible(app))
         {
             return false;
         }
 
-        if (!IsEligible(app))
+        return await AddRunAsync(app, artifactChanged, firstAnalysis, ct);
+    }
+
+    public async Task<bool> EnqueueForAnalyzedArtifactAsync(
+        App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default)
+    {
+        // ApplyAnalysisAsync records the download before it flips the row to
+        // DirectApk, so requiring DirectApk here would silently drop every
+        // first analysis of a new app. The caller only records artifacts it
+        // analyzed, and those always serve a direct APK.
+        if (!options.IsConfigured || (!artifactChanged && !firstAnalysis) || !HasAnalyzableRepo(app))
         {
             return false;
         }
 
+        return await AddRunAsync(app, artifactChanged, firstAnalysis, ct);
+    }
+
+    private async Task<bool> AddRunAsync(
+        App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct)
+    {
         if (_queuedThisScope.Contains(app.Id))
         {
             return false;
@@ -165,7 +189,9 @@ public sealed class UsageAnalysisQueue(
 
     /// <summary>Direct-APK app (root or variant) with a GitHub/GitLab repo to read.</summary>
     private static bool IsEligible(App app) =>
+        app.Availability == Availability.DirectApk && HasAnalyzableRepo(app);
+
+    private static bool HasAnalyzableRepo(App app) =>
         app.Id != 0
-        && app.Availability == Availability.DirectApk
         && RepoScreenshotResolver.TryParseRepo(app.Url, app.SourceUrl, out _);
 }
