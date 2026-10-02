@@ -27,6 +27,7 @@ public sealed class CategoriesTests(ShizuApiFactory factory) : IClassFixture<Shi
                 Seeds.NewApp("aura", miui),
                 Seeds.NewApp("pixel-only", miui),
                 Seeds.NewApp("hidden", miui, availability: Availability.Excluded),
+                Seeds.NewApp("pending", miui, published: false),
                 Seeds.NewApp("libx", libs));
         });
 
@@ -153,13 +154,17 @@ public sealed class ChangesTests(ShizuApiFactory factory) : IClassFixture<ShizuA
                 Seeds.NewApp("bumped2", audio, addedAt: Jan, updatedAt: Jul3), // updated
                 Seeds.NewApp("stale", audio, addedAt: Jan, updatedAt: Jan), // neither
                 Seeds.NewApp("hidden-fresh", audio, addedAt: Jul2, updatedAt: Jul2,
-                    availability: Availability.Excluded)); // never listed
+                    availability: Availability.Excluded), // never listed
+                Seeds.NewApp("pending-fresh", audio, addedAt: Jul2, updatedAt: Jul3,
+                    published: false)); // awaiting first check, never listed
             db.RemovedApps.AddRange(
                 new RemovedApp { Slug = "gone", Name = "Gone", Listing = Listing.Main, RemovedAt = Jul2 },
-                new RemovedApp { Slug = "long-gone", Listing = Listing.Main, RemovedAt = Jan });
+                new RemovedApp { Slug = "long-gone", Name = "Long Gone", Listing = Listing.Main, RemovedAt = Jan });
         });
 
+        var before = DateTimeOffset.UtcNow;
         var response = await factory.NewClient().GetAsync("/v1/changes?since=" + Since);
+        var after = DateTimeOffset.UtcNow;
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var changes = (await response.Content.ReadFromJsonAsync<ChangesDto>(Json))!;
 
@@ -167,9 +172,13 @@ public sealed class ChangesTests(ShizuApiFactory factory) : IClassFixture<ShizuA
         // Oldest-first, already-added rows are not repeated in updated[].
         Assert.Equal(["bumped", "bumped2"], changes.Updated.Select(a => a.Slug));
         Assert.DoesNotContain(changes.Added.Concat(changes.Updated),
-            a => a.Slug == "stale" || a.Slug == "hidden-fresh");
+            a => a.Slug == "stale" || a.Slug == "hidden-fresh" || a.Slug == "pending-fresh");
         Assert.Equal(["gone"], changes.Removed.Select(r => r.Slug));
         Assert.Equal("Gone", changes.Removed[0].Name);
+        // The cursor handed to clients is this response's snapshot, not a
+        // later wall clock that could skip concurrent commits.
+        Assert.True(changes.GeneratedAt >= before && changes.GeneratedAt <= after,
+            $"{before:O} <= {changes.GeneratedAt:O} <= {after:O}");
     }
 
     [Fact]
@@ -307,7 +316,8 @@ public sealed class MetaTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
             db.Categories.Add(audio);
             db.Apps.AddRange(
                 Seeds.NewApp("micup", audio),
-                Seeds.NewApp("hidden", audio, availability: Availability.Excluded));
+                Seeds.NewApp("hidden", audio, availability: Availability.Excluded),
+                Seeds.NewApp("pending", audio, published: false));
             db.JobRuns.AddRange(
                 new JobRun
                 {

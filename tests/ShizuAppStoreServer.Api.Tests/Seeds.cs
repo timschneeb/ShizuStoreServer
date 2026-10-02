@@ -42,7 +42,8 @@ public static class Seeds
         string? changelogUrl = null,
         List<string>? screenshots = null,
         string? versionName = null,
-        string? displayName = null) => new()
+        string? displayName = null,
+        bool published = true) => new()
         {
             Slug = slug,
             Name = name ?? slug,
@@ -53,6 +54,7 @@ public static class Seeds
             Listing = listing,
             Type = type,
             Availability = availability,
+            PublishedAt = published ? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero) : null,
             IsRecommended = recommended,
             PackageName = packageName,
             AuthorKey = authorKey,

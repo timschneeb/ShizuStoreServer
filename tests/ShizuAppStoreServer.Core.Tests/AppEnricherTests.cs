@@ -994,6 +994,9 @@ public sealed class AppEnricherTests : IDisposable
         await enricher.EnrichAsync(app, T0);
         var variant = Assert.Single(_db.Apps.Local.Where(a => a.RootAppId == app.Id).ToList());
         Assert.Null(variant.ReadmeUrl);
+        // Variants share the root's serve surface, so they publish with it.
+        Assert.Equal(T0, app.PublishedAt);
+        Assert.Equal(T0, variant.PublishedAt);
 
         // Simulate a row created before the README route existed.
         variant.FullDescription = null;
@@ -1680,6 +1683,8 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Contains("404", app.LastError);
         Assert.Equal(T0, app.LastCheckedAt);
         Assert.Equal(Availability.LinkOnly, app.Availability);
+        // A failed first check must leave the row hidden until a pass succeeds.
+        Assert.Null(app.PublishedAt);
         Assert.False(HasDownloads(app));
 
         // Immediate retry is skipped (backoff); after the window it retries.
@@ -1714,6 +1719,7 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(EnrichOutcome.AvatarFallback, result.Outcome);
         Assert.Equal(SourceKind.Codeberg, app.SourceKind);
         Assert.Equal(Availability.LinkOnly, app.Availability);
+        Assert.Equal(T0, app.PublishedAt);
         Assert.Null(app.LastError);
         var iconPath = Path.Combine(_iconDir, $"{app.IconHash}.png");
         Assert.True(File.Exists(iconPath));

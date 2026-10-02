@@ -31,6 +31,10 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
     /// <c>config_flags</c> high-water mark for clearing client catalog
     /// caches (null = never requested). A client that has not applied it
     /// yet wipes its cached app list, never user data, and bootstraps.
+    /// <c>generatedAt</c> is this response's snapshot time, captured before
+    /// the first read; clients must store it as their next <c>since</c> cursor
+    /// (a row committed after the snapshot has a later <c>updated_at</c> and
+    /// is replayed) instead of the unrelated <c>/v1/meta</c> timestamp.
     /// </summary>
     [HttpGet]
     [OutputCache(PolicyName = "changes")]
@@ -56,6 +60,10 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
+        // Snapshot time, captured before the first database read so a commit
+        // landing mid-request still has an updated_at after this cursor.
+        var generatedAt = DateTimeOffset.UtcNow;
+
         // Operator high-water mark for remote catalog purges; read live so
         // flipping the config_flags row needs no restart.
         var purgeRequestedAt = await ConfigFlags.GetDateTimeOffsetAsync(
@@ -66,7 +74,9 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
         // DateTimeOffset in SQL; Npgsql can). Delta sets are small and this
         // endpoint is output-cached for 30 s.
         var all = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded && listings.Contains(a.Listing))
+            .Where(a => a.Availability != Availability.Excluded
+                && a.PublishedAt != null
+                && listings.Contains(a.Listing))
             .Include(a => a.Category)
             .Include(a => a.Downloads)
             .ToListAsync(ct);
@@ -98,6 +108,7 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
             updated.Select(AppMapper.ToSummary).ToList(),
             removed.Select(AppMapper.ToRemoved).ToList(),
             installsUpdated,
-            purgeRequestedAt));
+            purgeRequestedAt,
+            generatedAt));
     }
 }

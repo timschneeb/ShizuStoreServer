@@ -20,6 +20,11 @@ The client has a setting to show these entries which is off by default.
 | Metadata refresh (GitHub stars, etc.) | within 24 hours |
 | New screenshots added or removed | F-Droid/Izzy shots refresh within 24 hours; the app repo is re-scanned every week and dead URLs are cleared on the next scan |
 
+A new entry is created hidden and becomes visible only after its first
+successful check, so an app never appears in the store without its icon,
+description or download link. A failed first check keeps it hidden and
+retries with the normal failure backoff.
+
 ## How the server finds releases
 
 Source selection: an entry can end up with

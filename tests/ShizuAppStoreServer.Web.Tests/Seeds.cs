@@ -13,7 +13,7 @@ internal static class Seeds
         Section = CategorySection.Apps,
     };
 
-    public static App App(long id, string slug, string name, long categoryId) => new()
+    public static App App(long id, string slug, string name, long categoryId, bool published = true) => new()
     {
         Id = id,
         Slug = slug,
@@ -22,6 +22,7 @@ internal static class Seeds
         Url = $"https://example.com/{slug}",
         CategoryId = categoryId,
         Availability = Availability.DirectApk,
+        PublishedAt = published ? new DateTimeOffset(2026, 2, 1, 0, 0, 0, TimeSpan.Zero) : null,
         AddedAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
         UpdatedAt = new DateTimeOffset(2026, 2, 1, 0, 0, 0, TimeSpan.Zero),
         VersionUpdatedAt = new DateTimeOffset(2026, 2, 1, 0, 0, 0, TimeSpan.Zero),

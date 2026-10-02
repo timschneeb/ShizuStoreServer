@@ -57,7 +57,8 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
 
         pageSize = Math.Clamp(pageSize, 1, MaxPageSize);
 
-        var query = db.Apps.AsNoTracking().Where(a => a.Availability != Availability.Excluded);
+        var query = db.Apps.AsNoTracking()
+            .Where(a => a.Availability != Availability.Excluded && a.PublishedAt != null);
 
         if (category is not null)
         {
@@ -194,7 +195,8 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
             .Include(a => a.Category).ThenInclude(c => c!.Parent)
             .Include(a => a.Parent)
             .Include(a => a.Downloads)
-            .FirstOrDefaultAsync(a => a.Slug == slug && a.Availability != Availability.Excluded, ct);
+            .FirstOrDefaultAsync(
+                a => a.Slug == slug && a.Availability != Availability.Excluded && a.PublishedAt != null, ct);
 
         if (app is null)
         {
@@ -250,7 +252,7 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
         var updated = await db.Apps
-            .Where(a => a.Slug == slug && a.Availability != Availability.Excluded)
+            .Where(a => a.Slug == slug && a.Availability != Availability.Excluded && a.PublishedAt != null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.InstallCount, a => a.InstallCount + 1)
                 .SetProperty(a => a.InstallCountUpdatedAt, now), ct);

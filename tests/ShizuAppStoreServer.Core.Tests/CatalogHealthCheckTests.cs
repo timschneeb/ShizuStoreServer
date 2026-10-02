@@ -50,6 +50,7 @@ public sealed class CatalogHealthCheckTests : IDisposable
         AddedAt = T0,
         UpdatedAt = T0,
         LastCheckedAt = T0,
+        PublishedAt = T0,
     };
 
     [Fact]

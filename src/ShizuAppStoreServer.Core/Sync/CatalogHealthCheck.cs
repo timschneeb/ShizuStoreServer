@@ -7,8 +7,9 @@ namespace ShizuAppStoreServer.Core.Sync;
 public sealed record QualityIssue(string Rule, long AppId, string Slug, string Message);
 
 /// <summary>
-/// Heuristic data quality checks over the catalog. Excluded rows are hidden
-/// by design and never checked. Runs read only, after upsert and enrich.
+/// Heuristic data quality checks over the catalog. Hidden rows (excluded and
+/// not yet published) are invisible by design and never checked. Runs read
+/// only, after upsert and enrich.
 /// </summary>
 public static class CatalogHealthCheck
 {
@@ -27,7 +28,7 @@ public static class CatalogHealthCheck
         ShizuDbContext db, DateTimeOffset now, TimeSpan successWindow, CancellationToken ct = default)
     {
         var apps = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded)
+            .Where(a => a.Availability != Availability.Excluded && a.PublishedAt != null)
             .Include(a => a.Downloads)
             .Include(a => a.Versions)
             .ToListAsync(ct);

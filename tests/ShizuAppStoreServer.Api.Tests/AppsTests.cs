@@ -36,7 +36,8 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
                 type: AppType.Library, availability: Availability.DirectApk,
                 addedAt: new DateTimeOffset(2026, 3, 1, 0, 0, 0, TimeSpan.Zero),
                 updatedAt: new DateTimeOffset(2026, 6, 1, 0, 0, 0, TimeSpan.Zero)),
-            Seeds.NewApp("hidden", audio, availability: Availability.Excluded));
+            Seeds.NewApp("hidden", audio, availability: Availability.Excluded),
+            Seeds.NewApp("pending", audio, published: false));
     }
 
     private async Task<PagedAppsDto> GetPageAsync(string query)
@@ -59,6 +60,8 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
         Assert.Equal(50, page.PageSize);
         Assert.Equal(2, page.Items.Count);
         Assert.DoesNotContain(page.Items, a => a.Slug == "hidden");
+        // Rows awaiting their first successful check stay hidden too.
+        Assert.DoesNotContain(page.Items, a => a.Slug == "pending");
         // Closed-source rows stay out unless the caller opts in.
         Assert.DoesNotContain(page.Items, a => a.Slug == "aura");
     }
@@ -298,6 +301,16 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
+    public async Task UnpublishedAppIsNotServed()
+    {
+        await SeedAsync(SeedDirectory);
+
+        var response = await factory.NewClient().GetAsync("/v1/apps/pending");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task SourceNameIsFriendlyAndListingVersionIsUsed()
     {
         await factory.ResetAsync(db =>
@@ -432,6 +445,8 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
             (await client.PostAsync("/v1/apps/no-such-app/installs", null)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound,
             (await client.PostAsync("/v1/apps/hidden/installs", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.PostAsync("/v1/apps/pending/installs", null)).StatusCode);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ShizuDbContext>();

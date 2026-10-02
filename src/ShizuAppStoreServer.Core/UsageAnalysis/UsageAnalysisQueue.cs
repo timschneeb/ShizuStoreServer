@@ -92,7 +92,7 @@ public sealed class UsageAnalysisQueue(
         }
 
         var query = db.Apps
-            .Where(a => a.Availability != Availability.Excluded);
+            .Where(a => a.Availability != Availability.Excluded && a.PublishedAt != null);
         if (!string.IsNullOrWhiteSpace(slug))
         {
             query = query.Where(a => a.Slug == slug);

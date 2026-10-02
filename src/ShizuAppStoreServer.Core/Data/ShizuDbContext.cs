@@ -154,6 +154,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.SourceKind).HasColumnName("source_kind").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.Availability).HasColumnName("availability").HasConversion<string>().HasMaxLength(32).IsRequired();
             e.Property(x => x.ExcludedReason).HasColumnName("excluded_reason");
+            e.Property(x => x.PublishedAt).HasColumnName("published_at");
             e.Property(x => x.ExcludeOverride).HasColumnName("exclude_override");
             e.Property(x => x.PackageName).HasColumnName("package_name").HasMaxLength(256);
             // Permissions are a plain string list; store newline-joined so the

@@ -45,6 +45,7 @@ public sealed class UsageAnalysisQueueTests : IDisposable
             Availability = Availability.DirectApk,
             AddedAt = DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow,
+            PublishedAt = DateTimeOffset.UtcNow,
         };
         _db.Apps.Add(app);
         _db.SaveChanges();

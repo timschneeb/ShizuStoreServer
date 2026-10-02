@@ -209,7 +209,9 @@ bundle` is rebuilt per deploy, never committed.
     (when the awesome-list entry was last added or edited, `[silent]`
     commits excluded; drives "recently added", nulls sort last),
     `last_checked_at`,
-    `last_error` (trimmed to 500 chars).
+    `last_error` (trimmed to 500 chars), `published_at` (null until the
+    first successful check; every public read path hides unpublished
+    rows, §5/§8 and `docs/listing-and-metadata.md`).
   - AI usage report (detail-only, null until analyzed; §5.4):
     `usage_short` (one plain sentence for the details row),
     `usage_markdown` (composed GitHub-flavored markdown report for the usage
@@ -481,7 +483,9 @@ bundle` is rebuilt per deploy, never committed.
   root's URL, so it must never look like a duplicate or go stale on
   its own. When a root does sweep out, its variants are hard-deleted
   with it and each variant slug gets its own tombstone, so cached
-  clients drop the child rows too. First-seen rows and stale-row
+  clients drop the child rows too. First-seen rows start unpublished
+  (`published_at` null) and stay invisible until their first successful
+  check (§5). First-seen rows and stale-row
   tombstones are stamped with
   the write clock (`DateTimeOffset.UtcNow` inside the upsert), not the
   pass clock: `now` is captured before fetch + history parsing, so a
@@ -502,6 +506,13 @@ bundle` is rebuilt per deploy, never committed.
 Per-app, no `SaveChanges` (callers batch). A freshness gate runs
 first: unless `force`, apps checked inside the success window (24h)
 or failure backoff (12h) return `SkippedFresh` with no work.
+
+A row stays unpublished (hidden from every read path) until its first
+check succeeds: an outcome other than `Failed` stamps `published_at`
+and `updated_at`, so the now-servable row reaches incremental clients
+even when no summary-visible column moved. A failed first check leaves
+the row hidden and retries per the failure backoff, so a flaky forge
+never lists an app without an icon or download.
 
 Resolution is **forge-first, always**: GitHub → GitLab →
 F-Droid/Izzy → fallback. A forge link anywhere in the entry (primary
@@ -876,9 +887,10 @@ only ever enriched through the root's pass, and the skip paths that
 touch just the root (unchanged release, 304, all-assets-known) would
 otherwise freeze their timestamps until the health snapshot flags them
 stale after two windows. That same stamp mirrors the root's
-`full_description` and `readme_url` onto every variant, so detail
-pages for variant rows offer the same snapshot and live README refetch
-URL as the root instead of a copy frozen at creation time. The root's
+`full_description` and `readme_url` onto every variant and publishes
+variants with the root (`published_at` copied while still null), so
+detail pages for variant rows offer the same snapshot and live README
+refetch URL as the root instead of a copy frozen at creation time. The root's
 `display_name` and every variant's is the APK's `application-label`;
 when a root has more than one label the label is qualified as
 `label (root list name)` so the extra apps stay traceable to their list
@@ -1377,7 +1389,10 @@ the first non-null id (the DB sink registers first):
 Snake_case wire format (`main|closed_source`, `app|library|flow`,
 `apps|libraries|misc`, `github|gitlab|codeberg|fdroid|izzy|play|
 other`, `direct_apk|play_redirect|link_only|excluded`). `excluded`
-rows are never returned (detail reads them as 404). Closed-source rows
+rows are never returned (detail reads them as 404), and rows awaiting
+their first successful check (`published_at` null) are equally
+invisible: not in any list, count, category tree, change feed bucket or
+storefront page, and detail reads them as 404. Closed-source rows
 are served only when `listing` explicitly includes `closed_source`:
 the default is main-only, so closed entries stay out of every list,
 count and delta unless a client opts in. Summary/list DTOs
@@ -1456,10 +1471,10 @@ rather than persisting them.
 |---|---|
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
 | `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `readme_url`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
-| `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
-| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. Output-cached 30s, `VaryByQuery(*)`. |
+| `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded and unpublished omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
+| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded and unpublished hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. `generated_at` is captured before the response's reads and is the cursor clients must persist: a client-side clock (or a later `/v1/meta` timestamp) can pass a concurrent enrichment commit and skip the update forever. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
-| `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
+| `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (published, non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
 | `GET /metrics` | Prometheus text exposition (OpenTelemetry exporter: `# HELP`/`# TYPE` lines, `target_info`). Requires `Authorization: Bearer <token>` (`Metrics:Token`, `SHIZU_METRICS_TOKEN`, else the admin token) → 401 otherwise; the route is not mapped without a token. The scrape itself does not count in HTTP metrics; no rate limit, no cache. |
 | `GET /` | 302 to the project repo (`https://github.com/timschneeb/ShizuStore`); the bare host is a browser entry point, not part of the API. No rate limit, no cache. |
@@ -1475,7 +1490,7 @@ rather than persisting them.
 | `GET /v1/admin/usage-analysis/status` | Same token rules. Queue counts per status, runs started today, month-to-date cost, budget and the ten most recent failures. |
 | `GET /v1/admin/usage-analysis/stats?days=30` | Same token rules. Token and cost totals per day and per model for finished runs. |
 | `DELETE /v1/admin/usage-analysis/pending` | Same token rules. Deletes pending queue rows (running rows are untouched). |
-| `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown or `excluded` slugs → 404. In the same transaction it upserts the `app_install_days` row for the server's current UTC day (`app_id` + `day`, count +1), plus an `app_version_install_days` row keyed on the optional JSON body `{ "versionCode": 123, "installType": "fresh\|update" }`; absent or malformed bodies and out-of-range codes fall back to `versionCode` 0 / `installType` `unknown`, and anything other than `fresh`/`update` (case-insensitive) normalizes to `unknown`, so older clients stay valid. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
+| `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown, `excluded` or unpublished slugs → 404. In the same transaction it upserts the `app_install_days` row for the server's current UTC day (`app_id` + `day`, count +1), plus an `app_version_install_days` row keyed on the optional JSON body `{ "versionCode": 123, "installType": "fresh\|update" }`; absent or malformed bodies and out-of-range codes fall back to `versionCode` 0 / `installType` `unknown`, and anything other than `fresh`/`update` (case-insensitive) normalizes to `unknown`, so older clients stay valid. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).
 Caching: server-side output cache per the table above. Dynamic GET
@@ -1587,6 +1602,12 @@ all environments; Scalar UI is development-only.
   always re-analyzes.
 - Tombstone closure: every stale-delete path must write, every
   re-add path must clear, or `/v1/changes removed[]` drifts.
+- Publish gate and cursor: unpublished rows (`published_at` null) are
+  hidden from every public read path, and a successful first check
+  stamps `published_at` plus `updated_at` in the same save so the feed
+  ships them. `/v1/changes` `generated_at` is captured before its reads
+  and is the only safe client cursor; never hand out a timestamp that is
+  later than the response's snapshot.
 - The sync worker scope makes no app mutations after the upsert
   save (final pass-scope save = requests + issues only; the
   `job_runs`/`job_events` bookkeeping is written by the job-log sinks

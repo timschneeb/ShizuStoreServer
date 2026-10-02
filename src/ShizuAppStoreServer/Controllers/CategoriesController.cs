@@ -43,7 +43,9 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
             .ThenBy(c => c.Id)
             .ToList();
         var counts = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded && listings.Contains(a.Listing))
+            .Where(a => a.Availability != Availability.Excluded
+                && a.PublishedAt != null
+                && listings.Contains(a.Listing))
             .GroupBy(a => a.CategoryId)
             .Select(g => new { CategoryId = g.Key, Count = g.Count() })
             .ToListAsync(ct);
@@ -85,6 +87,7 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
 
         var roots = categories.Where(c => !c.ParentId.HasValue).Select(Build).ToList();
         var maxUpdated = (await db.Apps.AsNoTracking()
+            .Where(a => a.PublishedAt != null)
             .Select(a => (DateTimeOffset?)a.UpdatedAt)
             .ToListAsync(ct)).Max();
         

@@ -66,6 +66,14 @@ public sealed class App
     public string? ExcludedReason { get; set; }
 
     /// <summary>
+    /// When the row first passed an enrichment check without failing. Null
+    /// while the entry still awaits its first successful check; every public
+    /// read path hides unpublished rows so clients never see an entry
+    /// without icon, description and availability.
+    /// </summary>
+    public DateTimeOffset? PublishedAt { get; set; }
+
+    /// <summary>
     /// Operator override for the Shizuku permission gate: keep an app whose
     /// served APK does not declare the Shizuku permission. Never touched by
     /// the upserter, set via admin tooling.

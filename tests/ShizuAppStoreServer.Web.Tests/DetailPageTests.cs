@@ -452,10 +452,11 @@ public sealed class DetailPageTests(WebAppFactory factory) : IClassFixture<WebAp
             var excluded = Seeds.App(1, "gone", "Gone", 1);
             excluded.Availability = Availability.Excluded;
             db.Add(excluded);
+            db.Add(Seeds.App(2, "wip", "Wip", 1, published: false));
         });
 
         var client = factory.NewClient();
-        foreach (var slug in new[] { "missing", "gone" })
+        foreach (var slug in new[] { "missing", "gone", "wip" })
         {
             var response = await client.GetAsync($"/apps/{slug}");
             var html = await response.Content.ReadAsStringAsync();

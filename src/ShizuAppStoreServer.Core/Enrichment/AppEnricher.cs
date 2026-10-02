@@ -226,6 +226,17 @@ public sealed class AppEnricher(
 
             if (result.Outcome != EnrichOutcome.Failed)
             {
+                if (app.PublishedAt is null)
+                {
+                    // Unpublished rows are hidden from every read path. By here
+                    // a successful check has given the row an icon and an
+                    // availability, so publish it; the UpdatedAt stamp guarantees
+                    // the changes feed ships it even when no summary-visible
+                    // column moved.
+                    app.PublishedAt = now;
+                    app.UpdatedAt = now;
+                }
+
                 await StampVariantGroupAsync(app, now, ct);
             }
 
@@ -270,6 +281,14 @@ public sealed class AppEnricher(
         {
             variant.LastCheckedAt = now;
             variant.LastError = null;
+            // Variants share the root's serve surface: one created while the
+            // root was still unpublished (or by code older than the publish
+            // gate) must not stay hidden after the root publishes.
+            if (root.PublishedAt is { } publishedAt && variant.PublishedAt is null)
+            {
+                variant.PublishedAt = publishedAt;
+            }
+
             // Variants never run their own EnrichAsync, so they only inherit
             // the root's README snapshot and raw URL at creation. Mirror them
             // each pass or rows created before the route existed keep serving

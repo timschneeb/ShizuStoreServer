@@ -29,6 +29,7 @@ public sealed class AppsPageTests(WebAppFactory factory) : IClassFixture<WebAppF
             db.Add(Seeds.Download(2, "https://example.com/bar.apk"));
 
             db.Add(Seeds.App(3, "baz", "Baz", 1));
+            db.Add(Seeds.App(4, "wip", "Wip", 1, published: false));
         });
 
         var client = factory.NewClient();
@@ -37,6 +38,9 @@ public sealed class AppsPageTests(WebAppFactory factory) : IClassFixture<WebAppF
         Assert.Contains("Foo", all);
         Assert.Contains("Bar", all);
         Assert.Contains("Baz", all);
+        // Rows awaiting their first successful check are not listed.
+        Assert.DoesNotContain("Wip", all);
+        Assert.DoesNotContain("href=\"/apps/wip\"", all);
         Assert.Contains("href=\"/apps/foo\"", all);
         Assert.Contains(">IAP<", all);
         Assert.Contains(">Paid<", all);

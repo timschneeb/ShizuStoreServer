@@ -27,7 +27,7 @@ public sealed class MetaController(ShizuDbContext db) : ControllerBase
             .FirstOrDefaultAsync(ct);
 
         var appCount = await db.Apps.AsNoTracking()
-            .CountAsync(a => a.Availability != Availability.Excluded, ct);
+            .CountAsync(a => a.Availability != Availability.Excluded && a.PublishedAt != null, ct);
         var categoryCount = await db.Categories.AsNoTracking().CountAsync(ct);
 
         // Single PK lookup; the endpoint is output-cached, and a live read

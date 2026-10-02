@@ -944,6 +944,8 @@ public sealed class SyncServiceTests : IDisposable
             if (app is not null)
             {
                 app.LastCheckedAt = now;
+                // Mirror the real enricher: a successful check publishes the row.
+                app.PublishedAt ??= now;
                 db.SaveChanges();
             }
 

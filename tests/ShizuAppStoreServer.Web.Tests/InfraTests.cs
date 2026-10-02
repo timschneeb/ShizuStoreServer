@@ -143,6 +143,7 @@ public sealed class InfraTests(WebAppFactory factory) : IClassFixture<WebAppFact
             var gone = Seeds.App(2, "gone", "Gone", 1);
             gone.Availability = Availability.Excluded;
             db.Add(gone);
+            db.Add(Seeds.App(3, "wip", "Wip", 1, published: false));
         });
 
         var response = await factory.NewClient().GetAsync("/sitemap.xml");
@@ -153,6 +154,7 @@ public sealed class InfraTests(WebAppFactory factory) : IClassFixture<WebAppFact
         Assert.Contains("<loc>https://shizustore.com/apps/foo</loc>", xml);
         Assert.Contains("<lastmod>2026-02-01</lastmod>", xml);
         Assert.DoesNotContain("gone", xml);
+        Assert.DoesNotContain("wip", xml);
         Assert.Contains("max-age=3600", response.Headers.CacheControl?.ToString());
     }
 
