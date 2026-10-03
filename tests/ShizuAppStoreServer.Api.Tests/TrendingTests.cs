@@ -101,7 +101,6 @@ public sealed class TrendingTests(ShizuApiFactory factory) : IClassFixture<Shizu
     public async Task HistoryZeroFillsInstallsAndCarriesStars()
     {
         var today = Today;
-        var windowStart = today.AddDays(-6);
         await factory.ResetAsync(db =>
         {
             var (micup, _, _, _) = SeedDirectory(db);
@@ -115,14 +114,40 @@ public sealed class TrendingTests(ShizuApiFactory factory) : IClassFixture<Shizu
         var history = await GetAsync<AppHistoryDto>("/v1/apps/micup/history?days=7");
 
         Assert.Equal("micup", history.Slug);
+
+        // Only days from the first recorded install onward: the four days
+        // before it are not padded out.
+        Assert.Equal(3, history.Installs.Count);
+        Assert.Equal(Day(today.AddDays(-2)), history.Installs[0].Day);
+        Assert.Equal(Day(today), history.Installs[^1].Day);
+        Assert.Equal(4, history.Installs.Single(d => d.Day == Day(today.AddDays(-2))).Count);
+        Assert.Equal(2, history.Installs.Count(d => d.Count == 0));
+
+        Assert.Equal(7, history.Stars.Count);
+        Assert.Equal([7, 7, 7, 7, 9, 9, 9], history.Stars.Select(s => s.Stars));
+    }
+
+    [Fact]
+    public async Task HistoryKeepsWholeWindowWhenFirstInstallPredatesIt()
+    {
+        var today = Today;
+        var windowStart = today.AddDays(-6);
+        await factory.ResetAsync(db =>
+        {
+            var (micup, _, _, _) = SeedDirectory(db);
+            db.AppInstallDays.AddRange(
+                new AppInstallDay { App = micup, Day = today.AddDays(-30), InstallCount = 2 },
+                new AppInstallDay { App = micup, Day = today.AddDays(-2), InstallCount = 4 });
+        });
+
+        var history = await GetAsync<AppHistoryDto>("/v1/apps/micup/history?days=7");
+
+        // A pre-window first row means the whole window is real data.
         Assert.Equal(7, history.Installs.Count);
         Assert.Equal(Day(windowStart), history.Installs[0].Day);
         Assert.Equal(Day(today), history.Installs[^1].Day);
         Assert.Equal(4, history.Installs.Single(d => d.Day == Day(today.AddDays(-2))).Count);
         Assert.Equal(6, history.Installs.Count(d => d.Count == 0));
-
-        Assert.Equal(7, history.Stars.Count);
-        Assert.Equal([7, 7, 7, 7, 9, 9, 9], history.Stars.Select(s => s.Stars));
     }
 
     [Fact]
@@ -137,9 +162,9 @@ public sealed class TrendingTests(ShizuApiFactory factory) : IClassFixture<Shizu
 
         var history = await GetAsync<AppHistoryDto>("/v1/apps/micup/history?days=7");
 
-        // Installs still cover the whole window with zeros.
-        Assert.Equal(7, history.Installs.Count);
-        Assert.All(history.Installs, d => Assert.Equal(0, d.Count));
+        // No install was ever recorded, so the series stays empty instead
+        // of padding the window with zeros.
+        Assert.Empty(history.Installs);
 
         // Stars start at the first known snapshot instead of inventing values.
         Assert.Equal(2, history.Stars.Count);

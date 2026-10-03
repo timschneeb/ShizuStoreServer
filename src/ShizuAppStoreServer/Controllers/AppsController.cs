@@ -293,9 +293,12 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
 
     /// <summary>
     /// Daily install counts and star snapshots for the detail sparkline.
-    /// Installs are zero-filled across the whole window; stars carry the
-    /// newest known snapshot forward and, when the app had no snapshot
-    /// before the window, start at its first in-window snapshot instead.
+    /// Installs start at the app's first recorded day instead of the full
+    /// window, so days before we could know anything are never padded out;
+    /// they are zero-filled from there to today and the list stays empty
+    /// when the app never recorded an install. Stars carry the newest known
+    /// snapshot forward and, when the app had no snapshot before the window,
+    /// start at its first in-window snapshot instead.
     /// <c>excluded</c> rows read as 404.
     /// </summary>
     [HttpGet("{slug}/history")]
@@ -332,10 +335,28 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
             .Select(d => new { d.Day, d.InstallCount })
             .ToListAsync(ct);
         var installsByDay = installRows.ToDictionary(d => d.Day, d => d.InstallCount);
-        var installs = new List<InstallDayDto>(days);
-        for (var day = windowStart; day <= today; day = day.AddDays(1))
+
+        // Trailing zeros are a measured "no installs"; leading ones before
+        // the first recorded day would be invented, so the series starts
+        // there and stays empty for apps that never recorded an install.
+        var firstRecorded = await db.AppInstallDays.AsNoTracking()
+            .Where(d => d.AppId == app.Id)
+            .OrderBy(d => d.Day)
+            .Select(d => (DateOnly?)d.Day)
+            .FirstOrDefaultAsync(ct);
+        var seriesStart = firstRecorded switch
         {
-            installs.Add(new InstallDayDto(dayFormat(day), installsByDay.GetValueOrDefault(day)));
+            null => (DateOnly?)null, // never recorded an install: nothing to show
+            { } first when first > windowStart => first,
+            _ => windowStart,
+        };
+        var installs = new List<InstallDayDto>(days);
+        if (seriesStart is { } start)
+        {
+            for (var day = start; day <= today; day = day.AddDays(1))
+            {
+                installs.Add(new InstallDayDto(dayFormat(day), installsByDay.GetValueOrDefault(day)));
+            }
         }
 
         // Two bounded reads instead of the full history: the last pre-window
