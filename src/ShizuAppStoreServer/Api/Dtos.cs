@@ -234,6 +234,39 @@ public sealed record ScreenshotRefreshStatusDto(
 /// <summary>Result of <c>POST /v1/apps/{slug}/installs</c>: the new total.</summary>
 public sealed record InstallRecordedDto(string Slug, long InstallCount);
 
+/// <summary>One app's window totals in <c>GET /v1/trending</c>.</summary>
+public sealed record TrendingItemDto(
+    string Slug,
+    long Installs,
+    long PreviousInstalls,
+    long Delta);
+
+/// <summary>
+/// Ranked install windows for the client's home trending row. <c>Items</c>
+/// orders by <c>Installs</c> (default) or <c>Delta</c> (fastest growing).
+/// </summary>
+public sealed record TrendingDto(
+    DateTimeOffset GeneratedAt,
+    int WindowDays,
+    string Sort,
+    IReadOnlyList<TrendingItemDto> Items);
+
+/// <summary>One zero-filled install bucket from <c>GET /v1/apps/{slug}/history</c>.</summary>
+public sealed record InstallDayDto(string Day, long Count);
+
+/// <summary>One carry-forward star snapshot from <c>GET /v1/apps/{slug}/history</c>.</summary>
+public sealed record StarDayDto(string Day, int Stars);
+
+/// <summary>
+/// Daily install counts and star snapshots for the detail sparkline; install
+/// days cover every day of the window, star days only days with a known value.
+/// </summary>
+public sealed record AppHistoryDto(
+    string Slug,
+    DateTimeOffset GeneratedAt,
+    IReadOnlyList<InstallDayDto> Installs,
+    IReadOnlyList<StarDayDto> Stars);
+
 /// <summary>Optional body for <c>POST /v1/admin/usage-analysis/queue</c>.</summary>
 public sealed record UsageAnalysisQueueRequestDto(
     bool OnlyMissing = true,

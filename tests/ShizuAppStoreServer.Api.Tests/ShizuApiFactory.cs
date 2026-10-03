@@ -124,6 +124,8 @@ public class ShizuApiFactory : WebApplicationFactory<Program>
                 o.AddPolicy("changes", NoOutputCachePolicy.Instance);
                 o.AddPolicy("issues", NoOutputCachePolicy.Instance);
                 o.AddPolicy("meta", NoOutputCachePolicy.Instance);
+                o.AddPolicy("trending", NoOutputCachePolicy.Instance);
+                o.AddPolicy("app-history", NoOutputCachePolicy.Instance);
             });
 
             // Scrapes in a suite arrive back to back; the exporter's response

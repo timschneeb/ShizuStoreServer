@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using ShizuAppStoreServer.Core.Data;
@@ -11,9 +12,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Core.Migrations
 {
     [DbContext(typeof(ShizuDbContext))]
-    partial class ShizuDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261003210337_AddAppCommitWeeks")]
+    partial class AddAppCommitWeeks
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -334,6 +337,25 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.HasIndex("Url");
 
                     b.ToTable("apps", (string)null);
+                });
+
+            modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppCommitWeek", b =>
+                {
+                    b.Property<long>("AppId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("app_id");
+
+                    b.Property<DateOnly>("WeekStart")
+                        .HasColumnType("date")
+                        .HasColumnName("week_start");
+
+                    b.Property<int>("Commits")
+                        .HasColumnType("integer")
+                        .HasColumnName("commits");
+
+                    b.HasKey("AppId", "WeekStart");
+
+                    b.ToTable("app_commit_weeks", (string)null);
                 });
 
             modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppDownload", b =>
@@ -1466,6 +1488,17 @@ namespace ShizuAppStoreServer.Core.Migrations
                     b.Navigation("Parent");
 
                     b.Navigation("Root");
+                });
+
+            modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppCommitWeek", b =>
+                {
+                    b.HasOne("ShizuAppStoreServer.Core.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
                 });
 
             modelBuilder.Entity("ShizuAppStoreServer.Core.Data.AppDownload", b =>

@@ -1162,8 +1162,9 @@ public sealed class AppEnricherTests : IDisposable
 
         Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
         Assert.Equal(EnrichOutcome.SkippedFresh, (await enricher.EnrichAsync(app, T0)).Outcome);
-        // First pass: releases + repo stats + readme. The fresh second pass
-        // must add nothing.
+        // First pass: releases + repo stats + readme. The star feed stays
+        // unread because the stats stub never yields a star count. The fresh
+        // second pass must add nothing.
         Assert.Equal(3, github.Calls);
     }
 
@@ -1737,7 +1738,9 @@ public sealed class AppEnricherTests : IDisposable
 
         // Immediate retry is skipped (backoff); after the window it retries.
         Assert.Equal(EnrichOutcome.SkippedFresh, (await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0)).Outcome);
-        // Releases plus the best-effort stats call, which also 404s here.
+        // Releases plus the best-effort stats call, both 404 here; star
+        // history is skipped because no star count ever arrived to anchor
+        // its levels on.
         Assert.Equal(2, github.Calls);
     }
 

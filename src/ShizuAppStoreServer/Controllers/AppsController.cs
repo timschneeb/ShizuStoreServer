@@ -292,6 +292,92 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
     }
 
     /// <summary>
+    /// Daily install counts and star snapshots for the detail sparkline.
+    /// Installs are zero-filled across the whole window; stars carry the
+    /// newest known snapshot forward and, when the app had no snapshot
+    /// before the window, start at its first in-window snapshot instead.
+    /// <c>excluded</c> rows read as 404.
+    /// </summary>
+    [HttpGet("{slug}/history")]
+    [OutputCache(PolicyName = "app-history")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+    [ProducesResponseType<AppHistoryDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<AppHistoryDto>> History(
+        string slug,
+        [FromQuery] int days = 30,
+        CancellationToken ct = default)
+    {
+        if (days is < 1 or > 365)
+        {
+            return Problem("days must be between 1 and 365.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var app = await db.Apps.AsNoTracking()
+            .Where(a => a.Slug == slug && a.Availability != Availability.Excluded && a.PublishedAt != null)
+            .Select(a => new { a.Id })
+            .FirstOrDefaultAsync(ct);
+        if (app is null)
+        {
+            return NotFound();
+        }
+
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var windowStart = today.AddDays(-(days - 1));
+        var dayFormat = static (DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        var installRows = await db.AppInstallDays.AsNoTracking()
+            .Where(d => d.AppId == app.Id && d.Day >= windowStart && d.Day <= today)
+            .Select(d => new { d.Day, d.InstallCount })
+            .ToListAsync(ct);
+        var installsByDay = installRows.ToDictionary(d => d.Day, d => d.InstallCount);
+        var installs = new List<InstallDayDto>(days);
+        for (var day = windowStart; day <= today; day = day.AddDays(1))
+        {
+            installs.Add(new InstallDayDto(dayFormat(day), installsByDay.GetValueOrDefault(day)));
+        }
+
+        // Two bounded reads instead of the full history: the last pre-window
+        // snapshot seeds the carry-in, the window rows fill day by day.
+        var baseRow = await db.AppStarDays.AsNoTracking()
+            .Where(d => d.AppId == app.Id && d.Day < windowStart)
+            .OrderByDescending(d => d.Day)
+            .Select(d => new { d.Day, d.Stars })
+            .FirstOrDefaultAsync(ct);
+        var starRows = await db.AppStarDays.AsNoTracking()
+            .Where(d => d.AppId == app.Id && d.Day >= windowStart && d.Day <= today)
+            .OrderBy(d => d.Day)
+            .Select(d => new { d.Day, d.Stars })
+            .ToListAsync(ct);
+
+        var stars = new List<StarDayDto>(starRows.Count + 1);
+        var pointerDay = baseRow?.Day ?? DateOnly.MaxValue;
+        var pointerStars = baseRow?.Stars ?? 0;
+        var starIndex = 0;
+        for (var day = windowStart; day <= today; day = day.AddDays(1))
+        {
+            while (starIndex < starRows.Count && starRows[starIndex].Day <= day)
+            {
+                pointerDay = starRows[starIndex].Day;
+                pointerStars = starRows[starIndex].Stars;
+                starIndex++;
+            }
+
+            if (pointerDay > day)
+            {
+                // No snapshot exists yet on this day (first-ever one lands
+                // mid-window); omit leading days rather than invent values.
+                continue;
+            }
+
+            stars.Add(new StarDayDto(dayFormat(day), pointerStars));
+        }
+
+        return Ok(new AppHistoryDto(slug, DateTimeOffset.UtcNow, installs, stars));
+    }
+
+    /// <summary>
     /// Optional JSON body of an install report. Anything unparseable or out of
     /// range degrades to 0/unknown instead of failing the install count.
     /// </summary>

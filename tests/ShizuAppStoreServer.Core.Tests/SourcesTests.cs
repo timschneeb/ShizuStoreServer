@@ -390,6 +390,107 @@ public sealed class SourcesTests
         Assert.Null(await Client(stub).GetRepoStatsAsync("o", "r"));
     }
 
+    /// <summary>Star-history page as GitHub serves it: newest week first.</summary>
+    private static string StarHistoryJson(
+        int count, int startWeeksAgo = 0, int totalBase = 100, bool includeDays = true)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var entries = new JsonArray();
+        for (var i = 0; i < count; i++)
+        {
+            var entry = new JsonObject
+            {
+                ["week"] = now.AddDays(-7 * (startWeeksAgo + i)).ToUnixTimeSeconds(),
+                ["total"] = totalBase - startWeeksAgo - i,
+            };
+
+            if (includeDays)
+            {
+                // Sunday-first daily gains that sum to the week's total.
+                entry["days"] = new JsonArray(1, 2, 3, 4, 5, 6, 7);
+            }
+
+            entries.Add(entry);
+        }
+
+        return entries.ToJsonString();
+    }
+
+    [Fact]
+    public async Task StarHistoryPagesNewestFirstUntilLookbackCovered()
+    {
+        var stub = new StubHandler(request =>
+        {
+            // Page 1 covers 210 days (inside the lookback), page 2 reaches
+            // 420 days, so the client must stop without requesting page 3.
+            var page2 = request.RequestUri!.Query.Contains("page=2");
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    StarHistoryJson(30, startWeeksAgo: page2 ? 30 : 0)),
+            };
+        });
+
+        var weeks = await Client(stub).GetStarHistoryAsync("o", "r", 365);
+
+        Assert.NotNull(weeks);
+        Assert.Equal(60, weeks!.Count);
+        Assert.Equal(2, stub.Requests.Count);
+    }
+
+    [Fact]
+    public async Task StarHistoryStopsOnShortPage()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(StarHistoryJson(5)),
+        });
+
+        var weeks = await Client(stub).GetStarHistoryAsync("o", "r", 365);
+
+        Assert.Equal(5, weeks!.Count);
+        Assert.Single(stub.Requests);
+        Assert.Equal([1, 2, 3, 4, 5, 6, 7], weeks[0].Days);
+    }
+
+    [Fact]
+    public async Task StarHistoryDaysOptionalWhenFeedOmitsThem()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(StarHistoryJson(2, includeDays: false)),
+        });
+
+        var weeks = await Client(stub).GetStarHistoryAsync("o", "r", 365);
+
+        Assert.Equal(2, weeks!.Count);
+        Assert.All(weeks, w => Assert.Null(w.Days));
+    }
+
+    [Fact]
+    public async Task StarHistoryFailsSoftToNull()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.Forbidden));
+        Assert.Null(await Client(stub).GetStarHistoryAsync("o", "r", 365));
+    }
+
+    [Fact]
+    public async Task StarHistoryHonoursPageCap()
+    {
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(StarHistoryJson(30)),
+        });
+
+        // Page 1 is full and its oldest week is inside the lookback, so an
+        // uncapped walk would request page 2; the cap must stop it.
+        var weeks = await Client(stub).GetStarHistoryAsync("o", "r", 365, maxPages: 1);
+
+        Assert.Equal(30, weeks!.Count);
+        Assert.Single(stub.Requests);
+    }
+
+
     [Fact]
     public async Task ReadsReadmeMarkdown()
     {

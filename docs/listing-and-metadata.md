@@ -31,6 +31,15 @@ project whose package conflicts with a maintained app). Hiding keeps the
 entry's install statistics and can be lifted again later; it is independent
 of the list.
 
+Client install reports and the metadata refresh feed per-day statistics: a
+daily star snapshot is recorded on every enrichment pass, GitHub apps also
+get up to a year of daily star levels backfilled from the repository's
+per-day stargazer history (re-read incrementally once coverage is complete),
+and installs are counted per UTC day. The clients show them as the home
+"Trending this week" row and an install/star activity sparkline on the app
+detail screen. The install history starts at the first report after the
+feature launched, so early windows can be partial.
+
 ## How the server finds releases
 
 Source selection: an entry can end up with

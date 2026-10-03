@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
 using ShizuAppStoreServer.Core.Sync;
@@ -30,6 +31,21 @@ public sealed class EnrichmentRunner(IServiceScopeFactory scopes) : IEnrichmentR
 
             var result = await provider.GetRequiredService<AppEnricher>().EnrichAsync(app, now, ct, force);
             await db.SaveChangesAsync(ct);
+            if (app.Stars is { } stars)
+            {
+                // One point per day: every enrichment pass (up to each fast
+                // loop) refreshes today's snapshot, so a nightly recheck
+                // yields a daily series without extra queries elsewhere.
+                // ON CONFLICT covers Postgres and the SQLite test provider.
+                var day = DateOnly.FromDateTime(now.UtcDateTime);
+                await db.Database.ExecuteSqlInterpolatedAsync($"""
+                    INSERT INTO app_star_days (app_id, day, stars)
+                    VALUES ({app.Id}, {day}, {stars})
+                    ON CONFLICT (app_id, day)
+                    DO UPDATE SET stars = excluded.stars
+                    """, ct);
+            }
+
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

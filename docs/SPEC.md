@@ -82,8 +82,10 @@ the request). `UserAgentTrackingWorker` flushes the buffer into
 logged and never kill the host. DB-only: no endpoint exposes these tables.
 The separate `ShizuAppStoreStats` app reads both tables read-only for its HTML
 dashboard, and the same app also reads `app_install_days`,
-`app_version_install_days` and `apps.install_count`; the API surface is
-unchanged.
+`app_version_install_days` and `apps.install_count`. The public API also
+serves aggregated install-day windows (`GET /v1/trending`) and per-app
+install/star history (`GET /v1/apps/{slug}/history`); the granular
+`app_version_install_days` rows stay SQL-only.
 
 Non-client traffic: `NonClientRequestLoggingMiddleware` sits next to the UA
 middleware (after response compression, before `UseOutputCache`) and records
@@ -353,7 +355,8 @@ bundle` is rebuilt per deploy, never committed.
   a multi-ABI release applies one version code once per ABI within a
   single pass, and a duplicate insert would violate
   `IX_app_versions_app_id_version_code` and roll back the whole
-  enrich.
+  enrich. The UTC day each row was first detected feeds the stats
+  dashboard; no endpoint exposes it.
 - **job_runs** - one row per job run of any kind: `kind`
   (`Sync|IconRefresh|ScreenshotRefresh|UsageAnalysis`), `trigger`
   (`Startup|Scheduled|Nightly|Webhook|Manual|Cli|Backfill|Auto`),
@@ -434,8 +437,9 @@ bundle` is rebuilt per deploy, never committed.
   `(app_id, day)` (FK to `apps`, cascade delete), `install_count`.
   Upserted by `POST /v1/apps/{slug}/installs` in the same transaction
   as the total counter; rejected (unknown or `excluded`) reports write
-  nothing. The day comes from the server's UTC clock. Read with SQL; no
-  endpoint.
+  nothing. The day comes from the server's UTC clock. Aggregated by
+  `GET /v1/trending` and `GET /v1/apps/{slug}/history`; the stats
+  dashboard also reads it with SQL.
 - **app_version_install_days** - per-app per-version per-type install
   counts: PK `(app_id, version_code, install_type, day)` (FK to `apps`,
   cascade delete), `install_count`. `version_code` 0 and `install_type`
@@ -443,6 +447,26 @@ bundle` is rebuilt per deploy, never committed.
   `fresh` and `update` are the accepted report types. Upserted by
   `POST /v1/apps/{slug}/installs` in the same transaction as
   `app_install_days`. Read with SQL; no endpoint.
+- **app_star_days** - per-app per-UTC-day star snapshots: PK
+  `(app_id, day)` (FK to `apps`, cascade delete), `stars`. Every
+  enrichment pass that knows the app's star count upserts today's row
+  (`EnrichmentRunner`, so the nightly recheck keeps one point per day
+  and later passes overwrite the same day with the latest value).
+  On GitHub apps the enrichment hook additionally backfills up to a
+  year of daily rows from `stargazers/history`. That feed reports the
+  stars GAINED each week with a per-day breakdown (its totals sum to
+  the repo's stargazer count), so the enricher expands the breakdown to
+  days and walks backward from today's level (`apps.stars`) down to the
+  oldest fetched week, subtracting each day's gain and clamping at 0;
+  gap weeks gain nothing and a missing star count skips the feed
+  entirely. The refetch is incremental: coverage that already reaches
+  the 365-day window without holes and has a today row at the live star
+  count reads nothing; anything else reads only the newest 30-week page
+  and rewrites just a few days behind the newest row, while missing,
+  holed or short-window coverage gets the full multi-page rewrite that
+  also repairs old rows. Exposed
+  through `GET /v1/apps/{slug}/history` next to the install
+  series; the stats dashboard reads it with SQL.
 - **request_logs** - append-only log of non-client requests (see §2):
   `seen_at` (indexed), the request line (`method`, `path`,
   `query_string`, `raw_target`, `protocol`, `scheme`, `host`), the
@@ -1521,6 +1545,8 @@ rather than persisting them.
 | `GET /v1/admin/usage-analysis/stats?days=30` | Same token rules. Token and cost totals per day and per model for finished runs. |
 | `DELETE /v1/admin/usage-analysis/pending` | Same token rules. Deletes pending queue rows (running rows are untouched). |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown, `excluded` or unpublished slugs → 404. In the same transaction it upserts the `app_install_days` row for the server's current UTC day (`app_id` + `day`, count +1), plus an `app_version_install_days` row keyed on the optional JSON body `{ "versionCode": 123, "installType": "fresh\|update" }`; absent or malformed bodies and out-of-range codes fall back to `versionCode` 0 / `installType` `unknown`, and anything other than `fresh`/`update` (case-insensitive) normalizes to `unknown`, so older clients stay valid. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
+| `GET /v1/trending` | Ranks published, non-excluded apps by install activity. `days` clamped 1–90 (default 7) is the current window ending today (UTC); `limit` clamped 1–100 (default 20); `sort` ∈ `installs\|growth` (default `installs`), anything else → 400. `installs` orders by the window total; `growth` orders by `delta` (window total minus the previous equal-length window, i.e. fastest growing). Items carry `slug`, `installs`, `previousInstalls`, `delta`; rows with zero installs in the window are omitted, ties break by slug. Ranking runs in memory (same provider constraint as `GET /v1/apps`). Output-cached 10min, `VaryByQuery(*)`. |
+| `GET /v1/apps/{slug}/history` | Per-day series for the app detail screen. `days` clamped 1–365 (default 30), window ends today (UTC); out-of-range → 400. Unknown, `excluded` or unpublished slugs → 404. `installs[]` covers every day of the window (`day` as `yyyy-MM-dd`, `count`, zero-filled). `stars[]` carries the last known snapshot across the window and starts at the first-ever `app_star_days` row: days before the first snapshot are omitted rather than invented, and the list is empty when the app never had one (GitHub apps get backfilled daily level points from their first enrichment onward). Output-cached 5min, `VaryByQuery(*)`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).
 Caching: server-side output cache per the table above. Dynamic GET

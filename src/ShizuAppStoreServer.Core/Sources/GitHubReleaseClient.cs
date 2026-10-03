@@ -20,6 +20,13 @@ public sealed record GitHubRepoStats(
     string? OwnerLogin,
     string? OwnerUrl);
 
+/// <summary>
+/// One Sunday week of stars GAINED from the stargazers/history feed; the
+/// totals sum to the repo's stargazer count. Days holds the per-day gains
+/// Sunday-first (empty when the feed omits the breakdown).
+/// </summary>
+public sealed record GitHubStarWeek(DateOnly WeekStart, int Total, IReadOnlyList<int>? Days = null);
+
 public interface IGitHubReleaseClient : IAppSource
 {
     /// <summary>
@@ -30,6 +37,20 @@ public interface IGitHubReleaseClient : IAppSource
     /// </summary>
     Task<GitHubRepoStats?> GetRepoStatsAsync(string owner, string repo, CancellationToken ct = default) =>
         Task.FromResult<GitHubRepoStats?>(null);
+
+    /// <summary>
+    /// Weekly star gains (stars earned that week, not a running total) via
+    /// <c>GET /repos/{owner}/{repo}/stargazers/history</c>
+    /// (the feed behind GitHub's stargazers page), walking pages newest-first
+    /// until the lookback is covered or <c>maxPages</c> pages were read (a
+    /// caller refreshing only the newest weeks passes 1). Each week carries
+    /// the per-day breakdown so callers can reconstruct daily levels. Null on
+    /// any failure so a backfill gap never fails an enrich; the daily snapshot
+    /// writer still records progress. Default impl keeps test doubles simple.
+    /// </summary>
+    Task<IReadOnlyList<GitHubStarWeek>?> GetStarHistoryAsync(
+        string owner, string repo, int lookbackDays, int maxPages = int.MaxValue, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<GitHubStarWeek>?>(null);
 
     /// <summary>
     /// README markdown via <c>GET /repos/{owner}/{repo}/readme</c>, plus the
@@ -97,6 +118,11 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         {
             "Jman-Github/Universal-ReVanced-Manager",
         };
+
+    // stargazers/history caps per_page at 30 and page at 100; four pages
+    // (120 weeks) is more than any lookback needs while bounding request cost.
+    private const int StarHistoryPageSize = 30;
+    private const int StarHistoryMaxPages = 4;
 
     private readonly HttpClient _http;
 
@@ -304,6 +330,100 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
                 stars,
                 ownerLogin,
                 ownerUrl);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or TaskCanceledException
+            or JsonException
+            or InvalidOperationException)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
+            return null;
+        }
+    }
+
+    public async Task<IReadOnlyList<GitHubStarWeek>?> GetStarHistoryAsync(
+        string owner, string repo, int lookbackDays, int maxPages = int.MaxValue, CancellationToken ct = default)
+    {
+        try
+        {
+            var cutoff = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-lookbackDays);
+            var weeks = new List<GitHubStarWeek>();
+
+            // The feed pages newest-first, so reaching the cutoff usually
+            // takes two pages at the 30-per-page cap; the page caps bound the
+            // worst case no matter how the feed behaves.
+            for (var page = 1; page <= StarHistoryMaxPages && page <= maxPages; page++)
+            {
+                using var request = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    $"https://api.github.com/repos/{owner}/{repo}/stargazers/history" +
+                    $"?per_page={StarHistoryPageSize}&page={page}");
+                request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+
+                using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return weeks.Count > 0 ? weeks : null;
+                }
+
+                using var document = await JsonDocument.ParseAsync(
+                    await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Array)
+                {
+                    return weeks.Count > 0 ? weeks : null;
+                }
+
+                var entries = 0;
+                foreach (var entry in root.EnumerateArray())
+                {
+                    if (entry.ValueKind != JsonValueKind.Object
+                        || !entry.TryGetProperty("week", out var weekElement)
+                        || !weekElement.TryGetInt64(out var weekSeconds)
+                        || !entry.TryGetProperty("total", out var totalElement)
+                        || !totalElement.TryGetInt32(out var total))
+                    {
+                        continue;
+                    }
+
+                    entries++;
+                    var days = new List<int>(7);
+                    if (entry.TryGetProperty("days", out var daysElement)
+                        && daysElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var day in daysElement.EnumerateArray())
+                        {
+                            if (day.TryGetInt32(out var gain))
+                            {
+                                days.Add(gain);
+                            }
+                        }
+                    }
+
+                    weeks.Add(new GitHubStarWeek(
+                        DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeSeconds(weekSeconds).UtcDateTime),
+                        total,
+                        days.Count > 0 ? days : null));
+                }
+
+                if (entries < StarHistoryPageSize)
+                {
+                    // Short page: nothing older exists.
+                    break;
+                }
+
+                var oldest = weeks.Min(w => w.WeekStart);
+                if (oldest <= cutoff)
+                {
+                    break;
+                }
+            }
+
+            return weeks.Count > 0 ? weeks : null;
         }
         catch (Exception ex) when (ex is HttpRequestException
             or TaskCanceledException

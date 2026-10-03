@@ -108,6 +108,8 @@ if (apiOptions.EnableOutputCache)
         o.AddPolicy("changes", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));
         o.AddPolicy("issues", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));
         o.AddPolicy("meta", p => p.Expire(TimeSpan.FromSeconds(60)));
+        o.AddPolicy("trending", p => p.Expire(TimeSpan.FromMinutes(10)).SetVaryByQuery("*"));
+        o.AddPolicy("app-history", p => p.Expire(TimeSpan.FromMinutes(5)).SetVaryByQuery("*"));
     });
 }
 
