@@ -207,6 +207,53 @@ public sealed class UsageAnalysisQueueTests : IDisposable
     }
 
     [Fact]
+    public async Task EnqueueSkipsAReleaseThatIsAlreadyAnalyzed()
+    {
+        // Same-tag flavor artifacts (phone/TV/Wear) report a changed artifact
+        // while the source revision never moved; the stored report covers it.
+        var app = NewApp("samerelease");
+        app.UsageAnalyzedAt = DateTimeOffset.UtcNow;
+        app.UsageReleaseRef = "v1.2.0";
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.False(await queue.EnqueueForAnalyzedArtifactAsync(
+            app, artifactChanged: true, firstAnalysis: false, releaseRef: "v1.2.0"));
+        Assert.False(await queue.EnqueueAsync(
+            app, artifactChanged: true, firstAnalysis: false, releaseRef: "v1.2.0"));
+        Assert.Empty(_db.UsageAnalysisRuns);
+    }
+
+    [Fact]
+    public async Task EnqueueQueuesForANewReleaseRef()
+    {
+        var app = NewApp("newrelease");
+        app.UsageAnalyzedAt = DateTimeOffset.UtcNow;
+        app.UsageReleaseRef = "v1.2.0";
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.True(await queue.EnqueueForAnalyzedArtifactAsync(
+            app, artifactChanged: true, firstAnalysis: false, releaseRef: "v1.3.0"));
+        await _db.SaveChangesAsync();
+        Assert.Single(_db.UsageAnalysisRuns);
+    }
+
+    [Fact]
+    public async Task EnqueueQueuesWhenTheReleaseRefIsUnknown()
+    {
+        var app = NewApp("unknownrelease");
+        app.UsageAnalyzedAt = DateTimeOffset.UtcNow;
+        app.UsageReleaseRef = "v1.2.0";
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.True(await queue.EnqueueAsync(app, artifactChanged: true, firstAnalysis: false));
+        await _db.SaveChangesAsync();
+        Assert.Single(_db.UsageAnalysisRuns);
+    }
+
+    [Fact]
     public async Task BackfillQueuesMissingAndSkipsParkedFailuresUnlessForced()
     {
         var missing = NewApp("missing");

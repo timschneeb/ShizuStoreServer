@@ -1073,7 +1073,11 @@ marker scanning survives only as internal context extraction.
 
 - Queue policy: a run is queued when a build is first analyzed, when a new
   APK artifact appears, or through the admin backfill. Routine fast and
-  nightly passes never re-analyze an unchanged app. The artifact hook runs
+  nightly passes never re-analyze an unchanged app. A new artifact queues
+  only when its forge release differs from the release of the stored report:
+  a release ships one report even when it carries several same-package
+  flavor artifacts (phone/TV/Wear), whose checksums differ while the source
+  revision is the same. The artifact hook runs
   while the row may still read `LinkOnly` (the same save flips it to
   `DirectApk`), so it requires only an analyzable repo and leaves the
   availability gate to the general policy. Only `DirectApk` rows

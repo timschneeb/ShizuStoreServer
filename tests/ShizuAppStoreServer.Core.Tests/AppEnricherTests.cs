@@ -291,17 +291,18 @@ public sealed class AppEnricherTests : IDisposable
 
     private sealed class FakeUsageQueue : IUsageAnalysisQueue
     {
-        public List<(long AppId, bool ArtifactChanged, bool FirstAnalysis)> Calls { get; } = [];
+        public List<(long AppId, bool ArtifactChanged, bool FirstAnalysis, string? ReleaseRef)> Calls { get; } = [];
 
-        public Task<bool> EnqueueAsync(App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default)
+        public Task<bool> EnqueueAsync(
+            App app, bool artifactChanged, bool firstAnalysis, string? releaseRef = null, CancellationToken ct = default)
         {
-            Calls.Add((app.Id, artifactChanged, firstAnalysis));
+            Calls.Add((app.Id, artifactChanged, firstAnalysis, releaseRef));
             return Task.FromResult(true);
         }
 
         public Task<bool> EnqueueForAnalyzedArtifactAsync(
-            App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default) =>
-            EnqueueAsync(app, artifactChanged, firstAnalysis, ct);
+            App app, bool artifactChanged, bool firstAnalysis, string? releaseRef = null, CancellationToken ct = default) =>
+            EnqueueAsync(app, artifactChanged, firstAnalysis, releaseRef, ct);
 
         public Task<int> BackfillAsync(
             bool onlyMissing, bool includeStale, bool force, string? slug, int? limit, CancellationToken ct = default) =>
@@ -943,6 +944,42 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(2, queue.Calls.Count);
         Assert.True(queue.Calls[1].ArtifactChanged);
         Assert.False(queue.Calls[1].FirstAnalysis);
+        Assert.Equal("v1.1", queue.Calls[1].ReleaseRef);
+    }
+
+    [Fact]
+    public async Task SameReleaseFlavorArtifactDoesNotQueueUsageAgain()
+    {
+        // universal-installer-style rotation: a later pass analyzes another
+        // same-package flavor artifact of a release whose report is already
+        // stored. The release tag matches, so the queue must not add a run.
+        var queue = new UsageAnalysisQueue(_db, new UsageAnalysisOptions { Enabled = true });
+        var signer = new FakeSignerRunner(_ => SignerOutputA);
+        var (first, _, _, _, _) = HappyPath(usageQueue: queue, signer: signer);
+        var app = NewApp("usagesamerelease", "UsageSameRelease", "https://github.com/example/usagesamerelease");
+        Assert.Equal(EnrichOutcome.Enriched, (await first.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        // The runner stores the analyzed release on the app; mark the queued
+        // run done so only the release dedupe is under test.
+        var run = Assert.Single(_db.UsageAnalysisRuns);
+        run.Status = UsageAnalysisStatus.Succeeded;
+        run.RepoRef = "v1.0";
+        app.UsageAnalyzedAt = T0;
+        app.UsageReleaseRef = "v1.0";
+        await _db.SaveChangesAsync();
+        Age(app);
+
+        // Different bytes under the same tag: the artifact changed, the
+        // release did not.
+        var (second, _, _, _, _) = HappyPath(
+            tag: "v1.0", versionCode: "43", iconColor: Color.Red,
+            etag: "\"rel-etag-2\"", assetUrl: "https://cdn.example/app-1.0.apk",
+            signer: signer, usageQueue: queue);
+        Assert.Equal(EnrichOutcome.Enriched, (await second.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        Assert.Single(_db.UsageAnalysisRuns);
     }
 
     [Fact]

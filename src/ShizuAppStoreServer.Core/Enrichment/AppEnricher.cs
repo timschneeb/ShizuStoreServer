@@ -946,7 +946,9 @@ public sealed class AppEnricher(
             && served is not null
             && previous.ApkUrl != served.ApkUrl)
         {
-            await usageQueue.EnqueueAsync(app, artifactChanged: true, firstAnalysis: false, ct);
+            await usageQueue.EnqueueAsync(
+                app, artifactChanged: true, firstAnalysis: false,
+                releaseRef: served.ReleaseTag ?? ReleaseTagParser.FromArtifactUrl(served.ApkUrl), ct);
         }
 
         return result;
@@ -3012,7 +3014,9 @@ public sealed class AppEnricher(
 
         if (usageQueue is not null && (apkChanged || (firstAnalysis && app.UsageAnalyzedAt is null)))
         {
-            await usageQueue.EnqueueForAnalyzedArtifactAsync(app, apkChanged, firstAnalysis, ct);
+            await usageQueue.EnqueueForAnalyzedArtifactAsync(
+                app, apkChanged, firstAnalysis,
+                candidate.ReleaseTag ?? ReleaseTagParser.FromArtifactUrl(candidate.ApkUrl), ct);
         }
     }
 

@@ -12,23 +12,30 @@ namespace ShizuAppStoreServer.Core.UsageAnalysis;
 /// enrichment passes therefore never re-analyze an unchanged app, and the
 /// initial catalog is populated through the explicit admin backfill. Root and
 /// variant app rows are analyzed on their own, so a variant release refreshes
-/// the variant report.
+/// the variant report. A changed artifact of a release whose report is
+/// already stored (same release tag) is skipped: one release ships one run
+/// even when it carries several same-package flavor artifacts.
 /// </summary>
 public interface IUsageAnalysisQueue
 {
     /// <summary>
     /// Queues a run when the app is eligible and nothing is active. Never
     /// throws for an ineligible app; returns true when a run was added.
+    /// <paramref name="releaseRef"/> is the forge release tag of the changed
+    /// artifact, when one is known.
     /// </summary>
-    Task<bool> EnqueueAsync(App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default);
+    Task<bool> EnqueueAsync(
+        App app, bool artifactChanged, bool firstAnalysis, string? releaseRef = null, CancellationToken ct = default);
 
     /// <summary>
     /// Queues a run for an artifact the enricher just analyzed. The call runs
     /// before the same save flips a fresh row from LinkOnly to DirectApk, so
     /// the availability gate cannot apply here; the repo demand still does.
+    /// <paramref name="releaseRef"/> is the forge release tag of the analyzed
+    /// artifact, when one is known.
     /// </summary>
     Task<bool> EnqueueForAnalyzedArtifactAsync(
-        App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default);
+        App app, bool artifactChanged, bool firstAnalysis, string? releaseRef = null, CancellationToken ct = default);
 
     /// <summary>
     /// Operator backfill. <paramref name="onlyMissing"/> queues only apps with
@@ -48,18 +55,18 @@ public sealed class UsageAnalysisQueue(
     private readonly HashSet<long> _queuedThisScope = [];
 
     public async Task<bool> EnqueueAsync(
-        App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default)
+        App app, bool artifactChanged, bool firstAnalysis, string? releaseRef = null, CancellationToken ct = default)
     {
         if (!options.IsConfigured || (!artifactChanged && !firstAnalysis) || !IsEligible(app))
         {
             return false;
         }
 
-        return await AddRunAsync(app, artifactChanged, firstAnalysis, ct);
+        return await AddRunAsync(app, artifactChanged, firstAnalysis, releaseRef, ct);
     }
 
     public async Task<bool> EnqueueForAnalyzedArtifactAsync(
-        App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct = default)
+        App app, bool artifactChanged, bool firstAnalysis, string? releaseRef = null, CancellationToken ct = default)
     {
         // ApplyAnalysisAsync records the download before it flips the row to
         // DirectApk, so requiring DirectApk here would silently drop every
@@ -70,11 +77,11 @@ public sealed class UsageAnalysisQueue(
             return false;
         }
 
-        return await AddRunAsync(app, artifactChanged, firstAnalysis, ct);
+        return await AddRunAsync(app, artifactChanged, firstAnalysis, releaseRef, ct);
     }
 
     private async Task<bool> AddRunAsync(
-        App app, bool artifactChanged, bool firstAnalysis, CancellationToken ct)
+        App app, bool artifactChanged, bool firstAnalysis, string? releaseRef, CancellationToken ct)
     {
         if (_queuedThisScope.Contains(app.Id))
         {
@@ -85,6 +92,18 @@ public sealed class UsageAnalysisQueue(
             r => r.AppId == app.Id && (r.Status == UsageAnalysisStatus.Pending || r.Status == UsageAnalysisStatus.Running), ct);
         if (active)
         {
+            return false;
+        }
+
+        // The stored report's release is the revision proxy available before
+        // the runner clones the repo. Same tag means the same release even
+        // when a different flavor artifact (phone/TV/Wear) triggered this
+        // call, so the queue must not spend another analysis on it.
+        var tag = releaseRef?.Trim();
+        if (!string.IsNullOrEmpty(tag)
+            && string.Equals(app.UsageReleaseRef, tag, StringComparison.Ordinal))
+        {
+            log?.LogDebug("Usage analysis for {Slug} skipped: release {Ref} already analyzed.", app.Slug, tag);
             return false;
         }
 

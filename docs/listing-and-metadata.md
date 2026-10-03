@@ -229,7 +229,9 @@ Consequences for app developers:
 - Keep release tags matching the version name (for example `v1.2.3`) so the
   analysis can be pinned to the released code instead of the branch head.
 - The report is generated once per app and then only for new releases, and it
-  is cached by repository commit, prompt generation and model. Plain English
+  is cached by repository commit, prompt generation and model. One release
+  counts as one report even when it ships several same-package flavor
+  artifacts (phone/TV/Wear builds). Plain English
   is required; raw HTML, images and external links are stripped, and only
   GitHub/GitLab links survive.
 - If the source contains no Shizuku usage, the report
