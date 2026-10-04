@@ -103,6 +103,21 @@ public sealed class UsageAnalysisRunnerTests : IDisposable
         }
     }
 
+    private sealed class FakeTagger : IUseCaseTagger
+    {
+        public int Calls;
+        public long Tokens;
+        public string? Error;
+
+        public Task<UseCaseTagOutcome> TagAsync(App app, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(Error is null
+                ? new UseCaseTagOutcome(true, false, null, Tokens, 0, 0, 1, 2, 0, false)
+                : new UseCaseTagOutcome(false, true, Error, Tokens, 0, 0, 1, 0, 0, false));
+        }
+    }
+
     private RepoSnapshot NewSnapshot()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"shizu-runner-{Guid.NewGuid():N}");
@@ -130,8 +145,9 @@ public sealed class UsageAnalysisRunnerTests : IDisposable
         4,
         2);
 
-    private UsageAnalysisRunner NewRunner(IRepoSnapshotProvider snapshots, IUsageAnalysisAgent agent) =>
-        new(_db, _options, snapshots, agent, NullLogger<UsageAnalysisRunner>.Instance);
+    private UsageAnalysisRunner NewRunner(
+        IRepoSnapshotProvider snapshots, IUsageAnalysisAgent agent, IUseCaseTagger? tagger = null) =>
+        new(_db, _options, snapshots, agent, tagger ?? new FakeTagger(), NullLogger<UsageAnalysisRunner>.Instance);
 
     [Fact]
     public async Task SuccessStoresReportAndCostAndBumpsUpdatedAt()
@@ -209,7 +225,7 @@ public sealed class UsageAnalysisRunnerTests : IDisposable
         transcript.AddMessage(new ChatMessage(ChatRole.User, "hello"), 20_000);
         var result = Report() with { Transcript = transcript };
         var runner = new UsageAnalysisRunner(
-            _db, _options, new FakeSnapshots(NewSnapshot()), new FakeAgent(result),
+            _db, _options, new FakeSnapshots(NewSnapshot()), new FakeAgent(result), new FakeTagger(),
             NullLogger<UsageAnalysisRunner>.Instance,
             new UsageAnalysisLogWriter(_options, NullLogger<UsageAnalysisLogWriter>.Instance));
 
@@ -316,6 +332,40 @@ public sealed class UsageAnalysisRunnerTests : IDisposable
         var runner = NewRunner(new FakeSnapshots(NewSnapshot()), new FakeAgent(Report()));
 
         Assert.False(await runner.RunNextAsync());
+    }
+
+    [Fact]
+    public async Task InlineTaggingRunsAfterAnalysisAndAddsItsTokens()
+    {
+        var app = NewApp("inline-tags");
+        var run = NewRun(app);
+        var tagger = new FakeTagger { Tokens = 50 };
+        var runner = NewRunner(new FakeSnapshots(NewSnapshot()), new FakeAgent(Report()), tagger);
+
+        Assert.True(await runner.RunNextAsync());
+
+        Assert.Equal(1, tagger.Calls);
+        var finished = _db.UsageAnalysisRuns.Single(r => r.Id == run.Id);
+        Assert.Equal(UsageAnalysisStatus.Succeeded, finished.Status);
+        Assert.Equal(1050, finished.InputTokens);
+    }
+
+    [Fact]
+    public async Task TaggingFailureKeepsTheReportAndQueuesARetryRun()
+    {
+        var app = NewApp("tag-retry");
+        var run = NewRun(app);
+        var tagger = new FakeTagger { Error = "classifier down" };
+        var runner = NewRunner(new FakeSnapshots(NewSnapshot()), new FakeAgent(Report()), tagger);
+
+        Assert.True(await runner.RunNextAsync());
+
+        Assert.NotNull(_db.Apps.Single(a => a.Id == app.Id).UsageShort);
+        var runs = _db.UsageAnalysisRuns.Where(r => r.AppId == app.Id).ToList();
+        Assert.Equal(2, runs.Count);
+        var retry = runs.Single(r => r.Kind == UsageAnalysisKind.Tagging);
+        Assert.Equal(UsageAnalysisStatus.Pending, retry.Status);
+        Assert.Equal(_options.TagPromptVersion, retry.PromptVersion);
     }
 
     [Fact]

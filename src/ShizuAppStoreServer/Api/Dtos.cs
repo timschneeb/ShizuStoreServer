@@ -41,7 +41,8 @@ public sealed record AppSummaryDto(
     IReadOnlyDictionary<string, string>? LocalizedLabels = null,
     bool DhizukuDeclared = false,
     IReadOnlyList<string>? Trackers = null,
-    IReadOnlyList<TrackerTagDto>? TrackerTags = null);
+    IReadOnlyList<TrackerTagDto>? TrackerTags = null,
+    IReadOnlyList<UseCaseDto>? UseCases = null);
 
 /// <summary>
 /// One installable candidate of an app, keyed by signing identity. Clients
@@ -137,12 +138,22 @@ public sealed record AppDetailDto(
     DateTimeOffset? UsageAnalyzedAt = null,
     bool DhizukuDeclared = false,
     IReadOnlyList<string>? Trackers = null,
-    IReadOnlyList<TrackerTagDto>? TrackerTags = null);
+    IReadOnlyList<TrackerTagDto>? TrackerTags = null,
+    IReadOnlyList<UseCaseDto>? UseCases = null);
 
 public sealed record CategoryPathDto(string Slug, string Name);
 
 /// <summary>One detected Exodus tracker with its category tags.</summary>
 public sealed record TrackerTagDto(string Name, IReadOnlyList<string> Tags);
+
+/// <summary>
+/// One structured Shizuku capability derived from the AI usage report
+/// (table <c>use_cases</c>). <c>Slug</c> is stable; <c>Name</c> is display text.
+/// </summary>
+public sealed record UseCaseDto(string Slug, string Name);
+
+/// <summary>One use case with the number of visible apps that carry it.</summary>
+public sealed record UseCaseCountDto(string Slug, string Name, int AppCount);
 
 public sealed record CategoryNodeDto(
     string Slug,
@@ -329,3 +340,45 @@ public sealed record UsageAnalysisModelDto(
     long InputTokens,
     long OutputTokens,
     decimal CostUsd);
+
+/// <summary>Optional body for <c>POST /v1/admin/usage-analysis/tag-backfill</c>.</summary>
+public sealed record UsageTaggingQueueRequestDto(
+    bool OnlyMissing = true,
+    bool Stale = false,
+    bool Force = false,
+    bool All = false,
+    string? Slug = null,
+    int? Limit = null);
+
+/// <summary>Operator view of a use case tag with its published app count.</summary>
+public sealed record UseCaseAdminDto(
+    long Id,
+    string Slug,
+    string Name,
+    string Definition,
+    bool IsActive,
+    int AppCount,
+    DateTimeOffset UpdatedAt);
+
+/// <summary>Operator view of an AI-proposed use case awaiting promotion.</summary>
+public sealed record UseCaseCandidateDto(
+    long Id,
+    string Slug,
+    string Name,
+    string Status,
+    int AppCount,
+    string? LatestReason,
+    DateTimeOffset UpdatedAt);
+
+/// <summary>Body for creating or updating a use case tag.</summary>
+public sealed record UseCaseUpsertRequestDto(
+    string? Slug = null,
+    string? Name = null,
+    string? Definition = null,
+    bool? IsActive = null);
+
+/// <summary>Optional body for promoting a use case candidate.</summary>
+public sealed record UseCasePromoteRequestDto(string? Name = null, string? Definition = null);
+
+/// <summary>Body for merging a use case candidate into an existing tag.</summary>
+public sealed record UseCaseMergeRequestDto(string TargetSlug);

@@ -79,6 +79,7 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
                 && listings.Contains(a.Listing))
             .Include(a => a.Category)
             .Include(a => a.Downloads)
+            .Include(a => a.UseCases)
             .ToListAsync(ct);
 
         var added = all

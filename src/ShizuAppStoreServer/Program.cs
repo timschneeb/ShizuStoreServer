@@ -105,6 +105,7 @@ if (apiOptions.EnableOutputCache)
         o.AddPolicy("apps-list", p => p.Expire(TimeSpan.FromSeconds(60)).SetVaryByQuery("*"));
         o.AddPolicy("app-detail", p => p.Expire(TimeSpan.FromSeconds(60)));
         o.AddPolicy("categories", p => p.Expire(TimeSpan.FromMinutes(5)));
+        o.AddPolicy("use-cases", p => p.Expire(TimeSpan.FromMinutes(5)).SetVaryByQuery("*"));
         o.AddPolicy("changes", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));
         o.AddPolicy("issues", p => p.Expire(TimeSpan.FromSeconds(30)).SetVaryByQuery("*"));
         o.AddPolicy("meta", p => p.Expire(TimeSpan.FromSeconds(60)));
@@ -244,10 +245,13 @@ usageAnalysis.ApiKey ??= Environment.GetEnvironmentVariable("SHIZU_USAGE_ANALYSI
 builder.Services.AddSingleton(usageAnalysis);
 builder.Services.AddSingleton<IUsageAnalysisChatClientFactory, OpenAiUsageAnalysisChatClientFactory>();
 builder.Services.AddSingleton<IUsageAnalysisAgent, UsageAnalysisAgent>();
+builder.Services.AddSingleton<IUseCaseClassifier, UseCaseClassifier>();
 builder.Services.AddSingleton<IRepoSnapshotProvider, GitRepoSnapshotProvider>();
 builder.Services.AddSingleton<UsageContextBuilder>();
 builder.Services.AddSingleton<IUsageAnalysisLogWriter, UsageAnalysisLogWriter>();
 builder.Services.AddScoped<IUsageAnalysisQueue, UsageAnalysisQueue>();
+builder.Services.AddScoped<IUseCaseTagger, UseCaseTagger>();
+builder.Services.AddScoped<IUseCasePromoter, UseCasePromoter>();
 builder.Services.AddScoped<IUsageAnalysisRunner, UsageAnalysisRunner>();
 builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<IGitHubReleaseClient>(),

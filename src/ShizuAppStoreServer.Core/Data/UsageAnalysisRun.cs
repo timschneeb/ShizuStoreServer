@@ -11,6 +11,16 @@ public enum UsageAnalysisStatus
     Failed,
 }
 
+/// <summary>What a queue row does.</summary>
+public enum UsageAnalysisKind
+{
+    /// <summary>Full repo checkout and agent analysis producing the usage report.</summary>
+    Analysis,
+
+    /// <summary>Report-only classification producing use case tags.</summary>
+    Tagging,
+}
+
 /// <summary>
 /// One AI source-analysis attempt for an app. The table doubles as the work
 /// queue: <c>Pending</c> rows with a due <c>NextAttemptAt</c> are claimed by
@@ -25,6 +35,12 @@ public sealed class UsageAnalysisRun
     public App? App { get; set; }
 
     public UsageAnalysisStatus Status { get; set; }
+
+    /// <summary>
+    /// Analysis runs inspect the repo; Tagging runs only classify the stored
+    /// report, so a vocabulary or prompt change re-tags without a checkout.
+    /// </summary>
+    public UsageAnalysisKind Kind { get; set; }
 
     /// <summary>What queued the analysis: <c>Auto</c> on APK change, <c>Backfill</c> from the admin API.</summary>
     public JobTrigger? Trigger { get; set; }

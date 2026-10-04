@@ -299,4 +299,121 @@ public sealed class UsageAnalysisQueueTests : IDisposable
         Assert.Equal(1, await queue.BackfillAsync(onlyMissing: false, includeStale: true, force: false, slug: null, limit: null));
         Assert.Single(_db.UsageAnalysisRuns.Where(r => r.AppId == stale.Id));
     }
+
+    [Fact]
+    public async Task TaggingBackfillQueuesAppsWithStoredReports()
+    {
+        var tagged = NewApp("tagged");
+        tagged.UsageShort = "Can install apps.";
+        var untagged = NewApp("untagged");
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        var added = await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: false, all: false, slug: null, limit: null);
+
+        Assert.Equal(1, added);
+        var run = Assert.Single(_db.UsageAnalysisRuns.Where(r => r.AppId == tagged.Id));
+        Assert.Equal(UsageAnalysisKind.Tagging, run.Kind);
+        Assert.Equal(UsageAnalysisStatus.Pending, run.Status);
+        Assert.Equal(JobTrigger.Backfill, run.Trigger);
+        Assert.Equal(_options.TagPromptVersion, run.PromptVersion);
+        Assert.DoesNotContain(_db.UsageAnalysisRuns, r => r.AppId == untagged.Id);
+    }
+
+    [Fact]
+    public async Task TaggingBackfillSkipsFreshTagsUnlessAll()
+    {
+        var app = NewApp("fresh");
+        app.UsageShort = "Can install apps.";
+        app.UseCaseTagsAnalyzedAt = DateTimeOffset.UtcNow;
+        app.UseCaseTagsPromptVersion = _options.TagPromptVersion;
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.Equal(0, await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: false, all: false, slug: null, limit: null));
+        Assert.Equal(1, await queue.TaggingBackfillAsync(
+            onlyMissing: false, includeStale: false, force: false, all: true, slug: null, limit: null));
+        Assert.Single(_db.UsageAnalysisRuns.Where(r => r.AppId == app.Id));
+    }
+
+    [Fact]
+    public async Task TaggingBackfillQueuesStalePromptGenerations()
+    {
+        var app = NewApp("stale-tags");
+        app.UsageShort = "Can install apps.";
+        app.UseCaseTagsAnalyzedAt = DateTimeOffset.UtcNow;
+        app.UseCaseTagsPromptVersion = _options.TagPromptVersion - 1;
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.Equal(0, await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: false, all: false, slug: null, limit: null));
+        Assert.Equal(1, await queue.TaggingBackfillAsync(
+            onlyMissing: false, includeStale: true, force: false, all: false, slug: null, limit: null));
+        Assert.Single(_db.UsageAnalysisRuns.Where(r => r.AppId == app.Id));
+    }
+
+    [Fact]
+    public async Task TaggingBackfillSkipsAppsWithAnActiveRun()
+    {
+        var app = NewApp("active");
+        app.UsageShort = "Can install apps.";
+        await _db.SaveChangesAsync();
+        _db.UsageAnalysisRuns.Add(new UsageAnalysisRun
+        {
+            AppId = app.Id,
+            Kind = UsageAnalysisKind.Tagging,
+            Status = UsageAnalysisStatus.Pending,
+            CreatedAt = DateTimeOffset.UtcNow,
+            NextAttemptAt = DateTimeOffset.UtcNow,
+        });
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.Equal(0, await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: false, all: false, slug: null, limit: null));
+    }
+
+    [Fact]
+    public async Task TaggingBackfillSkipsParkedFailuresUnlessForced()
+    {
+        var app = NewApp("parked");
+        app.UsageShort = "Can install apps.";
+        await _db.SaveChangesAsync();
+        _db.UsageAnalysisRuns.Add(new UsageAnalysisRun
+        {
+            AppId = app.Id,
+            Kind = UsageAnalysisKind.Tagging,
+            Status = UsageAnalysisStatus.Failed,
+            Attempts = _options.RetryMaxAttempts,
+            CreatedAt = DateTimeOffset.UtcNow,
+            NextAttemptAt = DateTimeOffset.UtcNow,
+        });
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.Equal(0, await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: false, all: false, slug: null, limit: null));
+        Assert.Equal(1, await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: true, all: false, slug: null, limit: null));
+    }
+
+    [Fact]
+    public async Task TaggingBackfillHonorsSlugAndLimit()
+    {
+        var first = NewApp("first");
+        first.UsageShort = "Can install apps.";
+        var second = NewApp("second");
+        second.UsageShort = "Can manage files.";
+        await _db.SaveChangesAsync();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        Assert.Equal(1, await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: false, all: false, slug: "second", limit: null));
+        Assert.Equal(1, await queue.TaggingBackfillAsync(
+            onlyMissing: true, includeStale: false, force: false, all: false, slug: null, limit: 1));
+        Assert.Equal(2, _db.UsageAnalysisRuns.Count(r => r.Kind == UsageAnalysisKind.Tagging));
+    }
 }

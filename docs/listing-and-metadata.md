@@ -20,6 +20,7 @@ The client has a setting to show these entries which is off by default.
 | Entry hidden or restored by an operator | applied by the next full catalog pass (usually the nightly one) |
 | Metadata refresh (GitHub stars, etc.) | within 24 hours |
 | New screenshots added or removed | F-Droid/Izzy shots refresh within 24 hours; the app repo is re-scanned every week and dead URLs are cleared on the next scan |
+| Use case tags | assigned with the usage report; a vocabulary change re-tags apps on the next queued tagging runs, bounded by the analysis budget |
 
 A new entry is created hidden and becomes visible only after its first
 successful check, so an app never appears in the store without its icon,
@@ -237,6 +238,36 @@ Consequences for app developers:
   GitHub/GitLab links survive.
 - If the source contains no Shizuku usage, the report
   says so plainly instead of guessing.
+
+### Use case tags
+
+Every app with a usage report also gets structured use case tags ("Install
+and uninstall apps", "Change system settings", ...), derived from that
+report by a second, text-only model pass. Tags describe what the app does
+to other apps or system state, so behavior limited to the app itself never
+counts: an app that only installs its own updates does not get "Install and
+uninstall apps". A tag is assigned only when the report shows the
+capability, and re-analysis replaces the whole set, so tags disappear when
+a release drops a feature.
+
+The vocabulary is curated and closed: the model may only assign existing
+tags, so duplicates and near-synonyms do not accumulate. When the model
+finds a significant capability the vocabulary does not cover, it proposes
+a new tag; proposals are collected, and the same proposal from several
+apps promotes it into the vocabulary automatically (operators can also
+promote, dismiss or merge proposals). Apps are re-tagged against the new
+vocabulary automatically. Tags appear in the store API as `useCases` on
+app summaries and details, and the browse list comes from
+`GET /v1/use-cases`.
+
+Consequences for app developers:
+
+- Tags come from the same source analysis as the usage report, so the same
+  rules apply: a public repository is required and only direct-APK entries
+  are analyzed.
+- If a tag is missing or wrong, improving the repository is the fix; a new
+  vocabulary tag appears automatically once enough apps share the same
+  capability.
 
 ### Icons
 

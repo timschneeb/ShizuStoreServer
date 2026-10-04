@@ -155,6 +155,31 @@ public sealed class UsageAnalysisOptions
     /// <summary>Worker poll interval while the queue is empty.</summary>
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Use case tagging. When on, a small extra model call maps each stored
+    /// usage report onto the active use-case vocabulary; see UseCaseClassifier.
+    /// Only runs when the analyzer itself is configured.
+    /// </summary>
+    public bool TaggingEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Tagging prompt generation. Stored on the app; a bump makes the next
+    /// tagging backfill re-tag reports classified with an older version.
+    /// </summary>
+    public int TagPromptVersion { get; set; } = 1;
+
+    /// <summary>
+    /// Distinct apps that must propose the same novel use case before it is
+    /// promoted into the vocabulary automatically. 0 keeps promotion manual.
+    /// </summary>
+    public int AutoPromoteMinApps { get; set; } = 3;
+
+    /// <summary>Tag cap per app; extra slugs in a model answer are dropped.</summary>
+    public int MaxTagsPerApp { get; set; } = 6;
+
+    /// <summary>Novel-tag proposals kept per app; extras are dropped.</summary>
+    public int MaxProposalsPerApp { get; set; } = 3;
+
     /// <summary>True when the analyzer can run at all.</summary>
     public bool IsConfigured =>
         Enabled

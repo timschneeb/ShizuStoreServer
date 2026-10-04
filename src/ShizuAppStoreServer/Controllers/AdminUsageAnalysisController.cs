@@ -46,6 +46,31 @@ public sealed class AdminUsageAnalysisController(
         return Accepted(new UsageAnalysisQueueDto(added));
     }
 
+    /// <summary>
+    /// Queues use case tag classification for apps with a stored report.
+    /// Defaults to apps that were never tagged; <c>stale</c> also picks rows
+    /// classified with an older tag prompt generation and <c>all</c> re-tags
+    /// the whole catalog (used after vocabulary changes).
+    /// </summary>
+    [HttpPost("tag-backfill")]
+    [RequestSizeLimit(4096)]
+    [ProducesResponseType<UsageAnalysisQueueDto>(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<ActionResult<UsageAnalysisQueueDto>> TagBackfill(
+        [FromBody] UsageTaggingQueueRequestDto? body, CancellationToken ct = default)
+    {
+        if (Authorize() is { } problem)
+        {
+            return problem;
+        }
+
+        var request = body ?? new UsageTaggingQueueRequestDto();
+        var added = await queue.TaggingBackfillAsync(
+            request.OnlyMissing, request.Stale, request.Force, request.All, request.Slug, request.Limit, ct);
+        return Accepted(new UsageAnalysisQueueDto(added));
+    }
+
     [HttpGet("status")]
     [ProducesResponseType<UsageAnalysisStatusDto>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

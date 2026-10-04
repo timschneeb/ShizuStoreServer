@@ -307,6 +307,10 @@ public sealed class AppEnricherTests : IDisposable
         public Task<int> BackfillAsync(
             bool onlyMissing, bool includeStale, bool force, string? slug, int? limit, CancellationToken ct = default) =>
             Task.FromResult(0);
+
+        public Task<int> TaggingBackfillAsync(
+            bool onlyMissing, bool includeStale, bool force, bool all, string? slug, int? limit, CancellationToken ct = default) =>
+            Task.FromResult(0);
     }
 
     // Most tests only need an empty repo index so package and screenshot

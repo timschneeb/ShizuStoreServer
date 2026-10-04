@@ -161,7 +161,25 @@ curl -fsS -X POST -H "Authorization: Bearer $SHIZU_ADMIN_SECRET" \
 Poll `GET /v1/admin/usage-analysis/status` while it drains; token and cost
 totals are on `GET /v1/admin/usage-analysis/stats`. The migration drops the
 old marker-classification columns and the `app_signals` table, so run the
-backfill after deploying the new schema or the usage section stays hidden. A request queues a run and wakes the
+backfill after deploying the new schema or the usage section stays hidden.
+
+Use case tags are derived from those reports by a cheap text-only pass; a
+successful analysis tags inline, and existing reports are tagged with:
+
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $SHIZU_ADMIN_SECRET" \
+  -H 'Content-Type: application/json' --data '{"onlyMissing":true}' \
+  https://<host>/v1/admin/usage-analysis/tag-backfill
+```
+
+`{"stale":true}` re-tags rows written by an older tag prompt generation;
+`{"all":true}` re-tags the catalog regardless of freshness and is what a
+vocabulary change triggers automatically. The vocabulary and its novel
+candidates are managed through `GET`/`POST /v1/admin/use-cases`: list tags
+or candidates, create or update a tag, and promote, dismiss or merge a
+candidate. Promotion at the configured distinct-app threshold is
+automatic; the endpoints are for curation and for reviewing what the
+classifier proposed. A request queues a run and wakes the
 fast loop right away; a commit that lands during a pass triggers an
 immediate follow-up pass. GitHub Actions example (secret
 `SHIZU_ADMIN_SECRET`):

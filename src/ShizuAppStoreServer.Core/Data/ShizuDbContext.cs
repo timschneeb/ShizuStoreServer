@@ -27,6 +27,10 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<AppVersionInstallDay> AppVersionInstallDays => Set<AppVersionInstallDay>();
     public DbSet<AppStarDay> AppStarDays => Set<AppStarDay>();
     public DbSet<RequestLog> RequestLogs => Set<RequestLog>();
+    public DbSet<UseCase> UseCases => Set<UseCase>();
+    public DbSet<AppUseCase> AppUseCases => Set<AppUseCase>();
+    public DbSet<UseCaseCandidate> UseCaseCandidates => Set<UseCaseCandidate>();
+    public DbSet<AppUseCaseProposal> AppUseCaseProposals => Set<AppUseCaseProposal>();
 
     public override int SaveChanges()
     {
@@ -227,6 +231,27 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.UsageReleaseRef).HasColumnName("usage_release_ref").HasMaxLength(128);
             e.Property(x => x.UsagePromptVersion).HasColumnName("usage_prompt_version");
             e.Property(x => x.UsageAnalysisVersion).HasColumnName("usage_analysis_version");
+            // Use case tags. The join rows are rewritten wholesale on each
+            // tagging run; these markers drive stale detection.
+            e.Property(x => x.UseCaseTagsAnalyzedAt).HasColumnName("use_case_tags_analyzed_at");
+            e.Property(x => x.UseCaseTagsPromptVersion).HasColumnName("use_case_tags_prompt_version");
+            e.Property(x => x.UseCaseTagsModel).HasColumnName("use_case_tags_model").HasMaxLength(64);
+            // Tags are rewritten in full, so the join rows carry no payload and
+            // cascade with either side. The skip navigation keeps read paths to
+            // a single Include.
+            e.HasMany(x => x.UseCases)
+                .WithMany()
+                .UsingEntity<AppUseCase>(
+                    j => j.HasOne(x => x.UseCase).WithMany().HasForeignKey(x => x.UseCaseId).OnDelete(DeleteBehavior.Cascade),
+                    j => j.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade),
+                    j =>
+                    {
+                        j.ToTable("app_use_cases");
+                        j.HasKey(x => new { x.AppId, x.UseCaseId });
+                        j.Property(x => x.AppId).HasColumnName("app_id");
+                        j.Property(x => x.UseCaseId).HasColumnName("use_case_id");
+                        j.HasIndex(x => x.UseCaseId);
+                    });
             e.HasIndex(x => x.CategoryId);
             e.HasIndex(x => x.UpdatedAt);
             e.HasIndex(x => x.Availability);
@@ -308,6 +333,7 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.AppId).HasColumnName("app_id");
             e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
             e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>().HasMaxLength(16).IsRequired();
             e.Property(x => x.Trigger).HasColumnName("trigger").HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.Attempts).HasColumnName("attempts");
             e.Property(x => x.RepoForge).HasColumnName("repo_forge").HasMaxLength(16);
@@ -601,6 +627,48 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
                 CreatedAt = new DateTimeOffset(2026, 9, 15, 0, 0, 0, TimeSpan.Zero),
                 UpdatedAt = new DateTimeOffset(2026, 9, 15, 0, 0, 0, TimeSpan.Zero),
             });
+        });
+
+        b.Entity<UseCase>(e =>
+        {
+            e.ToTable("use_cases");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.Slug).HasColumnName("slug").HasMaxLength(64).IsRequired();
+            e.HasIndex(x => x.Slug).IsUnique();
+            e.Property(x => x.Name).HasColumnName("name").HasMaxLength(80).IsRequired();
+            e.Property(x => x.Definition).HasColumnName("definition").HasMaxLength(500).IsRequired();
+            e.Property(x => x.IsActive).HasColumnName("is_active").HasDefaultValue(true);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+        });
+
+        b.Entity<UseCaseCandidate>(e =>
+        {
+            e.ToTable("use_case_candidates");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.Slug).HasColumnName("slug").HasMaxLength(64).IsRequired();
+            e.HasIndex(x => x.Slug).IsUnique();
+            e.Property(x => x.Name).HasColumnName("name").HasMaxLength(80).IsRequired();
+            e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(16).IsRequired();
+            e.Property(x => x.MergedIntoUseCaseId).HasColumnName("merged_into_use_case_id");
+            e.HasOne<UseCase>().WithMany().HasForeignKey(x => x.MergedIntoUseCaseId).OnDelete(DeleteBehavior.SetNull);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+        });
+
+        b.Entity<AppUseCaseProposal>(e =>
+        {
+            e.ToTable("app_use_case_proposals");
+            e.HasKey(x => new { x.AppId, x.CandidateId });
+            e.Property(x => x.AppId).HasColumnName("app_id");
+            e.HasOne(x => x.App).WithMany().HasForeignKey(x => x.AppId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.CandidateId).HasColumnName("candidate_id");
+            e.HasOne(x => x.Candidate).WithMany().HasForeignKey(x => x.CandidateId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Reason).HasColumnName("reason").HasMaxLength(300);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.HasIndex(x => x.CandidateId);
         });
     }
 

@@ -31,6 +31,7 @@ public sealed class UsageAnalysisRunner(
     UsageAnalysisOptions options,
     IRepoSnapshotProvider snapshots,
     IUsageAnalysisAgent agent,
+    IUseCaseTagger tagger,
     ILogger<UsageAnalysisRunner>? log = null,
     IUsageAnalysisLogWriter? logs = null,
     IJobLog? jobLog = null) : IUsageAnalysisRunner
@@ -75,7 +76,8 @@ public sealed class UsageAnalysisRunner(
     }
 
     public async Task<bool> RunNextAsync(CancellationToken ct = default)
-    {        if (!options.IsConfigured)
+    {
+        if (!options.IsConfigured)
         {
             return false;
         }
@@ -130,7 +132,14 @@ public sealed class UsageAnalysisRunner(
             ?? throw new InvalidOperationException($"Usage analysis run {run.Id} has no app.");
 
         run.Model = options.Model;
-        run.PromptVersion = options.PromptVersion;
+        run.PromptVersion = run.Kind == UsageAnalysisKind.Tagging
+            ? options.TagPromptVersion
+            : options.PromptVersion;
+
+        if (run.Kind == UsageAnalysisKind.Tagging)
+        {
+            return await RunTaggingAsync(run, app, now, ct);
+        }
 
         var primary = await db.Downloads
             .Where(d => d.AppId == app.Id && d.IsPrimary)
@@ -224,6 +233,42 @@ public sealed class UsageAnalysisRunner(
             app.UsageReleaseRef = run.RepoRef;
             app.UsagePromptVersion = options.PromptVersion;
             app.UsageAnalysisVersion = options.AnalysisVersion;
+
+            if (options.TaggingEnabled)
+            {
+                // Tagging is best effort on the analysis path: a classifier
+                // failure must never discard a valid report, so the retry is a
+                // dedicated tag-only run that does not clone the repo again.
+                try
+                {
+                    var tagged = await tagger.TagAsync(app, ct);
+                    input += tagged.InputTokens;
+                    cached += tagged.CachedInputTokens;
+                    output += tagged.OutputTokens;
+                    run.InputTokens += tagged.InputTokens;
+                    run.CachedInputTokens += tagged.CachedInputTokens;
+                    run.OutputTokens += tagged.OutputTokens;
+                    run.CostUsd += ComputeCost(tagged.InputTokens, tagged.CachedInputTokens, tagged.OutputTokens, options);
+                    if (tagged.Succeeded)
+                    {
+                        session.Event(JobEventLevel.Info, JobEventType.AiResult,
+                            $"use case tags ready for {app.Slug}",
+                            data: new { slug = app.Slug, tags = tagged.TagCount, promoted = tagged.Promotions });
+                    }
+                    else
+                    {
+                        EnqueueTaggingRetry(app, tagged.Error, finishedAt);
+                        session.Event(JobEventLevel.Warning, JobEventType.AiValidation,
+                            $"use case tagging failed for {app.Slug}: {tagged.Error}",
+                            data: new { slug = app.Slug, retry = true });
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    log?.LogWarning(ex, "Use case tagging failed for {Slug}.", app.Slug);
+                    EnqueueTaggingRetry(app, ex.Message, finishedAt);
+                }
+            }
 
             // Usage text is detail-only, but a finished analysis is still a
             // change clients must learn about: bump the summary clock so
@@ -323,6 +368,127 @@ public sealed class UsageAnalysisRunner(
                 logFile = run.LogFile,
             }));
         return true;
+    }
+
+    /// <summary>
+    /// Executes a tag-only run against the app's stored report. No snapshot or
+    /// tool work happens here, so the run is cheap and safe to backfill.
+    /// </summary>
+    private async Task<bool> RunTaggingAsync(
+        UsageAnalysisRun run, App app, DateTimeOffset now, CancellationToken ct)
+    {
+        await using var session = _jobs.Begin(new JobStart(
+            JobKind.UsageAnalysis,
+            run.Trigger ?? JobTrigger.Auto,
+            now,
+            Metadata: new { slug = app.Slug, appId = app.Id, kind = "tagging", attempt = run.Attempts },
+            UsageAnalysisRunId: run.Id));
+        session.Phase("tag", $"classifying {app.Slug}", new { app = app.Slug, commit = app.UsageCommit });
+
+        UseCaseTagOutcome outcome;
+        try
+        {
+            outcome = await tagger.TagAsync(app, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log?.LogWarning(ex, "Use case tagging failed for {Slug}.", app.Slug);
+            outcome = new UseCaseTagOutcome(false, true, ex.Message, 0, 0, 0, 0, 0, 0, false);
+        }
+
+        var finishedAt = DateTimeOffset.UtcNow;
+        run.InputTokens += outcome.InputTokens;
+        run.CachedInputTokens += outcome.CachedInputTokens;
+        run.OutputTokens += outcome.OutputTokens;
+        run.CostUsd += ComputeCost(outcome.InputTokens, outcome.CachedInputTokens, outcome.OutputTokens, options);
+
+        if (outcome.Succeeded)
+        {
+            run.Status = UsageAnalysisStatus.Succeeded;
+            run.Error = null;
+            run.FinishedAt = finishedAt;
+            run.FinishedDay = DateOnly.FromDateTime(finishedAt.UtcDateTime);
+            log?.LogInformation(
+                "Use case tagging succeeded for {Slug}: {Tags} tag(s), {Promotions} promotion(s), {Input}+{Output} tokens, ${Cost:F4}.",
+                app.Slug, outcome.TagCount, outcome.Promotions, outcome.InputTokens, outcome.OutputTokens, run.CostUsd);
+        }
+        else
+        {
+            var terminal = !outcome.Retryable || run.Attempts >= Math.Max(1, options.RetryMaxAttempts);
+            run.Status = terminal ? UsageAnalysisStatus.Failed : UsageAnalysisStatus.Pending;
+            run.Error = Truncate(outcome.Error ?? "tagging failed", 1024);
+            run.NextAttemptAt = finishedAt + options.RetryBackoff * Math.Max(1, run.Attempts);
+            run.FinishedAt = terminal ? finishedAt : null;
+            run.FinishedDay = terminal ? DateOnly.FromDateTime(finishedAt.UtcDateTime) : null;
+            log?.LogInformation(
+                "Use case tagging attempt {Attempt} for {Slug} failed: {Error}",
+                run.Attempts, app.Slug, run.Error);
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        var succeeded = run.Status == UsageAnalysisStatus.Succeeded;
+        session.Event(
+            succeeded ? JobEventLevel.Info : JobEventLevel.Warning,
+            succeeded ? JobEventType.AiResult : JobEventType.AiValidation,
+            succeeded
+                ? $"use case tags ready for {app.Slug}"
+                : $"use case tagging attempt {run.Attempts} failed: {run.Error}",
+            data: new
+            {
+                slug = app.Slug,
+                kind = "tagging",
+                attempt = run.Attempts,
+                retrying = run.Status == UsageAnalysisStatus.Pending,
+                tags = outcome.TagCount,
+                promotions = outcome.Promotions,
+                inputTokens = outcome.InputTokens,
+                cachedInputTokens = outcome.CachedInputTokens,
+                outputTokens = outcome.OutputTokens,
+                costUsd = run.CostUsd,
+            });
+
+        await session.FinishAsync(new JobFinish(
+            succeeded ? JobStatus.Succeeded : JobStatus.Failed,
+            Summary: succeeded
+                ? $"use case tagging for {app.Slug}: {outcome.TagCount} tag(s), ${run.CostUsd:F4}"
+                : $"tagging attempt {run.Attempts} for {app.Slug} failed: {run.Error}",
+            Error: succeeded ? null : run.Error,
+            ItemsTotal: 1,
+            ItemsOk: succeeded ? 1 : 0,
+            ItemsFailed: succeeded ? 0 : 1,
+            Metadata: new
+            {
+                slug = app.Slug,
+                appId = app.Id,
+                kind = "tagging",
+                attempt = run.Attempts,
+                retrying = run.Status == UsageAnalysisStatus.Pending,
+                model = options.Model,
+                promptVersion = options.TagPromptVersion,
+                tags = outcome.TagCount,
+                promotions = outcome.Promotions,
+                inputTokens = outcome.InputTokens,
+                cachedInputTokens = outcome.CachedInputTokens,
+                outputTokens = outcome.OutputTokens,
+                costUsd = run.CostUsd,
+            }));
+        return true;
+    }
+
+    private void EnqueueTaggingRetry(App app, string? error, DateTimeOffset now)
+    {
+        db.UsageAnalysisRuns.Add(new UsageAnalysisRun
+        {
+            AppId = app.Id,
+            Kind = UsageAnalysisKind.Tagging,
+            Status = UsageAnalysisStatus.Pending,
+            Trigger = JobTrigger.Auto,
+            PromptVersion = options.TagPromptVersion,
+            CreatedAt = now,
+            NextAttemptAt = now,
+        });
+        log?.LogInformation("Use case tagging retry queued for {Slug}: {Error}", app.Slug, error);
     }
 
     /// <summary>

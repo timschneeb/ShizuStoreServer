@@ -45,6 +45,16 @@ public interface IUsageAnalysisQueue
     /// </summary>
     Task<int> BackfillAsync(
         bool onlyMissing, bool includeStale, bool force, string? slug, int? limit, CancellationToken ct = default);
+
+    /// <summary>
+    /// Queues tag-only runs for apps whose stored report should be
+    /// (re)classified. <paramref name="all"/> ignores the freshness checks,
+    /// which is how a freshly promoted vocabulary reaches every existing
+    /// report. Returns the number of runs added.
+    /// </summary>
+    Task<int> TaggingBackfillAsync(
+        bool onlyMissing, bool includeStale, bool force, bool all, string? slug, int? limit,
+        CancellationToken ct = default);
 }
 
 public sealed class UsageAnalysisQueue(
@@ -203,6 +213,91 @@ public sealed class UsageAnalysisQueue(
         log?.LogInformation(
             "Usage analysis backfill queued {Count} runs (onlyMissing={OnlyMissing}, stale={Stale}, force={Force}).",
             added, onlyMissing, includeStale, force);
+        return added;
+    }
+
+    public async Task<int> TaggingBackfillAsync(
+        bool onlyMissing, bool includeStale, bool force, bool all, string? slug, int? limit,
+        CancellationToken ct = default)
+    {
+        if (!options.IsConfigured || !options.TaggingEnabled)
+        {
+            return 0;
+        }
+
+        // Tagging reads stored report text, so only apps that have one and a
+        // repo-derived report history are eligible. Excluded and unpublished
+        // rows stay invisible to clients and out of the queue.
+        var query = db.Apps
+            .Where(a => a.Availability != Availability.Excluded && a.PublishedAt != null)
+            .Where(a => a.UsageShort != null || a.UsageMarkdown != null);
+        if (!string.IsNullOrWhiteSpace(slug))
+        {
+            query = query.Where(a => a.Slug == slug);
+        }
+
+        var apps = await query.OrderBy(a => a.Id).ToListAsync(ct);
+        var active = await db.UsageAnalysisRuns
+            .Where(r => r.Status == UsageAnalysisStatus.Pending || r.Status == UsageAnalysisStatus.Running)
+            .Select(r => r.AppId)
+            .Distinct()
+            .ToListAsync(ct);
+        var activeSet = active.ToHashSet();
+
+        var parked = force
+            ? new List<long>()
+            : await db.UsageAnalysisRuns
+                .Where(r => r.Kind == UsageAnalysisKind.Tagging
+                    && r.Status == UsageAnalysisStatus.Failed
+                    && r.Attempts >= options.RetryMaxAttempts)
+                .Select(r => r.AppId)
+                .Distinct()
+                .ToListAsync(ct);
+        var parkedSet = parked.ToHashSet();
+
+        var max = limit is > 0 ? limit.Value : int.MaxValue;
+        var now = DateTimeOffset.UtcNow;
+        var added = 0;
+        foreach (var app in apps)
+        {
+            if (added >= max)
+            {
+                break;
+            }
+
+            if (!HasAnalyzableRepo(app) || activeSet.Contains(app.Id) || parkedSet.Contains(app.Id))
+            {
+                continue;
+            }
+
+            var missing = app.UseCaseTagsAnalyzedAt is null;
+            var stale = app.UseCaseTagsPromptVersion < options.TagPromptVersion;
+            if (!all && !(onlyMissing && missing) && !(includeStale && stale))
+            {
+                continue;
+            }
+
+            db.UsageAnalysisRuns.Add(new UsageAnalysisRun
+            {
+                AppId = app.Id,
+                Kind = UsageAnalysisKind.Tagging,
+                Status = UsageAnalysisStatus.Pending,
+                Trigger = JobTrigger.Backfill,
+                PromptVersion = options.TagPromptVersion,
+                CreatedAt = now,
+                NextAttemptAt = now,
+            });
+            added++;
+        }
+
+        if (added > 0)
+        {
+            await db.SaveChangesAsync(ct);
+        }
+
+        log?.LogInformation(
+            "Use case tagging backfill queued {Count} runs (onlyMissing={OnlyMissing}, stale={Stale}, all={All}, force={Force}).",
+            added, onlyMissing, includeStale, all, force);
         return added;
     }
 

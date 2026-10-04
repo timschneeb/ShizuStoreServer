@@ -294,4 +294,23 @@ public sealed class App
     /// older than <c>UsageAnalysisOptions.AnalysisVersion</c> marks it stale.
     /// </summary>
     public int UsageAnalysisVersion { get; set; }
+
+    /// <summary>When the stored use case tags were produced; null means never tagged.</summary>
+    public DateTimeOffset? UseCaseTagsAnalyzedAt { get; set; }
+
+    /// <summary>
+    /// Prompt contract generation of the stored tags; older than
+    /// <c>UsageAnalysisOptions.TagPromptVersion</c> marks it stale for re-tagging.
+    /// </summary>
+    public int UseCaseTagsPromptVersion { get; set; }
+
+    /// <summary>Model id that produced the stored tags.</summary>
+    public string? UseCaseTagsModel { get; set; }
+
+    /// <summary>
+    /// Active use case tags assigned to this app. Rewritten in full on every
+    /// successful tagging run; surfaced in summaries so clients can filter
+    /// locally without a detail fetch.
+    /// </summary>
+    public List<UseCase> UseCases { get; } = [];
 }

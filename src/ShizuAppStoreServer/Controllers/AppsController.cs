@@ -44,6 +44,7 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
         [FromQuery] string? availability,
         [FromQuery] string? type,
         [FromQuery] string? recommended,
+        [FromQuery] string? useCase,
         [FromQuery] int page = 1,
         [FromQuery(Name = "pageSize")] int pageSize = DefaultPageSize,
         [FromQuery] string? sort = "updated",
@@ -126,6 +127,19 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
             query = query.Where(a => a.IsRecommended == recommendedValue);
         }
 
+        if (!string.IsNullOrWhiteSpace(useCase))
+        {
+            var useCaseSlug = useCase.Trim();
+            var known = await db.UseCases.AsNoTracking()
+                .AnyAsync(u => u.Slug == useCaseSlug && u.IsActive, ct);
+            if (!known)
+            {
+                return Problem($"Unknown use case '{useCase}'.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            query = query.Where(a => a.UseCases.Any(u => u.Slug == useCaseSlug));
+        }
+
         var sortKey = sort?.Trim().ToLowerInvariant();
         if (sortKey is not ("updated" or "added" or "name" or "stars" or "downloads"))
         {
@@ -152,7 +166,7 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
         // LINQ fine. The catalog is tiny (~hundreds of rows), so this costs
         // nothing and keeps both providers green.
         var total = await query.CountAsync(ct);
-        var rows = await query.Include(a => a.Category).Include(a => a.Downloads).ToListAsync(ct);
+        var rows = await query.Include(a => a.Category).Include(a => a.Downloads).Include(a => a.UseCases).ToListAsync(ct);
 
         var ordered = (sortKey, descending.Value) switch
         {
@@ -195,6 +209,7 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
             .Include(a => a.Category).ThenInclude(c => c!.Parent)
             .Include(a => a.Parent)
             .Include(a => a.Downloads)
+            .Include(a => a.UseCases)
             .FirstOrDefaultAsync(
                 a => a.Slug == slug && a.Availability != Availability.Excluded && a.PublishedAt != null, ct);
 

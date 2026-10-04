@@ -55,7 +55,8 @@ public static class AppMapper
             SummaryLabels(primary?.LocalizedLabels, a.ApkLabel ?? DisplayName(a)),
             primary?.DhizukuDeclared ?? false,
             primary?.Trackers ?? [],
-            TagGroups(primary?.TrackerTags));
+            TagGroups(primary?.TrackerTags),
+            UseCaseRefs(a));
     }
 
     /// <summary>
@@ -125,8 +126,19 @@ public static class AppMapper
             a.UsageAnalyzedAt,
             primary?.DhizukuDeclared ?? false,
             primary?.Trackers ?? [],
-            TagGroups(primary?.TrackerTags));
+            TagGroups(primary?.TrackerTags),
+            UseCaseRefs(a));
     }
+
+    /// <summary>
+    /// Active use cases assigned to the app, ordered by display name. Inactive
+    /// vocabulary rows are hidden from clients without deleting the assignment.
+    /// </summary>
+    private static IReadOnlyList<UseCaseDto> UseCaseRefs(App a) => a.UseCases
+        .Where(u => u.IsActive)
+        .OrderBy(u => u.Name, StringComparer.OrdinalIgnoreCase)
+        .Select(u => new UseCaseDto(u.Slug, u.Name))
+        .ToList();
 
     /// <summary>
     /// Human-readable origin for the detail subtitle. Play redirects report the

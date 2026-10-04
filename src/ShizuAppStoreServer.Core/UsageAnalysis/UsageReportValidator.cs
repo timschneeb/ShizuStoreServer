@@ -271,7 +271,7 @@ public static partial class UsageReportValidator
         return string.Join('\n', lines);
     }
 
-    private static JsonObject? ExtractJson(string? content)
+    internal static JsonObject? ExtractJson(string? content)
     {
         if (string.IsNullOrWhiteSpace(content))
         {
@@ -340,7 +340,7 @@ public static partial class UsageReportValidator
         return label;
     }
 
-    private static string NormalizeText(string value)
+    internal static string NormalizeText(string value)
     {
         var text = value
             .Replace('\u2014', '-')

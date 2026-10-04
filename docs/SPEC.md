@@ -227,6 +227,11 @@ bundle` is rebuilt per deploy, never committed.
     successful analysis bumps `updated_at`, so clients learn about it
     through `/v1/changes` and the detail ETag even though the text is
     detail-only.
+  - Use case tags (derived from the usage report, §5.5):
+    `use_case_tags_analyzed_at`, `use_case_tags_prompt_version`,
+    `use_case_tags_model`; the assignments themselves live in the
+    `app_use_cases` join table. A re-tag bumps `updated_at` only when the
+    tag set changed.
   - `exclude_override` (operator flag, never touched by the
     upserter), `excluded_reason`, `added_at`/`updated_at` (git
     history, §4; `updated_at` is the change clock, not the release
@@ -331,8 +336,10 @@ bundle` is rebuilt per deploy, never committed.
     app (partial unique index on `app_id` where `is_primary`); a row set
     without one is rebuilt from the stored rows on the next pass without
     downloading anything.
-- **usage_analysis_runs** - one row per AI source-analysis attempt and
-  the work queue for the analyzer (`app_id` FK cascade, `status`
+- **usage_analysis_runs** - one row per AI source-analysis or use case
+  tagging attempt and the work queue for both (`app_id` FK cascade, `kind`
+  (`Analysis|Tagging`; `Tagging` rows classify the stored report without a
+  checkout, §5.5), `status`
   (`Pending|Running|Succeeded|Failed`), `trigger` (`Auto` on APK
   change, `Backfill` from the admin API), `attempts`, `repo_forge`,
   `repo_commit`, `repo_ref`, `model`, `prompt_version`, `error`,
@@ -343,6 +350,27 @@ bundle` is rebuilt per deploy, never committed.
   worker claims rows atomically and retries failures with linear backoff
   until parked. Every attempt is kept so token usage and cost stay
   auditable; failed rows carry no user-visible output.
+- **use_cases** - the closed vocabulary behind structured Shizuku use
+  case tags (§5.5): `slug` (unique, stable), `name` (display text),
+  `definition` (the classifier's scope contract, max 500 chars),
+  `is_active` (inactive tags stay assigned but are hidden from the API
+  and offered to the classifier only when active),
+  `created_at`/`updated_at`. Seeded by migration with the curated
+  vocabulary; operators add, rename, deactivate and merge rows through
+  `v1/admin/use-cases`.
+- **app_use_cases** - assignment join (`app_id` FK cascade, `use_case_id`
+  FK cascade, composite PK). A successful tagging run replaces its app's
+  rows in place, so a capability that disappears from the report loses
+  its tag and the vocabulary stays exactly as wide as the catalog needs.
+- **use_case_candidates** - novel capabilities proposed by the classifier
+  that are not in the vocabulary: `slug` (unique), `name`, `status`
+  (`Pending|Promoted|Merged|Dismissed`), `merged_into_use_case_id` (FK
+  set null on delete), `created_at`/`updated_at`. A candidate proposed by
+  enough distinct apps becomes a `use_cases` row; merging points it at an
+  existing tag; dismissing blocks it from being proposed again.
+- **app_use_case_proposals** - one row per (`app_id`, `candidate_id`)
+  proposal with an optional `reason` (max 300 chars) and `created_at`;
+  the promotion threshold counts distinct proposing apps.
 - **app_versions** - (`app_id`, `version_code`, `version_name`,
   `apk_url`, `is_prerelease`, `detected_at`); a row is appended only
   when the `version_code` is unseen for the app (append-only history).
@@ -1222,6 +1250,61 @@ marker scanning survives only as internal context extraction.
 - Stats: `GET /v1/admin/usage-analysis/stats` (token/cost per day and
   model); the ShizuAppStoreStats dashboard is wired separately.
 
+### 5.5 Use case tags (structured Shizuku capabilities)
+
+Use case tags turn the stored Shizuku usage report into a small, closed
+set of capability labels ("Install and uninstall apps", "Change system
+settings", ...) that users can browse and filter by. They are derived from
+the report, not from a second source read, so re-tagging the catalog after
+a vocabulary change costs one cheap text-only model call per app.
+
+- Classifier: `Core/UsageAnalysis/UseCaseClassifier` sends the app's
+  stored `usage_short`, `usage_markdown_usage` (falling back to
+  `usage_markdown` for reports written before the parts split),
+  `usage_markdown_api_usage` and `usage_markdown_notable_details`, plus
+  the active vocabulary with each tag's definition, and accepts JSON only:
+  `{"use_cases": [slugs], "proposed_use_cases": [{"name", "reason"}]}`. A
+  tag means the app itself acts on other apps or system state; behavior
+  scoped to the app itself (own updates, own data, own preferences) never
+  qualifies, so an app that only self-updates does not earn
+  `install-apps`. The classifier may only assign vocabulary slugs, is
+  told to prefer no tag over a stretched one, and is capped at
+  `MaxTagsPerApp` tags and `MaxProposalsPerApp` proposals. Unknown slugs
+  fail closed after one correction round; the output runs through
+  `UseCaseTagValidator` (slug shape, dedupe, caps; proposals are slugified
+  and dropped when they collide with the vocabulary).
+- Runs: `usage_analysis_runs` rows carry `kind`; `Tagging` runs skip the
+  checkout and tool loop and classify the stored report alone. A
+  successful `Analysis` run tags inline from its fresh report, so new
+  releases and first analyses pick up tags without a second round trip.
+  Tag failures never discard the report: the analysis run still succeeds
+  and a `Tagging` retry row is queued. The admin backfill
+  (`TaggingBackfillAsync`) re-tags apps whose tag generation is missing
+  (`use_case_tags_analyzed_at` null) or stale
+  (`use_case_tags_prompt_version` below `UsageAnalysis:TagPromptVersion`),
+  and can re-tag the whole catalog (`all`) after a vocabulary change.
+  Tagging runs count against the same daily run cap and monthly budget.
+- Storage: a success replaces the app's `app_use_cases` rows, stamps
+  `use_case_tags_analyzed_at` / `use_case_tags_prompt_version` /
+  `use_case_tags_model`, and bumps `updated_at` only when the tag set
+  actually changed, so `/v1/changes` carries the new tags and a no-op
+  re-tag stays silent.
+- New tags: proposals are normalized to slugified candidate rows,
+  deduplicated per app and candidate, and never resurrect a
+  promoted/merged/dismissed candidate. When `UsageAnalysis:AutoPromoteMinApps`
+  distinct apps propose the same candidate, a `use_cases` row is created
+  (definition inferred from the newest proposal reason), the proposing
+  apps are assigned immediately, and a catalog-wide re-tag is queued so
+  every other app is reconsidered against the grown vocabulary. A
+  candidate whose slug already exists merges into the existing tag
+  instead. Operators can promote, dismiss or merge candidates through
+  `v1/admin/use-cases`.
+- API: `GET /v1/use-cases?listing=` returns active tags with published,
+  non-excluded app counts above zero, count-descending then name; summary
+  and detail carry `useCases[]` (`slug`, `name`, inactive tags hidden),
+  and `GET /v1/apps?useCase=<slug>` filters by assignment (unknown slug
+  → 400).
+
 ## 6. Signature-keyed downloads
 
 Each `app_downloads` row is one (package, signing identity, ABI).
@@ -1528,9 +1611,10 @@ rather than persisting them.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
-| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `readme_url`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
+| `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400), `useCase` (active tag slug, unknown → 400; §5.5). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
+| `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `readme_url`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `useCases[]` (active tags as `{slug,name}`), `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded and unpublished omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
+| `GET /v1/use-cases` | Active use case tags with app counts over the requested `listing` set (comma-separated, default `main`; excluded and unpublished omitted). Only tags with at least one published app are returned, count-descending then name; each item is `{slug, name, appCount}`. ETag from tag count, count sum, max published-app `updated_at` and max tag `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded and unpublished hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. `generated_at` is captured before the response's reads and is the cursor clients must persist: a client-side clock (or a later `/v1/meta` timestamp) can pass a concurrent enrichment commit and skip the update forever. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (published, non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
@@ -1549,6 +1633,13 @@ rather than persisting them.
 | `GET /v1/admin/usage-analysis/status` | Same token rules. Queue counts per status, runs started today, month-to-date cost, budget and the ten most recent failures. |
 | `GET /v1/admin/usage-analysis/stats?days=30` | Same token rules. Token and cost totals per day and per model for finished runs. |
 | `DELETE /v1/admin/usage-analysis/pending` | Same token rules. Deletes pending queue rows (running rows are untouched). |
+| `POST /v1/admin/usage-analysis/tag-backfill` | Same token rules. Queues use case tagging runs over apps with a stored usage report and an analyzable repo; body `{"onlyMissing":true,"stale":false,"force":false,"all":false,"slug":null,"limit":null}`. `stale` adds rows behind the current tag prompt generation, `all` re-tags the catalog regardless of freshness (used after vocabulary changes). → 202 `{queued:n}`. |
+| `GET /v1/admin/use-cases` | Same token rules. Lists the vocabulary with `appCount` counts over published, non-excluded apps. |
+| `POST /v1/admin/use-cases` | Same token rules. Creates or updates a tag; body `{"slug":null,"name":"...","definition":null,"isActive":null}` (slug derived from the name when omitted). Creating one, or changing the definition of an active one, queues a catalog-wide re-tag. |
+| `GET /v1/admin/use-cases/candidates` | Same token rules. Lists pending novel-capability candidates with proposing-app counts and the latest reason (name order). |
+| `POST /v1/admin/use-cases/candidates/{slug}/promote` | Same token rules. Promotes a pending candidate, optionally overriding name/definition; assigns the proposing apps and queues the catalog re-tag. 409 when the candidate is not pending. |
+| `POST /v1/admin/use-cases/candidates/{slug}/dismiss` | Same token rules. Dismisses a candidate so it is never proposed again. |
+| `POST /v1/admin/use-cases/candidates/{slug}/merge` | Same token rules. Merges a candidate into an existing tag and assigns the proposing apps; body `{"targetSlug":"..."}`. |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown, `excluded` or unpublished slugs → 404. In the same transaction it upserts the `app_install_days` row for the server's current UTC day (`app_id` + `day`, count +1), plus an `app_version_install_days` row keyed on the optional JSON body `{ "versionCode": 123, "installType": "fresh\|update" }`; absent or malformed bodies and out-of-range codes fall back to `versionCode` 0 / `installType` `unknown`, and anything other than `fresh`/`update` (case-insensitive) normalizes to `unknown`, so older clients stay valid. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
 | `GET /v1/trending` | Ranks published, non-excluded apps by fresh-install activity from `app_version_install_days`; only reports typed `fresh` count, so updates and legacy `unknown` reports never rank. `days` clamped 1–90 (default 7) is the current window ending today (UTC); `limit` clamped 1–100 (default 20); `sort` ∈ `installs\|growth` (default `installs`), anything else → 400. `installs` orders by the window total; `growth` orders by `delta` (window total minus the previous equal-length window, i.e. fastest growing). Items carry `slug`, `installs`, `previousInstalls`, `delta`; rows with zero fresh installs in the window are omitted, ties break by slug. Ranking runs in memory (same provider constraint as `GET /v1/apps`). Output-cached 10min, `VaryByQuery(*)`. |
 | `GET /v1/apps/{slug}/history` | Per-day series for the app detail screen. `days` clamped 1–365 (default 30), window ends today (UTC); out-of-range → 400. Unknown, `excluded` or unpublished slugs → 404. `installs[]` starts at the app's first recorded install day instead of the full window (`day` as `yyyy-MM-dd`, `count`, zero-filled from there to today) and is empty when the app never recorded an install, so days before we knew anything are never padded out. `stars[]` carries the last known snapshot across the window and starts at the first-ever `app_star_days` row: days before the first snapshot are omitted rather than invented, and the list is empty when the app never had one (GitHub apps get backfilled daily level points from their first enrichment onward). Output-cached 5min, `VaryByQuery(*)`. |
@@ -1623,6 +1714,9 @@ all environments; Scalar UI is development-only.
 | `UsageAnalysis:RetryMaxAttempts` / `RetryBackoff` | `3` / `30min` | Failure retry policy |
 | `UsageAnalysis:SnapshotRoot` / `PollInterval` | `null` (temp) / `10s` | Checkout location and worker idle poll |
 | `UsageAnalysis:LogPath` / `LogRetention` / `MaxTranscriptToolResultChars` | `usage-logs` / `24h` / `20000` | Per-run JSON+HTML transcript directory (null disables), retention window (null keeps transcripts forever) and tool-result truncation (0 keeps everything) |
+| `UsageAnalysis:TaggingEnabled` | `true` | Derive use case tags from stored reports; requires the analyzer to be configured |
+| `UsageAnalysis:TagPromptVersion` / `AutoPromoteMinApps` | `1` / `3` | Tag generation marker (a bump makes the tagging backfill re-tag) and the distinct-app threshold for creating a new tag (0 keeps promotion manual) |
+| `UsageAnalysis:MaxTagsPerApp` / `MaxProposalsPerApp` | `6` / `3` | Classifier output caps |
 | `Sync:ListPath` | `/opt/shizuappstore/list` | Local list clone |
 | `Sync:FastLoopMinutes` | `15` | Fast-loop period (≥ 1) |
 | `Sync:NightlyTimeUtc` | `03:00` | Full re-check time (UTC) |
