@@ -35,10 +35,11 @@ Client install reports and the metadata refresh feed per-day statistics: a
 daily star snapshot is recorded on every enrichment pass, GitHub apps also
 get up to a year of daily star levels backfilled from the repository's
 per-day stargazer history (re-read incrementally once coverage is complete),
-and installs are counted per UTC day. The clients show them as the home
-"Trending this week" row and an install/star activity sparkline on the app
-detail screen. The install history starts at the first report after the
-feature launched, so early windows can be partial.
+and installs are counted per UTC day and typed as fresh or update. The
+clients show them as a Trending sort in the app list (fresh installs over the
+last 14 days, so updates never rank) and an install/star activity sparkline on
+the app detail screen. The install history starts at the first report after
+the feature launched, so early windows can be partial.
 
 ## How the server finds releases
 

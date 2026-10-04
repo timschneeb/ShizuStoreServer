@@ -8,10 +8,11 @@ using ShizuAppStoreServer.Core.Data;
 namespace ShizuAppStoreServer.Controllers;
 
 /// <summary>
-/// Install-window ranking for the client's home trending row. The current
+/// Fresh-install window ranking for the client's trending sort. The current
 /// window is [today-days+1..today] in server UTC, compared against the
-/// previous equal window; buckets come from app_install_days, which only the
-/// install endpoint writes. Apps with no installs in the window are omitted.
+/// previous equal window; buckets come from app_version_install_days and only
+/// count reports typed <c>fresh</c>, so updates and legacy unknown reports
+/// never trend. Apps with no fresh installs in the window are omitted.
 /// </summary>
 [ApiController]
 [Route("v1/trending")]
@@ -24,8 +25,8 @@ public sealed class TrendingController(ShizuDbContext db) : ControllerBase
     private const int MaxLimit = 100;
 
     /// <summary>
-    /// Ranked trending apps. <c>days</c> picks the window length,
-    /// <c>limit</c> the result size, and <c>sort</c> is
+    /// Ranked trending apps by fresh installs. <c>days</c> picks the window
+    /// length, <c>limit</c> the result size, and <c>sort</c> is
     /// <c>installs</c> (window total) or <c>growth</c> (delta against the
     /// previous window, i.e. fastest growing).
     /// </summary>
@@ -65,16 +66,16 @@ public sealed class TrendingController(ShizuDbContext db) : ControllerBase
             .Select(a => new { a.Id, a.Slug })
             .ToListAsync(ct);
 
-        var current = await db.AppInstallDays.AsNoTracking()
-            .Where(d => d.Day >= currentStart && d.Day <= today)
-            .GroupBy(d => d.AppId)
-            .Select(g => new { g.Key, Total = g.Sum(d => d.InstallCount) })
+        var current = await db.AppVersionInstallDays.AsNoTracking()
+            .Where(v => v.InstallType == AppVersionInstallDay.Fresh && v.Day >= currentStart && v.Day <= today)
+            .GroupBy(v => v.AppId)
+            .Select(g => new { g.Key, Total = g.Sum(v => v.InstallCount) })
             .ToDictionaryAsync(x => x.Key, x => x.Total, ct);
 
-        var previous = await db.AppInstallDays.AsNoTracking()
-            .Where(d => d.Day >= previousStart && d.Day < currentStart)
-            .GroupBy(d => d.AppId)
-            .Select(g => new { g.Key, Total = g.Sum(d => d.InstallCount) })
+        var previous = await db.AppVersionInstallDays.AsNoTracking()
+            .Where(v => v.InstallType == AppVersionInstallDay.Fresh && v.Day >= previousStart && v.Day < currentStart)
+            .GroupBy(v => v.AppId)
+            .Select(g => new { g.Key, Total = g.Sum(v => v.InstallCount) })
             .ToDictionaryAsync(x => x.Key, x => x.Total, ct);
 
         // In-memory ordering matches List(): the SQLite test provider cannot

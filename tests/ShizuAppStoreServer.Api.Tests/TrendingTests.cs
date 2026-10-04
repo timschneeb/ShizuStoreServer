@@ -43,12 +43,12 @@ public sealed class TrendingTests(ShizuApiFactory factory) : IClassFixture<Shizu
         await factory.ResetAsync(db =>
         {
             var (micup, tuner, hidden, _) = SeedDirectory(db);
-            db.AppInstallDays.AddRange(
-                new AppInstallDay { App = micup, Day = today, InstallCount = 3 },
-                new AppInstallDay { App = tuner, Day = today, InstallCount = 5 },
-                new AppInstallDay { App = tuner, Day = today.AddDays(-2), InstallCount = 2 },
+            db.AppVersionInstallDays.AddRange(
+                new AppVersionInstallDay { App = micup, Day = today, InstallType = AppVersionInstallDay.Fresh, InstallCount = 3 },
+                new AppVersionInstallDay { App = tuner, Day = today, InstallType = AppVersionInstallDay.Fresh, InstallCount = 5 },
+                new AppVersionInstallDay { App = tuner, Day = today.AddDays(-2), InstallType = AppVersionInstallDay.Fresh, InstallCount = 2 },
                 // Excluded rows never trend, whatever their counts.
-                new AppInstallDay { App = hidden, Day = today, InstallCount = 99 });
+                new AppVersionInstallDay { App = hidden, Day = today, InstallType = AppVersionInstallDay.Fresh, InstallCount = 99 });
         });
 
         var trending = await GetAsync<TrendingDto>("/v1/trending");
@@ -68,12 +68,13 @@ public sealed class TrendingTests(ShizuApiFactory factory) : IClassFixture<Shizu
         await factory.ResetAsync(db =>
         {
             var (micup, tuner, _, _) = SeedDirectory(db);
-            db.AppInstallDays.AddRange(
-                // micup: big last window, small now -> large negative delta.
-                new AppInstallDay { App = micup, Day = today.AddDays(-8), InstallCount = 100 },
-                new AppInstallDay { App = micup, Day = today, InstallCount = 5 },
+            db.AppVersionInstallDays.AddRange(
+                // micup: big previous window, small now -> large negative delta.
+                // The default 7-day window puts today-8 in the previous bucket.
+                new AppVersionInstallDay { App = micup, Day = today.AddDays(-8), InstallType = AppVersionInstallDay.Fresh, InstallCount = 100 },
+                new AppVersionInstallDay { App = micup, Day = today, InstallType = AppVersionInstallDay.Fresh, InstallCount = 5 },
                 // tuner: nothing before, some now -> positive delta.
-                new AppInstallDay { App = tuner, Day = today, InstallCount = 3 });
+                new AppVersionInstallDay { App = tuner, Day = today, InstallType = AppVersionInstallDay.Fresh, InstallCount = 3 });
         });
 
         var installs = await GetAsync<TrendingDto>("/v1/trending?sort=installs");
@@ -84,6 +85,28 @@ public sealed class TrendingTests(ShizuApiFactory factory) : IClassFixture<Shizu
         Assert.Equal(["tuner", "micup"], growth.Items.Select(i => i.Slug));
         Assert.Equal([3L, -95L], growth.Items.Select(i => i.Delta));
         Assert.Equal([0L, 100L], growth.Items.Select(i => i.PreviousInstalls));
+    }
+
+    [Fact]
+    public async Task TrendingCountsOnlyFreshInstalls()
+    {
+        var today = Today;
+        await factory.ResetAsync(db =>
+        {
+            var (micup, tuner, _, _) = SeedDirectory(db);
+            db.AppVersionInstallDays.AddRange(
+                new AppVersionInstallDay { App = micup, Day = today, InstallType = AppVersionInstallDay.Fresh, InstallCount = 3 },
+                // Updates and legacy unknown reports are installs too, but the
+                // trending row means new users only.
+                new AppVersionInstallDay { App = micup, Day = today, InstallType = AppVersionInstallDay.Update, InstallCount = 50 },
+                new AppVersionInstallDay { App = micup, Day = today, InstallType = AppVersionInstallDay.Unknown, InstallCount = 40 },
+                new AppVersionInstallDay { App = tuner, Day = today, InstallType = AppVersionInstallDay.Update, InstallCount = 9 });
+        });
+
+        var trending = await GetAsync<TrendingDto>("/v1/trending?days=7");
+
+        Assert.Equal(["micup"], trending.Items.Select(i => i.Slug));
+        Assert.Equal([3L], trending.Items.Select(i => i.Installs));
     }
 
     [Fact]

@@ -83,9 +83,9 @@ logged and never kill the host. DB-only: no endpoint exposes these tables.
 The separate `ShizuAppStoreStats` app reads both tables read-only for its HTML
 dashboard, and the same app also reads `app_install_days`,
 `app_version_install_days` and `apps.install_count`. The public API also
-serves aggregated install-day windows (`GET /v1/trending`) and per-app
-install/star history (`GET /v1/apps/{slug}/history`); the granular
-`app_version_install_days` rows stay SQL-only.
+serves aggregated fresh-install windows (`GET /v1/trending`) and per-app
+install/star history (`GET /v1/apps/{slug}/history`); the per-version
+breakdown stays SQL-only.
 
 Non-client traffic: `NonClientRequestLoggingMiddleware` sits next to the UA
 middleware (after response compression, before `UseOutputCache`) and records
@@ -438,15 +438,16 @@ bundle` is rebuilt per deploy, never committed.
   Upserted by `POST /v1/apps/{slug}/installs` in the same transaction
   as the total counter; rejected (unknown or `excluded`) reports write
   nothing. The day comes from the server's UTC clock. Aggregated by
-  `GET /v1/trending` and `GET /v1/apps/{slug}/history`; the stats
-  dashboard also reads it with SQL.
+  `GET /v1/apps/{slug}/history`; the stats dashboard also reads it with SQL.
 - **app_version_install_days** - per-app per-version per-type install
   counts: PK `(app_id, version_code, install_type, day)` (FK to `apps`,
   cascade delete), `install_count`. `version_code` 0 and `install_type`
   `unknown` stand in for reports that omit the optional body fields;
   `fresh` and `update` are the accepted report types. Upserted by
   `POST /v1/apps/{slug}/installs` in the same transaction as
-  `app_install_days`. Read with SQL; no endpoint.
+  `app_install_days`. Aggregated fresh-only by `GET /v1/trending`; the
+  per-version and per-type breakdown is read with SQL by the stats
+  dashboard.
 - **app_star_days** - per-app per-UTC-day star snapshots: PK
   `(app_id, day)` (FK to `apps`, cascade delete), `stars`. Every
   enrichment pass that knows the app's star count upserts today's row
@@ -1549,7 +1550,7 @@ rather than persisting them.
 | `GET /v1/admin/usage-analysis/stats?days=30` | Same token rules. Token and cost totals per day and per model for finished runs. |
 | `DELETE /v1/admin/usage-analysis/pending` | Same token rules. Deletes pending queue rows (running rows are untouched). |
 | `POST /v1/apps/{slug}/installs` | Records one successful client install: atomically increments the app's `installCount` and stamps `install_count_updated_at` (→ 200 `{slug, installCount}` with the new total). Unknown, `excluded` or unpublished slugs → 404. In the same transaction it upserts the `app_install_days` row for the server's current UTC day (`app_id` + `day`, count +1), plus an `app_version_install_days` row keyed on the optional JSON body `{ "versionCode": 123, "installType": "fresh\|update" }`; absent or malformed bodies and out-of-range codes fall back to `versionCode` 0 / `installType` `unknown`, and anything other than `fresh`/`update` (case-insensitive) normalizes to `unknown`, so older clients stay valid. The counter bypasses `UpdatedAt`, so install reports never appear in added/updated and never invalidate detail ETags; the move surfaces only via `installsUpdated` in `/v1/changes`. |
-| `GET /v1/trending` | Ranks published, non-excluded apps by install activity. `days` clamped 1–90 (default 7) is the current window ending today (UTC); `limit` clamped 1–100 (default 20); `sort` ∈ `installs\|growth` (default `installs`), anything else → 400. `installs` orders by the window total; `growth` orders by `delta` (window total minus the previous equal-length window, i.e. fastest growing). Items carry `slug`, `installs`, `previousInstalls`, `delta`; rows with zero installs in the window are omitted, ties break by slug. Ranking runs in memory (same provider constraint as `GET /v1/apps`). Output-cached 10min, `VaryByQuery(*)`. |
+| `GET /v1/trending` | Ranks published, non-excluded apps by fresh-install activity from `app_version_install_days`; only reports typed `fresh` count, so updates and legacy `unknown` reports never rank. `days` clamped 1–90 (default 7) is the current window ending today (UTC); `limit` clamped 1–100 (default 20); `sort` ∈ `installs\|growth` (default `installs`), anything else → 400. `installs` orders by the window total; `growth` orders by `delta` (window total minus the previous equal-length window, i.e. fastest growing). Items carry `slug`, `installs`, `previousInstalls`, `delta`; rows with zero fresh installs in the window are omitted, ties break by slug. Ranking runs in memory (same provider constraint as `GET /v1/apps`). Output-cached 10min, `VaryByQuery(*)`. |
 | `GET /v1/apps/{slug}/history` | Per-day series for the app detail screen. `days` clamped 1–365 (default 30), window ends today (UTC); out-of-range → 400. Unknown, `excluded` or unpublished slugs → 404. `installs[]` starts at the app's first recorded install day instead of the full window (`day` as `yyyy-MM-dd`, `count`, zero-filled from there to today) and is empty when the app never recorded an install, so days before we knew anything are never padded out. `stars[]` carries the last known snapshot across the window and starts at the first-ever `app_star_days` row: days before the first snapshot are omitted rather than invented, and the list is empty when the app never had one (GitHub apps get backfilled daily level points from their first enrichment onward). Output-cached 5min, `VaryByQuery(*)`. |
 
 Rate limit (`/v1/*` only): fixed window, 100 req/min/IP, no queue (→ 429).
