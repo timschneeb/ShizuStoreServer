@@ -50,6 +50,7 @@ public sealed class AppEnricher(
     ITrackerCatalog? trackers = null,
     IUsageAnalysisQueue? usageQueue = null,
     IAppSourceOverrides? sourceOverrides = null)
+    : IEnrichmentPipeline
 {
     // Hand-built callers (tests) fall back to the in-code special cases;
     // production registers the singleton instance.
@@ -67,6 +68,28 @@ public sealed class AppEnricher(
     private VariantGrouper? variantsBacking;
     private VariantGrouper variants =>
         variantsBacking ??= new VariantGrouper(db, downloadStore, icons, log);
+
+    private GitHubReleaseEnricher? githubEnricherBacking;
+    private GitHubReleaseEnricher githubEnricher =>
+        githubEnricherBacking ??= new GitHubReleaseEnricher(
+            this, github, sourceOverrides, downloadStore, starHistory, usageQueue);
+
+    private GitLabReleaseEnricher? gitlabEnricherBacking;
+    private GitLabReleaseEnricher gitlabEnricher =>
+        gitlabEnricherBacking ??= new GitLabReleaseEnricher(this, gitlab, starHistory, downloadStore);
+
+    private GitCodeReleaseEnricher? gitcodeEnricherBacking;
+    private GitCodeReleaseEnricher gitcodeEnricher =>
+        gitcodeEnricherBacking ??= new GitCodeReleaseEnricher(this, gitcode, github);
+
+    private FdroidIndexEnricher? fdroidEnricherBacking;
+    private FdroidIndexEnricher fdroidEnricher =>
+        fdroidEnricherBacking ??= new FdroidIndexEnricher(
+            this, fdroid, launcherIcons, icons, artifacts, downloadStore, github, gitlab, log);
+
+    private FallbackEnricher? fallbackEnricherBacking;
+    private FallbackEnricher fallbackEnricher =>
+        fallbackEnricherBacking ??= new FallbackEnricher(this, play, icons, log);
 
     // READMEs are unbounded; the full-description screen only needs a sane
     // excerpt, so cap what we persist and send.
@@ -288,17 +311,17 @@ public sealed class AppEnricher(
             var mirror = sourceOverrides.GitCodeMirrorFor(owner, repo);
             if (gitcode is not null && mirror is not null)
             {
-                result = await EnrichFromGitCodeAsync(app, mirror, now, ct);
+                result = await gitcodeEnricher.EnrichFromGitCodeAsync(app, mirror, now, ct);
             }
             else
             {
-                result = await EnrichFromGitHubAsync(app, owner, repo, now, ct);
+                result = await githubEnricher.EnrichFromGitHubAsync(app, owner, repo, now, ct);
             }
 
             if (result.Outcome is EnrichOutcome.Enriched or EnrichOutcome.UpToDate
                 && app.SourceKind is not (SourceKind.FDroid or SourceKind.Izzy))
             {
-                await ResolveFdroidCandidateAsync(app, now, ct);
+                await fdroidEnricher.ResolveFdroidCandidateAsync(app, now, ct);
             }
 
             return result;
@@ -309,11 +332,11 @@ public sealed class AppEnricher(
         {
             app.SourceKind = SourceKind.GitLab;
             KeepPlayStoreUrl(app, gitlabPrimary);
-            var result = await EnrichFromGitLabAsync(app, project, now, ct);
+            var result = await gitlabEnricher.EnrichFromGitLabAsync(app, project, now, ct);
             if (result.Outcome is EnrichOutcome.Enriched or EnrichOutcome.UpToDate
                 && app.SourceKind is not (SourceKind.FDroid or SourceKind.Izzy))
             {
-                await ResolveFdroidCandidateAsync(app, now, ct);
+                await fdroidEnricher.ResolveFdroidCandidateAsync(app, now, ct);
             }
 
             return result;
@@ -324,10 +347,10 @@ public sealed class AppEnricher(
             var kind = repoBase == FdroidRepos.IzzyBase ? SourceKind.Izzy : SourceKind.FDroid;
             app.SourceKind = kind;
             KeepPlayStoreUrl(app, fdroidPrimary);
-            return await EnrichFromFdroidAsync(app, repoBase, packageId, now, ct);
+            return await fdroidEnricher.EnrichFromFdroidAsync(app, repoBase, packageId, now, ct);
         }
 
-        return await EnrichFallbackAsync(app, now, ct);
+        return await fallbackEnricher.EnrichFallbackAsync(app, now, ct);
     }
 
     private static bool TryParseFdroid(string? primary, string? secondary,
@@ -359,378 +382,6 @@ public sealed class AppEnricher(
         {
             app.StoreUrl = otherUrl;
         }
-    }
-
-    private async Task<EnrichResult> EnrichFromGitHubAsync(
-        App app, string owner, string repo, DateTimeOffset now, CancellationToken ct)
-    {
-        var target = new SourceTarget(SourceKind.GitHub, $"{owner}/{repo}");
-
-        if (sourceOverrides.ScansAllReleases(owner, repo))
-        {
-            return await EnrichFromAllReleasesAsync(app, owner, repo, target, now, ct);
-        }
-
-        // A failing release list must not gate repo metadata: rate limits or
-        // missing releases would otherwise also blank stars and developer.
-        SourceRelease? latest;
-        try
-        {
-            latest = await TimedAsync(
-                $"github release list {owner}/{repo}",
-                () => github.GetLatestReleaseAsync(target, ChangelogEtag(app), ct));
-        }
-        catch (GitHubApiException ex)
-        {
-            await starHistory.RefreshGitHubStatsAsync(app, owner, repo, now, ct);
-            return await HandleGitHubFailureAsync(app, ex, now, ct);
-        }
-
-        SourceRelease release;
-        try
-        {
-            await starHistory.RefreshGitHubStatsAsync(app, owner, repo, now, ct);
-
-            await RefreshFullDescriptionAsync(
-                app,
-                () => github.GetLinkedMarkdownAsync(app.Url, ct),
-                () => github.GetReadmeMarkdownAsync(owner, repo, ct));
-
-            if (latest is null)
-            {
-                // A 304 would keep pre-fix rows permission-less forever (see
-                // NeedsPermissionHeal), and pre-signal rows would stay without
-                // their analysis signals; refetch the list once and re-analyze
-                // below. A failing refetch is not an upstream change, so stay
-                // up-to-date instead of failing the pass.
-                var current = await downloadStore.PrimaryDownloadAsync(app, ct);
-                if (DownloadStore.NeedsPermissionHeal(app, current) || DownloadStore.NeedsSignalHeal(current) || DownloadStore.NeedsAnalysisHeal(current))
-                {
-                    try
-                    {
-                        latest = await TimedAsync(
-                            $"github release list {owner}/{repo} recheck",
-                            () => github.GetLatestReleaseAsync(target, null, ct));
-                    }
-                    catch (GitHubApiException)
-                    {
-                        latest = null;
-                    }
-                }
-
-                if (latest is null)
-                {
-                    app.LastCheckedAt = now;
-                    return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "release feed not modified" };
-                }
-            }
-
-            app.DownloadTotal = latest.TotalDownloads;
-            app.Changelog = NormalizeChangelog(latest.Changelog);
-            app.ChangelogUrl = latest.WebUrl;
-            release = latest;
-        }
-        catch (GitHubApiException ex)
-        {
-            return await HandleGitHubFailureAsync(app, ex, now, ct);
-        }
-
-        // A forge whose newest release ships no binary is no longer the
-        // download channel; remember that so later passes and primary
-        // recomputes keep preferring an alternative source.
-        app.ForgeAssetsStale = release.IsOlderFallback;
-        if (release.IsOlderFallback && await TryAlternativeSourceAsync(app, release, now, ct) is { } alternative)
-        {
-            return alternative;
-        }
-
-        if (await EnrichFromReleaseAsync(app, SourceKind.GitHub, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
-        {
-            return enriched;
-        }
-
-        if (await TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
-        {
-            return fdroidFallback;
-        }
-
-        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
-        {
-            return playFallback;
-        }
-
-        return Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
-    }
-
-    /// <summary>
-    /// The forge's newest release ships no installable artifact, so an
-    /// F-Droid build is the better served version when one exists. A missing
-    /// or failing alternative returns null and the older forge APK is used,
-    /// so index trouble never costs the download.
-    /// </summary>
-    private async Task<EnrichResult?> TryAlternativeSourceAsync(
-        App app, SourceRelease release, DateTimeOffset now, CancellationToken ct)
-    {
-        var previous = await downloadStore.PrimaryDownloadAsync(app, ct);
-        var result = await TryFdroidFallbackAsync(app, now, ct);
-        if (result is null || result.Outcome == EnrichOutcome.Failed)
-        {
-            return null;
-        }
-
-        // The forge release notes are the app's changelog; the index
-        // description only stands when the forge publishes none.
-        if (release.Changelog is not null)
-        {
-            app.Changelog = NormalizeChangelog(release.Changelog);
-            app.ChangelogUrl = release.WebUrl;
-        }
-
-        // The stored report describes the old forge build now; re-run it
-        // against the served alternative build.
-        var served = await downloadStore.PrimaryDownloadAsync(app, ct);
-        if (usageQueue is not null
-            && app.UsageAnalyzedAt is not null
-            && previous is not null
-            && served is not null
-            && previous.ApkUrl != served.ApkUrl)
-        {
-            await usageQueue.EnqueueAsync(
-                app, artifactChanged: true, firstAnalysis: false,
-                releaseRef: served.ReleaseTag ?? ReleaseTagParser.FromArtifactUrl(served.ApkUrl), ct);
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// A release-list failure must not lock the source: an app with no
-    /// releases may still be F-Droid-only, and a transient API error (rate
-    /// limit, 5xx) is not a content change.
-    /// </summary>
-    private async Task<EnrichResult> HandleGitHubFailureAsync(
-        App app, GitHubApiException ex, DateTimeOffset now, CancellationToken ct)
-    {
-        if (ex.Status == HttpStatusCode.NotFound
-            && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
-        {
-            return rescued;
-        }
-
-        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-        {
-            return play;
-        }
-
-        return Fail(app, now, $"GitHub: {ex.Message}");
-    }
-
-    /// <summary>
-    /// SmartspacerPlugins publishes each plugin as its own GitHub release, so
-    /// the newest release only carries one of the packages. Scan every release
-    /// and let the shared pipeline group the assets by package.
-    /// </summary>
-    private async Task<EnrichResult> EnrichFromAllReleasesAsync(
-        App app, string owner, string repo, SourceTarget target, DateTimeOffset now, CancellationToken ct)
-    {
-        await starHistory.RefreshGitHubStatsAsync(app, owner, repo, now, ct);
-
-        await RefreshFullDescriptionAsync(
-            app,
-            () => github.GetLinkedMarkdownAsync(app.Url, ct),
-            () => github.GetReadmeMarkdownAsync(owner, repo, ct));
-
-        IReadOnlyList<SourceRelease> releases;
-        try
-        {
-            releases = await github.GetAllReleasesAsync(target, ct);
-        }
-        catch (GitHubApiException ex)
-        {
-            return await HandleGitHubFailureAsync(app, ex, now, ct);
-        }
-
-        if (releases.Count == 0)
-        {
-            app.LastCheckedAt = now;
-            return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "no releases" };
-        }
-
-        app.DownloadTotal = releases.Sum(r => r.TotalDownloads);
-        app.Changelog = NormalizeChangelog(releases[0].Changelog);
-        app.ChangelogUrl = releases[0].WebUrl;
-        var assets = releases.SelectMany(r => r.Assets).ToList();
-        if (await EnrichFromAssetsAsync(
-                app, SourceKind.GitHub, assets, null, releaseReleasedAt: null, releaseTag: null,
-                urlIdentifiesVersion: false, alwaysAnalyzePrimary: false, isPrerelease: false, now, ct) is { } enriched)
-        {
-            return enriched;
-        }
-
-        if (await TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
-        {
-            return fdroidFallback;
-        }
-
-        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
-        {
-            return playFallback;
-        }
-
-        return Fail(app, now, $"GitHub repo {owner}/{repo} has no .apk asset.");
-    }
-
-    /// <summary>
-    /// hlbmerge_flutter's APK builds exist only on the GitCode mirror. The
-    /// asset URL embeds the tag, so an unchanged URL plus a recorded version
-    /// code skips the download.
-    /// </summary>
-    private async Task<EnrichResult> EnrichFromGitCodeAsync(
-        App app, GitCodeMirror mirror, DateTimeOffset now, CancellationToken ct)
-    {
-        // The APK lives on the mirror but the list links the GitHub repo, so
-        // the README still comes from GitHub.
-        await RefreshFullDescriptionAsync(
-            app,
-            () => github.GetLinkedMarkdownAsync(app.Url, ct),
-            () => github.GetReadmeMarkdownAsync(mirror.ReadmeOwner, mirror.ReadmeRepo, ct));
-
-        SourceRelease release;
-        try
-        {
-            var target = new SourceTarget(
-                SourceKind.Other, $"{mirror.Owner}/{mirror.Repo}");
-            var latest = await TimedAsync(
-                $"gitcode release list {mirror.Owner}/{mirror.Repo}",
-                () => gitcode!.GetLatestReleaseAsync(target, app.EnrichEtag, ct));
-            if (latest is null)
-            {
-                app.LastCheckedAt = now;
-                return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "release feed not modified" };
-            }
-
-            release = latest;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return Fail(app, now, $"GitCode: {ex.Message}");
-        }
-
-        if (await EnrichFromReleaseAsync(app, SourceKind.Other, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
-        {
-            return enriched;
-        }
-
-        return Fail(app, now, $"GitCode release {release.TagName} of "
-            + $"{mirror.Owner}/{mirror.Repo} has no .apk asset.");
-    }
-
-    private async Task<EnrichResult> EnrichFromGitLabAsync(
-        App app, string projectPath, DateTimeOffset now, CancellationToken ct)
-    {
-        starHistory.ApplyGitLabAuthor(app, projectPath);
-
-        var target = new SourceTarget(SourceKind.GitLab, projectPath);
-
-        SourceRelease? latest;
-        try
-        {
-            latest = await TimedAsync(
-                $"gitlab release list {projectPath}",
-                () => gitlab.GetLatestReleaseAsync(target, ChangelogEtag(app), ct));
-        }
-        catch (GitLabApiException ex)
-        {
-            await starHistory.RefreshGitLabStatsAsync(app, projectPath, ct);
-            if (ex.Status == HttpStatusCode.NotFound
-                && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
-            {
-                return rescued;
-            }
-
-            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-            {
-                return play;
-            }
-
-            return Fail(app, now, $"GitLab: {ex.Message}");
-        }
-
-        SourceRelease release;
-        try
-        {
-            await starHistory.RefreshGitLabStatsAsync(app, projectPath, ct);
-
-            await RefreshFullDescriptionAsync(
-                app,
-                () => gitlab.GetLinkedMarkdownAsync(app.Url, ct),
-                () => gitlab.GetReadmeMarkdownAsync(projectPath, ct));
-
-            if (latest is null)
-            {
-                // A 304 would keep pre-fix rows permission-less forever (see
-                // NeedsPermissionHeal), and pre-signal rows would stay without
-                // their analysis signals; refetch the list once and re-analyze
-                // below. A failing refetch is not an upstream change, so stay
-                // up-to-date instead of failing the pass.
-                var current = await downloadStore.PrimaryDownloadAsync(app, ct);
-                if (DownloadStore.NeedsPermissionHeal(app, current) || DownloadStore.NeedsSignalHeal(current) || DownloadStore.NeedsAnalysisHeal(current))
-                {
-                    try
-                    {
-                        latest = await TimedAsync(
-                            $"gitlab release list {projectPath} recheck",
-                            () => gitlab.GetLatestReleaseAsync(target, null, ct));
-                    }
-                    catch (GitLabApiException)
-                    {
-                        latest = null;
-                    }
-                }
-
-                if (latest is null)
-                {
-                    app.LastCheckedAt = now;
-                    return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "release feed not modified" };
-                }
-            }
-
-            release = latest;
-            app.Changelog = NormalizeChangelog(release.Changelog);
-            app.ChangelogUrl = release.WebUrl;
-        }
-        catch (GitLabApiException ex)
-        {
-            if (ex.Status == HttpStatusCode.NotFound
-                && await TryFdroidFallbackAsync(app, now, ct) is { } rescued)
-            {
-                return rescued;
-            }
-
-            if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-            {
-                return play;
-            }
-
-            return Fail(app, now, $"GitLab: {ex.Message}");
-        }
-
-        if (await EnrichFromReleaseAsync(app, SourceKind.GitLab, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
-        {
-            return enriched;
-        }
-
-        if (await TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
-        {
-            return fdroidFallback;
-        }
-
-        if (await TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
-        {
-            return playFallback;
-        }
-
-        return Fail(app, now, $"GitLab release {release.TagName} of {projectPath} has no .apk asset link.");
     }
 
     /// <summary>
@@ -1338,415 +989,6 @@ public sealed class AppEnricher(
     public const int CurrentAnalysisVersion = 2;
 
     /// <summary>
-    /// Rescue path for apps whose forge published no APK: package id from an
-    /// F-Droid/Izzy URL, else an F-Droid index lookup by the repo's forge
-    /// URL. A hit becomes the app's primary download (the only candidate),
-    /// recorded in the signature-keyed downloads list like any other source.
-    /// Returns null when the app is not published on F-Droid (the forge
-    /// failure then stands). Best-effort: index trouble never replaces the
-    /// forge error.
-    /// </summary>
-    private async Task<EnrichResult?> TryFdroidFallbackAsync(App app, DateTimeOffset now, CancellationToken ct)
-    {
-        if (TryParseFdroid(app.Url, app.SourceUrl, out var repoBase, out var packageId, out _))
-        {
-            return await EnrichFromFdroidAsync(app, repoBase, packageId, now, ct);
-        }
-
-        var repoKey = SourceClassifier.RepoKey(app.Url) ?? SourceClassifier.RepoKey(app.SourceUrl);
-        if (repoKey is null)
-        {
-            return null;
-        }
-
-        FdroidPackageInfo? package;
-        try
-        {
-            package = await fdroid.FindPackageBySourceAsync(FdroidRepos.FDroidBase, repoKey, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return null;
-        }
-
-        return package is null
-            ? null
-            : await EnrichFromFdroidAsync(app, FdroidRepos.FDroidBase, package.PackageName, now, ct);
-    }
-
-    private async Task<EnrichResult> EnrichFromFdroidAsync(
-        App app, string repoBase, string packageId, DateTimeOffset now, CancellationToken ct)
-    {
-        (IReadOnlyList<FdroidPackageInfo> Packages, string? IndexEtag)? fetched;
-        try
-        {
-            fetched = await fdroid.GetPackagesAsync(repoBase, packageId, ChangelogEtag(app), ct);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException or InvalidDataException)
-        {
-            return Fail(app, now, $"F-Droid: {ex.Message}");
-        }
-
-        if (fetched is null)
-        {
-            // A 304 would keep pre-fix rows permission-less forever (see
-            // NeedsPermissionHeal), and legacy index-only rows would stay
-            // without a SHA-256 identity; refetch the index once and
-            // re-analyze below. The provider memoizes the forced fetch, so a
-            // rerun cannot loop on it. A failing refetch is not an upstream
-            // change, so stay up-to-date instead of failing the pass.
-            var primary = await downloadStore.PrimaryDownloadAsync(app, ct);
-            if (DownloadStore.NeedsPermissionHeal(app, primary)
-                || DownloadStore.NeedsSignalHeal(primary)
-                || DownloadStore.NeedsAnalysisHeal(primary)
-                || (primary is not null && !primary.Analyzed && primary.SigSha256 is null))
-            {
-                try
-                {
-                    fetched = await fdroid.GetPackagesAsync(repoBase, packageId, null, ct, force: true);
-                }
-                catch (Exception ex) when (ex is HttpRequestException or JsonException or InvalidDataException)
-                {
-                    fetched = null;
-                }
-            }
-
-            if (fetched is null)
-            {
-                app.LastCheckedAt = now;
-                return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "index not modified" };
-            }
-        }
-
-        var (packages, indexEtag) = fetched.Value;
-        var package = packages.FirstOrDefault();
-        if (package is null)
-        {
-            return Fail(app, now, $"F-Droid: package {packageId} not in the {repoBase} index.");
-        }
-
-        // The index <desc> is the only changelog text these repos publish.
-        app.Changelog = NormalizeChangelog(package.LongDescription);
-
-        var kind = repoBase == FdroidRepos.IzzyBase ? SourceKind.Izzy : SourceKind.FDroid;
-        app.SourceKind = kind;
-
-        // f-droid.org publishes no download counts; only the Izzy repo does.
-        if (kind == SourceKind.Izzy)
-        {
-            await downloadStore.ApplyIzzyDownloadsAsync(app, package.PackageName, ct);
-        }
-
-        var apkUrl = $"{repoBase.TrimEnd('/')}/{package.ApkName}";
-        var siblings = DownloadStore.FdroidSiblings(packages, package);
-        var recorded = await downloadStore.LoadDownloadsAsync(app, ct);
-        var siblingsRecorded = siblings.All(s => recorded.Any(d =>
-            d.Source == kind
-            && d.SourceRef == packageId
-            && d.Abi == s.Abi
-            && d.ApkUrl.EndsWith('/' + s.ApkName, StringComparison.Ordinal)));
-        var current = await downloadStore.PrimaryDownloadAsync(app, ct);
-        if (current is not null
-            && current.Source == kind
-            && current.ApkUrl == apkUrl
-            && current.VersionCode == package.VersionCode
-            && current.Sha256 is not null
-            && (package.Sha256 is null || EnrichmentQueries.HashMatches(current.Sha256, package.Sha256))
-            && app.PackageName is not null
-            && app.IconHash is not null && icons.IconFileExists(app.IconHash)
-            && !DownloadStore.NeedsPermissionHeal(app, current)
-            && !DownloadStore.NeedsSignerBackfill(current, package)
-            && !DownloadStore.NeedsSignalHeal(current)
-            && !DownloadStore.NeedsAnalysisHeal(current)
-            && siblingsRecorded)
-        {
-            // Heals the release date on rows enriched before the index date
-            // was parsed; everything else about the row is already current.
-            DownloadStore.StampFdroidDate(app, package, now);
-            app.EnrichEtag = indexEtag;
-            app.LastCheckedAt = now;
-            return new EnrichResult(EnrichOutcome.UpToDate, null) { Detail = "index unchanged" };
-        }
-
-        // Changed version: analyze the actual APK (same quality bar as forge
-        // builds). Anything wrong with the file falls back to the index-only
-        // record, except a package-name mismatch, which means the index row
-        // and the file disagree, so the old values are kept.
-        var oldIcon = app.IconHash;
-        using var analyzed = await artifacts.TryAnalyzeDownloadAsync(apkUrl, ct);
-        if (analyzed is not null && analyzed.Badging.PackageName != package.PackageName)
-        {
-            return Fail(app, now, $"F-Droid: {apkUrl} contains {analyzed.Badging.PackageName}, expected {package.PackageName}.");
-        }
-
-        var icon = analyzed is not null
-            && await launcherIcons.ResolveAsync(analyzed.ApkPath, analyzed.Badging, ct) is { } apkIcon
-            ? apkIcon
-            : await icons.MirrorIconAsync(package.IconFile, repoBase, app.Name, ct);
-        await icons.WriteIconFileAsync(icon, ct);
-
-        var versionCode = analyzed?.Badging.VersionCode ?? package.VersionCode;
-        var versionName = analyzed?.Badging.VersionName ?? package.VersionName;
-        var minSdk = analyzed?.Badging.MinSdk ?? package.MinSdk;
-        // Index signers come from index-v2 manifest.signer.sha256; an
-        // analyzed APK wins because it reflects the actual file.
-        var sigSha256 = analyzed is null
-            ? package.SigSha256
-            : CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Sha256));
-        var sigMd5 = analyzed is null
-            ? null
-            : CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Md5));
-
-        await downloadStore.UpsertDownloadAsync(app, new DownloadCandidate(
-            kind,
-            packageId,
-            apkUrl,
-            null,
-            versionCode,
-            versionName,
-            analyzed?.FileSize ?? package.Size,
-            analyzed?.FileSha256 ?? package.Sha256,
-            sigSha256,
-            sigMd5,
-            minSdk,
-            analyzed?.Badging.Abi ?? package.Abi,
-            TargetSdk: analyzed?.Badging.TargetSdk,
-            CompileSdk: analyzed?.Badging.CompileSdk,
-            Locales: analyzed?.Badging.Locales,
-            Abis: analyzed?.Badging.Abis,
-            LocalizedLabels: analyzed is null ? null : DownloadStore.LocalizedLabelEntries(analyzed.Badging.LocalizedLabels),
-            SignerDn: analyzed?.Signers.Dn,
-            SignerScheme: analyzed?.Signers.Scheme,
-            SignerKeyAlgorithm: analyzed?.Signers.KeyAlgorithm,
-            AnalysisVersion: analyzed is null ? 0 : CurrentAnalysisVersion,
-            Inspection: analyzed?.Inspection,
-            PackageName: package.PackageName, Analyzed: analyzed is not null,
-            ShizukuDeclared: ShizukuPermission.IsDeclared(package.Permissions ?? [])), now, ct);
-        await downloadStore.RecomputePrimaryAsync(app, ct, package.PackageName);
-
-        app.PackageName = package.PackageName;
-        if (analyzed is not null)
-        {
-            // The analyzed APK's permission list belongs to the served
-            // build regardless of source; index-only rows keep prior values.
-            app.Permissions = analyzed.Badging.Permissions.ToList();
-        }
-
-        app.IconHash = icon.Sha256;
-        app.IconAdaptive = icon.Adaptive;
-        app.Availability = Availability.DirectApk;
-        app.EnrichEtag = indexEtag;
-        app.ExcludedReason = null;
-        app.LastCheckedAt = now;
-        app.LastError = null;
-
-        // The index lists one package per architecture; record the siblings as
-        // index-only rows so the client can pick the device's ABI.
-        await downloadStore.UpsertFdroidSiblingsAsync(app, kind, repoBase, packageId, packages, package, now, ct);
-        await downloadStore.RecomputePrimaryAsync(app, ct, package.PackageName);
-
-        await downloadStore.AddVersionRowAsync(app, versionCode, versionName, apkUrl, false, now, ct);
-
-        DownloadStore.StampFdroidDate(app, package, now);
-
-        await icons.DeleteIconIfOrphanedAsync(app, oldIcon, ct);
-        await ResolveForgeCandidateFromSourceAsync(app, package.SourceUrl, now, ct);
-        if (kind == SourceKind.Izzy)
-        {
-            // Izzy builds come from the developers, F-Droid rebuilds are a
-            // distinct source; record the f-droid.org candidate as well.
-            await ResolveFdroidCandidateAsync(app, now, ct);
-        }
-
-        return new EnrichResult(EnrichOutcome.Enriched, null);
-    }
-
-    /// <summary>
-    /// F-Droid candidate for forge-primary apps: when the same package is
-    /// published on F-Droid, record its build next to the primary forge
-    /// build. Only runs after a fresh primary enrich (never on
-    /// <c>SkippedFresh</c>); candidate problems are best-effort and never
-    /// change the primary outcome.
-    /// </summary>
-    private async Task ResolveFdroidCandidateAsync(App app, DateTimeOffset now, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(app.PackageName))
-        {
-            return;
-        }
-
-        FdroidPackageInfo? package;
-        IReadOnlyList<FdroidPackageInfo> packages = [];
-        try
-        {
-            var fetched = await fdroid.GetPackagesAsync(FdroidRepos.FDroidBase, app.PackageName, seedEtag: null, ct);
-            if (fetched is null)
-            {
-                return; // 304 with nothing cached: no new information.
-            }
-
-            packages = fetched.Value.Packages;
-            package = packages.FirstOrDefault();
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return; // Best-effort candidate: index trouble never fails the primary.
-        }
-
-        if (package is null)
-        {
-            await downloadStore.RemoveDownloadAsync(app, SourceKind.FDroid, ct);
-            await RecomputePrimaryAfterCandidateAsync(app, ct);
-            return;
-        }
-
-        var apkUrl = $"{FdroidRepos.FDroidBase.TrimEnd('/')}/{package.ApkName}";
-        await downloadStore.UpsertFdroidSiblingsAsync(
-            app, SourceKind.FDroid, FdroidRepos.FDroidBase, package.PackageName, packages, package, now, ct);
-        var existing = (await downloadStore.LoadDownloadsAsync(app, ct))
-            .FirstOrDefault(d => d.Source == SourceKind.FDroid
-                && d.ApkUrl == apkUrl
-                && d.VersionCode == package.VersionCode
-                && d.Sha256 is not null);
-        if (existing is not null)
-        {
-            // Backfill the SHA-256 identity from the index when the first
-            // discovery predates the signer map.
-            if (existing.SigSha256 is null && package.SigSha256 is not null)
-            {
-                existing.SigSha256 = package.SigSha256;
-                existing.ResolvedAt = now;
-            }
-
-            // The index knows the declared permissions even for builds the
-            // analyzer never downloaded; use it as a second witness.
-            if (!existing.ShizukuDeclared && ShizukuPermission.IsDeclared(package.Permissions ?? []))
-            {
-                existing.ShizukuDeclared = true;
-                existing.ResolvedAt = now;
-            }
-
-            await RecomputePrimaryAfterCandidateAsync(app, ct);
-            return;
-        }
-
-        using var analyzed = await artifacts.TryAnalyzeDownloadAsync(apkUrl, ct);
-        var candidate = analyzed is not null && analyzed.Badging.PackageName == package.PackageName
-            ? new DownloadCandidate(
-                SourceKind.FDroid,
-                package.PackageName,
-                apkUrl,
-                null,
-                analyzed.Badging.VersionCode,
-                analyzed.Badging.VersionName,
-                analyzed.FileSize,
-                analyzed.FileSha256,
-                CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Sha256)),
-                CertFingerprint.Join(analyzed.Signers.Signers.Select(s => s.Md5)),
-                analyzed.Badging.MinSdk,
-                analyzed.Badging.Abi,
-                TargetSdk: analyzed.Badging.TargetSdk,
-                CompileSdk: analyzed.Badging.CompileSdk,
-                Locales: analyzed.Badging.Locales,
-                Abis: analyzed.Badging.Abis,
-                LocalizedLabels: DownloadStore.LocalizedLabelEntries(analyzed.Badging.LocalizedLabels),
-                SignerDn: analyzed.Signers.Dn,
-                SignerScheme: analyzed.Signers.Scheme,
-                SignerKeyAlgorithm: analyzed.Signers.KeyAlgorithm,
-                AnalysisVersion: CurrentAnalysisVersion,
-                Inspection: analyzed.Inspection,
-                PackageName: package.PackageName, Analyzed: true,
-                ShizukuDeclared: ShizukuPermission.IsDeclared(package.Permissions ?? []))
-            : new DownloadCandidate(
-                SourceKind.FDroid,
-                package.PackageName,
-                apkUrl,
-                null,
-                package.VersionCode,
-                package.VersionName,
-                package.Size,
-                package.Sha256,
-                package.SigSha256,
-                null,
-                package.MinSdk,
-                package.Abi,
-                PackageName: package.PackageName,
-                ShizukuDeclared: ShizukuPermission.IsDeclared(package.Permissions ?? []));
-        await downloadStore.UpsertDownloadAsync(app, candidate, now, ct);
-        await RecomputePrimaryAfterCandidateAsync(app, ct);
-    }
-
-    /// <summary>
-    /// Recomputes the primary after an F-Droid candidate changed the row set.
-    /// The forge pass just settled the primary with release-tag precedence, so
-    /// the candidate must not undo it: without the tag a higher-coded
-    /// prerelease row would outrank the freshly served stable build.
-    /// </summary>
-    private async Task RecomputePrimaryAfterCandidateAsync(App app, CancellationToken ct)
-    {
-        var primary = await downloadStore.PrimaryDownloadAsync(app, ct);
-        await downloadStore.RecomputePrimaryAsync(app, ct, app.PackageName, primary?.ReleaseTag);
-    }
-
-    /// <summary>
-    /// Exposes the forge build alongside an F-Droid-primary app when the index
-    /// names a forge repo (<c>&lt;application&gt;&lt;source&gt;</c>). Candidate-only:
-    /// presentation stays with the F-Droid build and every failure is swallowed.
-    /// </summary>
-    private async Task ResolveForgeCandidateFromSourceAsync(App app, string? sourceUrl, DateTimeOffset now, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(sourceUrl))
-        {
-            return;
-        }
-
-        try
-        {
-            if (SourceClassifier.TryParseGitHubRepo(sourceUrl, out var owner, out var repo))
-            {
-                var target = new SourceTarget(SourceKind.GitHub, $"{owner}/{repo}");
-                var release = await github.GetLatestReleaseAsync(target, null, ct);
-                if (release is null)
-                {
-                    return;
-                }
-
-                var asset = ApkAssetSelector.PickApk(release.Assets);
-                if (asset is not null)
-                {
-                    await ResolveCandidateApkAsync(app, asset.Url, release.Etag, SourceKind.GitHub, now, ct);
-                }
-                else if (ApkAssetSelector.PickZip(release.Assets) is { } zip)
-                {
-                    await ResolveCandidateZipAsync(app, zip.Url, release.Etag, SourceKind.GitHub, now, ct);
-                }
-
-                return;
-            }
-
-            if (SourceClassifier.TryParseGitLabRepo(sourceUrl, out var projectPath))
-            {
-                var release = await gitlab.GetLatestReleaseAsync(
-                    new SourceTarget(SourceKind.GitLab, projectPath), null, ct);
-                if (release is null)
-                {
-                    return;
-                }
-
-                var link = ApkAssetSelector.PickApk(release.Assets);
-                if (link is not null)
-                {
-                    await ResolveCandidateApkAsync(app, link.Url, release.Etag, SourceKind.GitLab, now, ct);
-                }
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            log?.LogDebug(ex, "Forge candidate resolution failed for {Slug}.", app.Slug);
-        }
-    }
-
-    /// <summary>
     /// Records an extra source for an app without letting the candidate
     /// disturb the primary: download, upsert the signature keyed row and
     /// stamp the check, nothing else.
@@ -1915,134 +1157,6 @@ public sealed class AppEnricher(
     public Task<EnrichResult> CommitIconRefreshAsync(
         App app, byte[]? png, CancellationToken ct = default, bool force = false, bool isAdaptive = false) =>
         icons.CommitAsync(app, png, ct, force, isAdaptive);
-    private async Task<EnrichResult> EnrichFallbackAsync(App app, DateTimeOffset now, CancellationToken ct)
-    {
-        var kind = SourceClassifier.Classify(app.Url);
-        app.SourceKind = kind;
-
-        // Play listings carry the only metadata external-only apps have.
-        var playDetails = kind == SourceKind.Play
-            ? await FetchPlayDetailsAsync(app, ct)
-            : null;
-        ApplyPlayDetails(app, playDetails);
-
-        // The real Play listing icon beats a generated avatar when linked.
-        var hasIcon = playDetails?.IconUrl is { Length: > 0 } remoteIcon
-            ? await icons.TryAdoptPlayIconAsync(app, remoteIcon, ct)
-            : await icons.TryPlayIconAsync(app, now, ct);
-        if (!hasIcon)
-        {
-            var avatar = LetterAvatarGenerator.Generate(app.DisplayName ?? app.Name);
-            await icons.WriteIconFileAsync(avatar, ct);
-            app.IconHash = avatar.Sha256;
-            app.IconAdaptive = false;
-        }
-
-        if (kind == SourceKind.Play)
-        {
-            app.Availability = Availability.PlayRedirect;
-            app.StoreUrl = app.Url;
-            app.ExcludedReason = null;
-        }
-        else
-        {
-            app.Availability = Availability.LinkOnly;
-            app.ExcludedReason = null;
-        }
-
-        app.LastCheckedAt = now;
-        app.LastError = null;
-        return new EnrichResult(EnrichOutcome.AvatarFallback, null);
-    }
-
-    /// <summary>
-    /// Resolves the linked Play listing and returns its scraped details.
-    /// Best effort: a missing page or an unparseable package id leaves the
-    /// app untouched, so a Play redirect can still fall back to the avatar.
-    /// </summary>
-    private async Task<PlayAppDetails?> FetchPlayDetailsAsync(App app, CancellationToken ct)
-    {
-        if (play is null)
-        {
-            return null;
-        }
-
-        var packageId = string.Empty;
-        if (!SourceClassifier.TryParsePlayPackage(app.Url, out packageId)
-            && !SourceClassifier.TryParsePlayPackage(app.SourceUrl, out packageId)
-            && !SourceClassifier.TryParsePlayPackage(app.StoreUrl, out packageId))
-        {
-            return null;
-        }
-
-        // The listing URL is the authoritative package identity for Play apps.
-        app.PackageName = packageId;
-
-        try
-        {
-            return await play.GetAppDetailsAsync(packageId, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            log?.LogDebug(ex, "Play details fetch failed for {Slug}.", app.Slug);
-            return null;
-        }
-    }
-
-    private static void ApplyPlayDetails(App app, PlayAppDetails? details)
-    {
-        if (details is null)
-        {
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(details.DeveloperName))
-        {
-            app.AuthorName = details.DeveloperName;
-            app.AuthorUrl = details.DeveloperUrl;
-            app.AuthorKey = string.IsNullOrWhiteSpace(details.DeveloperId)
-                ? $"play:{details.DeveloperName.ToLowerInvariant()}"
-                : $"play:{details.DeveloperId}";
-        }
-
-        if (!string.IsNullOrWhiteSpace(details.VersionName))
-        {
-            app.VersionName = details.VersionName;
-        }
-
-        // Play publishes a real last-update date, unlike a detection time.
-        if (details.UpdatedAt is { } updated
-            && (app.VersionUpdatedAt is null || updated > app.VersionUpdatedAt))
-        {
-            app.VersionUpdatedAt = updated;
-        }
-
-        if (!string.IsNullOrWhiteSpace(details.FullDescription))
-        {
-            app.FullDescription = details.FullDescription.Length > MaxFullDescriptionChars
-                ? details.FullDescription[..MaxFullDescriptionChars]
-                : details.FullDescription;
-            // Play text is not markdown and has no raw route; drop a stale
-            // README URL so clients never refetch the wrong document.
-            app.ReadmeUrl = null;
-        }
-    }
-
-    /// <summary>
-    /// A source repo without an APK is not a dead end when the list entry
-    /// points at a Play listing: run the normal source fallback so the app
-    /// becomes a Play redirect instead of a bare link.
-    /// </summary>
-    private async Task<EnrichResult?> TryPlayRedirectFallbackAsync(
-        App app, DateTimeOffset now, CancellationToken ct)
-    {
-        if (SourceClassifier.Classify(app.Url) != SourceKind.Play)
-        {
-            return null;
-        }
-
-        return await EnrichFallbackAsync(app, now, ct);
-    }
 
     private static EnrichResult Fail(App app, DateTimeOffset now, string message)
     {
@@ -2050,4 +1164,53 @@ public sealed class AppEnricher(
         app.LastError = message.Length > 500 ? message[..500] + "…" : message;
         return new EnrichResult(EnrichOutcome.Failed, app.LastError);
     }
+
+    int IEnrichmentPipeline.MaxFullDescriptionChars => MaxFullDescriptionChars;
+
+    int IEnrichmentPipeline.CurrentAnalysisVersion => CurrentAnalysisVersion;
+
+    Task<T> IEnrichmentPipeline.TimedAsync<T>(string label, Func<Task<T>> action) =>
+        TimedAsync(label, action);
+
+    string IEnrichmentPipeline.NormalizeChangelog(string? value) => NormalizeChangelog(value);
+
+    string? IEnrichmentPipeline.ChangelogEtag(App app) => ChangelogEtag(app);
+
+    Task IEnrichmentPipeline.RefreshFullDescriptionAsync(
+        App app, Func<Task<ReadmeDocument?>> fetchLinked, Func<Task<ReadmeDocument?>> fetchDefault) =>
+        RefreshFullDescriptionAsync(app, fetchLinked, fetchDefault);
+
+    Task<EnrichResult?> IEnrichmentPipeline.EnrichFromReleaseAsync(
+        App app, SourceKind kind, SourceRelease release, bool urlIdentifiesVersion,
+        DateTimeOffset now, CancellationToken ct) =>
+        EnrichFromReleaseAsync(app, kind, release, urlIdentifiesVersion, now, ct);
+
+    Task<EnrichResult?> IEnrichmentPipeline.EnrichFromAssetsAsync(
+        App app, SourceKind kind, IReadOnlyList<SourceAsset> assets, string? etag,
+        DateTimeOffset? releaseReleasedAt, string? releaseTag, bool urlIdentifiesVersion, bool alwaysAnalyzePrimary,
+        bool isPrerelease, DateTimeOffset now, CancellationToken ct) =>
+        EnrichFromAssetsAsync(
+            app, kind, assets, etag, releaseReleasedAt, releaseTag, urlIdentifiesVersion,
+            alwaysAnalyzePrimary, isPrerelease, now, ct);
+
+    Task<EnrichResult?> IEnrichmentPipeline.TryFdroidFallbackAsync(App app, DateTimeOffset now, CancellationToken ct) =>
+        fdroidEnricher.TryFdroidFallbackAsync(app, now, ct);
+
+    Task<EnrichResult?> IEnrichmentPipeline.TryPlayRedirectFallbackAsync(App app, DateTimeOffset now, CancellationToken ct) =>
+        fallbackEnricher.TryPlayRedirectFallbackAsync(app, now, ct);
+
+    Task IEnrichmentPipeline.ResolveCandidateApkAsync(
+        App app, string url, string? etag, SourceKind kind, DateTimeOffset now, CancellationToken ct) =>
+        ResolveCandidateApkAsync(app, url, etag, kind, now, ct);
+
+    Task IEnrichmentPipeline.ResolveCandidateZipAsync(
+        App app, string url, string? etag, SourceKind kind, DateTimeOffset now, CancellationToken ct) =>
+        ResolveCandidateZipAsync(app, url, etag, kind, now, ct);
+
+    bool IEnrichmentPipeline.TryParseFdroid(string? primary, string? secondary,
+        out string repoBase, out string packageId, out bool fromPrimary) =>
+        TryParseFdroid(primary, secondary, out repoBase, out packageId, out fromPrimary);
+
+    EnrichResult IEnrichmentPipeline.Fail(App app, DateTimeOffset now, string message) =>
+        Fail(app, now, message);
 }
