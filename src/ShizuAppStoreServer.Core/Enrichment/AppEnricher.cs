@@ -17,61 +17,23 @@ using ShizuAppStoreServer.Core.UsageAnalysis;
 
 namespace ShizuAppStoreServer.Core.Enrichment;
 
-public enum EnrichOutcome
-{
-    /// <summary>APK downloaded + aapt2 parsed, row updated (possibly with letter-avatar icon).</summary>
-    Enriched,
-    /// <summary>Release feed / repo index answered 304 Not Modified (or the same asset is already recorded); only <c>last_checked_at</c> touched.</summary>
-    UpToDate,
-    /// <summary>No forge source: letter-avatar icon, source kind set, no APK fields.</summary>
-    AvatarFallback,
-    /// <summary>Something failed; <c>last_error</c> set, backoff applies. Previous good values kept.</summary>
-    Failed,
-    /// <summary>Checked recently (success or backoff window); no work done.</summary>
-    SkippedFresh,
-}
-
-public sealed record EnrichResult(EnrichOutcome Outcome, string? Error)
-{
-    /// <summary>
-    /// Optional human-readable reason for a non-action outcome, e.g. why a run
-    /// skipped an app or only skipped APK analysis. Written to the run log.
-    /// </summary>
-    public string? Detail { get; init; }
-}
-
 /// <summary>
-/// Phase-A outcome of a batched icon refresh: either final already
-/// (raster written, up-to-date, failed) or a staged <c>Pending</c> entry
-/// awaiting the shared render plus a commit call.
-/// </summary>
-public sealed record PrepareIconResult(
-    EnrichOutcome Outcome, string? Error, PendingBatchIcon? Pending);
-
-/// <summary>
-/// Per-app enrichment. Resolution is forge-first: GitHub and GitLab releases
-/// resolve to an APK asset (temp download → <c>aapt2 dump badging</c> →
-/// <c>apksigner</c> fingerprints → best-density icon → fill the APK columns →
+/// Per-app enrichment. Resolution is forge-first: GitHub, GitLab and GitCode
+/// releases resolve to an APK asset (temp download, <c>aapt2 dump badging</c>,
+/// <c>apksigner</c> fingerprints, best-density icon, fill the APK columns,
 /// delete the APK), because F-Droid builds are delayed and (unless
 /// reproducible) signed with a different key. F-Droid/Izzy packages resolve
-/// via the repo <c>index.xml</c>, downloading the APK on version change for
-/// full analysis. Whenever the primary APK comes from a forge, the same
-/// package is additionally looked up in the F-Droid main index and recorded
-/// as the alternate variant (<c>Fdroid*</c> columns), so clients can match a
-/// locally installed F-Droid build by its signing cert and offer the right
-/// download URL. When a forge has no APK at all (no releases or no `.apk`
-/// asset), the app falls back to the F-Droid main index by matching the
-/// application's `<source>` URL against the entry's forge URL. The source
-/// that supplied an APK is recorded and locked (<c>ApkSource</c>): once a
-/// build was served, enrichment never switches between forge and F-Droid
-/// (different signing keys would break updates). Two entries release
-/// outside the repo the list points at and are special-cased: instafel (the
-/// updater APK ships from github.com/instafel/u-rel while the list links the
-/// source monorepo mamiiblt/instafel) and hlbmerge_flutter (APK builds only
-/// on the GitCode mirror gitcode.com/bigmolihuan/hlbmerge_flutter). Play-sole-source apps become
-/// redirects to their Play listing instead of being hidden. Failures record
-/// <c>last_error</c> and keep previous good values. Does not call
-/// <c>SaveChanges</c>, the caller batches (fast loop in M6, tests).
+/// via the repo <c>index-v2.json</c>, downloading the APK on version change
+/// for full analysis. Candidates resolve symmetrically: a forge primary is
+/// also looked up in the F-Droid main index and recorded as an alternate, and
+/// a forge with no usable artifact falls back to the main index by matching
+/// the entry's source URL. There is no source lock; candidates never alter
+/// the primary except through the primary election. Multi-package releases
+/// are grouped by APK label into root and variant rows. Special-case release
+/// homes and mirror feeds are resolved before dispatch. Play-sole-source apps
+/// become redirects to their Play listing instead of being hidden. Failures
+/// record <c>last_error</c> and keep previous good values. Does not call
+/// <c>SaveChanges</c>, the caller batches (fast loop, tests).
 /// </summary>
 public sealed class AppEnricher(
     IGitHubReleaseClient github,
@@ -2673,34 +2635,6 @@ public sealed class AppEnricher(
         }
     }
 
-    private sealed record DownloadCandidate(
-        SourceKind Source,
-        string? SourceRef,
-        string ApkUrl,
-        string? ArchiveEntry,
-        long? VersionCode,
-        string? VersionName,
-        long? SizeBytes,
-        string? Sha256,
-        string? SigSha256,
-        string? SigMd5,
-        int? MinSdk,
-        string? Abi = null,
-        string? PackageName = null,
-        bool Analyzed = false,
-        int? TargetSdk = null,
-        int? CompileSdk = null,
-        IReadOnlyList<string>? Locales = null,
-        IReadOnlyList<string>? Abis = null,
-        IReadOnlyList<string>? LocalizedLabels = null,
-        string? SignerDn = null,
-        string? SignerScheme = null,
-        string? SignerKeyAlgorithm = null,
-        int AnalysisVersion = 0,
-        ApkInspection? Inspection = null,
-        string? ReleaseTag = null,
-        bool ShizukuDeclared = false);
-
     /// <summary>
     /// Signing identity of a candidate: the first SHA-256 token, else the
     /// first MD5 token, else a URL-derived fallback for fingerprintless rows.
@@ -3768,56 +3702,6 @@ public sealed class AppEnricher(
             log?.LogDebug(ex, "Forge candidate resolution failed for {Slug}.", app.Slug);
         }
     }
-
-    /// <summary>
-    /// One analyzed APK download: badging + file hash/size + (best-effort)
-    /// signer certs. Owns the temp file; dispose when done (icon extraction
-    /// via <c>IconProcessor</c> happens first, on <see cref="ApkPath"/>).
-    /// </summary>
-    private sealed record AnalyzedApk(
-        string ApkPath,
-        BadgingInfo Badging,
-        string FileSha256,
-        long FileSize,
-        ApkSignerInfo Signers,
-        ApkInspection Inspection) : IDisposable
-    {
-        public void Dispose()
-        {
-            try { File.Delete(ApkPath); } catch { /* best effort */ }
-        }
-    }
-
-    /// <summary>
-    /// Static signals derived from one analyzed APK: manifest-level Shizuku
-    /// facts plus Exodus tracker code-signature matches. Candidates carry
-    /// null when no analysis ran (index-only rows), so those never overwrite
-    /// what an earlier analysis recorded.
-    /// </summary>
-    private sealed record ApkInspection(ApkSignals Signals, IReadOnlyList<TrackerHit> Trackers);
-
-    private sealed record ArtifactAnalysis(
-        string ArtifactUrl,
-        string? ArchiveEntry,
-        SourceKind LockSource,
-        string? Etag,
-        BadgingInfo Badging,
-        string FileSha256,
-        long FileSize,
-        string? SigSha256,
-        string? SigMd5,
-        DateTimeOffset? ReleasedAt,
-        ProcessedIcon? Icon,
-        ApkInspection Inspection,
-        ApkSignerInfo Signers,
-        string? ReleaseTag = null);
-
-    /// <summary>
-    /// Outcome of downloading and analyzing one artifact. <c>Unchanged</c> is
-    /// true when the computed checksum matched the recorded one, in which case
-    /// no badging, signer or icon work ran and <c>Analysis</c> is null.
-    /// </summary>
-    private sealed record ArtifactResult(ArtifactAnalysis? Analysis, bool Unchanged, string? Error);
 
     private async Task<ArtifactResult> DownloadAndAnalyzeApkAsync(
         string url, string? etag, SourceKind lockSource, DateTimeOffset? releasedAt,
