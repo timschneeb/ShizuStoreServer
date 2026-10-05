@@ -21,9 +21,14 @@ src/ShizuAppStoreServer.Web/      Public storefront (shizustore.com, separate un
   Data/         EF Core entities + ShizuDbContext + Migrations/
   History/      git-history backfill (added_at/updated_at)
   Sources/      URL classifier, IAppSource clients (GitHub/GitLab/GitCode/
-              F-Droid), APK picker, shared release pipeline
+              F-Droid), APK picker, per-entry overrides
+              (IAppSourceOverrides), shared release pipeline
   Enrichment/   aapt2/apksigner runners + parsers, DrawableStager,
-              Paparazzi renderer client, icons, avatars, AppEnricher
+              Paparazzi renderer client, icons, avatars, and the enricher:
+              the AppEnricher facade (IEnrichmentPipeline) with per-source
+              enrichers (GitHub/GitLab/GitCode/F-Droid/Fallback),
+              DownloadStore, VariantGrouper, IconPipeline,
+              ArtifactAnalyzer, StarHistoryService, ScreenshotService
   Sync/         SyncService, SyncOptions, IEnrichmentRunner
 tools/icon-render/   Gradle + Paparazzi tool that renders staged XML
               drawables through LayoutLib (same engine as Android Studio)
