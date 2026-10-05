@@ -183,6 +183,39 @@ internal sealed class IconPipeline(
     }
 
     /// <summary>
+    /// Adopts a resolved raster icon, shared by the immediate path of a
+    /// prepared refresh and the batch commit: provenance always syncs, the
+    /// file is written before the bytes are compared so a deleted file heals
+    /// even on equal bytes, and equal bytes still count when the file was
+    /// restored or the caller forces the refresh. Returns true when the
+    /// caller should report the refresh as Enriched.
+    /// </summary>
+    internal async Task<bool> AdoptAsync(App app, ProcessedIcon icon, bool force, CancellationToken ct)
+    {
+        // Sync even on equal bytes to heal stale flags; the flag is the
+        // caller's true-adaptive signal (SyncService forwards the staged
+        // root kind), not a blanket XML marker.
+        app.IconAdaptive = icon.Adaptive;
+
+        // Write first: a missing file must heal even when the bytes still
+        // match the recorded icon (write is a no-op otherwise).
+        var healed = !IconFileExists(icon.Sha256);
+        await WriteIconFileAsync(icon, ct);
+        if (icon.Sha256 == app.IconHash)
+        {
+            // Enriched (not UpToDate) when a file was restored, so the pass
+            // tally proves the healing happened; force counts every rewrite
+            // (swap detection needs fresh bytes).
+            return force || healed;
+        }
+
+        var oldIcon = app.IconHash;
+        app.IconHash = icon.Sha256;
+        await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
+        return true;
+    }
+
+    /// <summary>
     /// Batched icon refresh (phase C): normalizes
     /// one batch-rendered PNG and adopts it when it differs. Failures keep
     /// the current icon without touching the row.
@@ -198,30 +231,9 @@ internal sealed class IconPipeline(
                 return new EnrichResult(EnrichOutcome.Failed, "Icon refresh: batch render produced no usable icon; kept.");
             }
 
-            // Sync even on equal bytes to heal stale flags; the flag is
-            // the caller's true-adaptive signal (SyncService forwards the
-            // staged root kind), not a blanket XML marker.
-            app.IconAdaptive = icon.Adaptive;
-
-            // Write first: a missing file must heal even when the render
-            // still matches the recorded icon (write is a no-op otherwise).
-            var healed = !IconFileExists(icon.Sha256);
-            await WriteIconFileAsync(icon, ct);
-            if (icon.Sha256 == app.IconHash)
-            {
-                // Enriched (not UpToDate) when a file was restored, so the
-                // pass tally proves the healing happened; force counts
-                // every rewrite (swap detection needs fresh bytes).
-                return force || healed
-                    ? new EnrichResult(EnrichOutcome.Enriched, null)
-                    : new EnrichResult(EnrichOutcome.UpToDate, null);
-            }
-
-            await WriteIconFileAsync(icon, ct);
-            var oldIcon = app.IconHash;
-            app.IconHash = icon.Sha256;
-            await DeleteIconIfOrphanedAsync(app, oldIcon, ct);
-            return new EnrichResult(EnrichOutcome.Enriched, null);
+            return await AdoptAsync(app, icon, force, ct)
+                ? new EnrichResult(EnrichOutcome.Enriched, null)
+                : new EnrichResult(EnrichOutcome.UpToDate, null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

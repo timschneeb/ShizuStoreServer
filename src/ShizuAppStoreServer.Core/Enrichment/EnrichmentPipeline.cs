@@ -37,6 +37,12 @@ internal interface IEnrichmentPipeline
 
     Task<EnrichResult?> TryPlayRedirectFallbackAsync(App app, DateTimeOffset now, CancellationToken ct);
 
+    /// <summary>
+    /// Shared rescue chain when a source has no usable artifact: F-Droid
+    /// first, then a Play redirect. Null means neither applies.
+    /// </summary>
+    Task<EnrichResult?> TryFallbacksAsync(App app, DateTimeOffset now, CancellationToken ct);
+
     Task ResolveCandidateApkAsync(
         App app, string url, string? etag, SourceKind kind, DateTimeOffset now, CancellationToken ct);
 

@@ -56,7 +56,7 @@ internal sealed class GitHubReleaseEnricher(
                 // below. A failing refetch is not an upstream change, so stay
                 // up-to-date instead of failing the pass.
                 var current = await downloadStore.PrimaryDownloadAsync(app, ct);
-                if (DownloadStore.NeedsPermissionHeal(app, current) || DownloadStore.NeedsSignalHeal(current) || DownloadStore.NeedsAnalysisHeal(current))
+                if (DownloadStore.NeedsRefetch(app, current))
                 {
                     try
                     {
@@ -101,17 +101,8 @@ internal sealed class GitHubReleaseEnricher(
             return enriched;
         }
 
-        if (await pipeline.TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
-        {
-            return fdroidFallback;
-        }
-
-        if (await pipeline.TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
-        {
-            return playFallback;
-        }
-
-        return pipeline.Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
+        return await pipeline.TryFallbacksAsync(app, now, ct)
+            ?? pipeline.Fail(app, now, $"GitHub release {release.TagName} of {owner}/{repo} has no .apk asset.");
     }
 
     /// <summary>
@@ -169,12 +160,8 @@ internal sealed class GitHubReleaseEnricher(
             return rescued;
         }
 
-        if (await pipeline.TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-        {
-            return play;
-        }
-
-        return pipeline.Fail(app, now, $"GitHub: {ex.Message}");
+        return await pipeline.TryPlayRedirectFallbackAsync(app, now, ct)
+            ?? pipeline.Fail(app, now, $"GitHub: {ex.Message}");
     }
 
     /// <summary>
@@ -219,16 +206,7 @@ internal sealed class GitHubReleaseEnricher(
             return enriched;
         }
 
-        if (await pipeline.TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
-        {
-            return fdroidFallback;
-        }
-
-        if (await pipeline.TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
-        {
-            return playFallback;
-        }
-
-        return pipeline.Fail(app, now, $"GitHub repo {owner}/{repo} has no .apk asset.");
+        return await pipeline.TryFallbacksAsync(app, now, ct)
+            ?? pipeline.Fail(app, now, $"GitHub repo {owner}/{repo} has no .apk asset.");
     }
 }

@@ -75,10 +75,8 @@ internal sealed class FdroidIndexEnricher(
             // rerun cannot loop on it. A failing refetch is not an upstream
             // change, so stay up-to-date instead of failing the pass.
             var primary = await downloadStore.PrimaryDownloadAsync(app, ct);
-            if (DownloadStore.NeedsPermissionHeal(app, primary)
-                || DownloadStore.NeedsSignalHeal(primary)
-                || DownloadStore.NeedsAnalysisHeal(primary)
-                || (primary is not null && !primary.Analyzed && primary.SigSha256 is null))
+            if (DownloadStore.NeedsRefetch(app, primary)
+                || DownloadStore.NeedsIndexIdentityBackfill(primary))
             {
                 try
                 {
@@ -133,10 +131,8 @@ internal sealed class FdroidIndexEnricher(
             && (package.Sha256 is null || EnrichmentQueries.HashMatches(current.Sha256, package.Sha256))
             && app.PackageName is not null
             && app.IconHash is not null && icons.IconFileExists(app.IconHash)
-            && !DownloadStore.NeedsPermissionHeal(app, current)
+            && !DownloadStore.NeedsRefetch(app, current)
             && !DownloadStore.NeedsSignerBackfill(current, package)
-            && !DownloadStore.NeedsSignalHeal(current)
-            && !DownloadStore.NeedsAnalysisHeal(current)
             && siblingsRecorded)
         {
             // Heals the release date on rows enriched before the index date

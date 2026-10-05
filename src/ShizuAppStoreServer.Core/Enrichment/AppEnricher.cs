@@ -459,9 +459,7 @@ public sealed class AppEnricher(
             && row.PackageName is not null
             && row.IconHash is not null
             && icons.IconFileExists(row.IconHash)
-            && !DownloadStore.NeedsPermissionHeal(row, download)
-            && !DownloadStore.NeedsSignalHeal(download)
-            && !DownloadStore.NeedsAnalysisHeal(download)
+            && !DownloadStore.NeedsRefetch(row, download)
             && !DownloadStore.ReleasedNewerThan(releasedAt, row);
 
         void Stamp(App row)
@@ -1116,29 +1114,9 @@ public sealed class AppEnricher(
                 // UpToDate.
                 var icon = await launcherIcons.ResolveAsync(analyzed.ApkPath, analyzed.Badging, ct)
                     ?? LetterAvatarGenerator.Generate(app.DisplayName ?? app.Name);
-                // Provenance always syncs, even when the bytes match: one
-                // pass heals stale flags without any icon churn.
-                app.IconAdaptive = icon.Adaptive;
-
-                // Write first: a missing file must heal even when the
-                // bytes still match the recorded icon (write is a no-op
-                // otherwise).
-                var healed = !icons.IconFileExists(icon.Sha256);
-                await icons.WriteIconFileAsync(icon, ct);
-                if (icon.Sha256 == app.IconHash)
-                {
-                    // Force re-renders everything (swap detection: a
-                    // self-consistent wrong file only surfaces when fresh
-                    // bytes are compared), so equal bytes still count.
-                    return force || healed
-                        ? new PrepareIconResult(EnrichOutcome.Enriched, null, null)
-                        : new PrepareIconResult(EnrichOutcome.UpToDate, null, null);
-                }
-
-                var oldIcon = app.IconHash;
-                app.IconHash = icon.Sha256;
-                await icons.DeleteIconIfOrphanedAsync(app, oldIcon, ct);
-                return new PrepareIconResult(EnrichOutcome.Enriched, null, null);
+                return await icons.AdoptAsync(app, icon, force, ct)
+                    ? new PrepareIconResult(EnrichOutcome.Enriched, null, null)
+                    : new PrepareIconResult(EnrichOutcome.UpToDate, null, null);
             }
 
             return new PrepareIconResult(EnrichOutcome.UpToDate, null, pending);
@@ -1198,6 +1176,10 @@ public sealed class AppEnricher(
 
     Task<EnrichResult?> IEnrichmentPipeline.TryPlayRedirectFallbackAsync(App app, DateTimeOffset now, CancellationToken ct) =>
         fallbackEnricher.TryPlayRedirectFallbackAsync(app, now, ct);
+
+    async Task<EnrichResult?> IEnrichmentPipeline.TryFallbacksAsync(App app, DateTimeOffset now, CancellationToken ct) =>
+        await fdroidEnricher.TryFdroidFallbackAsync(app, now, ct)
+        ?? await fallbackEnricher.TryPlayRedirectFallbackAsync(app, now, ct);
 
     Task IEnrichmentPipeline.ResolveCandidateApkAsync(
         App app, string url, string? etag, SourceKind kind, DateTimeOffset now, CancellationToken ct) =>

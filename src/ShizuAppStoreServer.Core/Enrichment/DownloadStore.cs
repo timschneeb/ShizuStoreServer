@@ -101,6 +101,27 @@ internal sealed class DownloadStore(
         && !primary.Inspected;
 
     /// <summary>
+    /// Any heal a 304 or unchanged-index short-circuit would suppress forever:
+    /// a fully analyzed row missing fields the current extraction version (or
+    /// an older one) never persisted. Callers use this to force one refetch so
+    /// the normal analysis path can backfill them.
+    /// </summary>
+    internal static bool NeedsRefetch(App app, AppDownload? primary) =>
+        NeedsPermissionHeal(app, primary)
+        || NeedsSignalHeal(primary)
+        || NeedsAnalysisHeal(primary);
+
+    /// <summary>
+    /// Legacy index-only rows have no analysis to heal but still need one
+    /// forced refetch so the index-v2 signer map can give the row its file
+    /// identity.
+    /// </summary>
+    internal static bool NeedsIndexIdentityBackfill(AppDownload? primary) =>
+        primary is not null
+        && !primary.Analyzed
+        && primary.SigSha256 is null;
+
+    /// <summary>
     /// Signing identity of a candidate: the first SHA-256 token, else the
     /// first MD5 token, else a URL-derived fallback for fingerprintless rows.
     /// The downloads snapshot keeps one row per identity (newest build only).

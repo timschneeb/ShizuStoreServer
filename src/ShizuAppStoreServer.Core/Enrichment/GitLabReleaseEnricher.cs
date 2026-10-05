@@ -33,12 +33,8 @@ internal sealed class GitLabReleaseEnricher(
                 return rescued;
             }
 
-            if (await pipeline.TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-            {
-                return play;
-            }
-
-            return pipeline.Fail(app, now, $"GitLab: {ex.Message}");
+            return await pipeline.TryPlayRedirectFallbackAsync(app, now, ct)
+                ?? pipeline.Fail(app, now, $"GitLab: {ex.Message}");
         }
 
         SourceRelease release;
@@ -59,7 +55,7 @@ internal sealed class GitLabReleaseEnricher(
                 // below. A failing refetch is not an upstream change, so stay
                 // up-to-date instead of failing the pass.
                 var current = await downloadStore.PrimaryDownloadAsync(app, ct);
-                if (DownloadStore.NeedsPermissionHeal(app, current) || DownloadStore.NeedsSignalHeal(current) || DownloadStore.NeedsAnalysisHeal(current))
+                if (DownloadStore.NeedsRefetch(app, current))
                 {
                     try
                     {
@@ -92,12 +88,8 @@ internal sealed class GitLabReleaseEnricher(
                 return rescued;
             }
 
-            if (await pipeline.TryPlayRedirectFallbackAsync(app, now, ct) is { } play)
-            {
-                return play;
-            }
-
-            return pipeline.Fail(app, now, $"GitLab: {ex.Message}");
+            return await pipeline.TryPlayRedirectFallbackAsync(app, now, ct)
+                ?? pipeline.Fail(app, now, $"GitLab: {ex.Message}");
         }
 
         if (await pipeline.EnrichFromReleaseAsync(app, SourceKind.GitLab, release, urlIdentifiesVersion: true, now, ct) is { } enriched)
@@ -105,16 +97,7 @@ internal sealed class GitLabReleaseEnricher(
             return enriched;
         }
 
-        if (await pipeline.TryFdroidFallbackAsync(app, now, ct) is { } fdroidFallback)
-        {
-            return fdroidFallback;
-        }
-
-        if (await pipeline.TryPlayRedirectFallbackAsync(app, now, ct) is { } playFallback)
-        {
-            return playFallback;
-        }
-
-        return pipeline.Fail(app, now, $"GitLab release {release.TagName} of {projectPath} has no .apk asset link.");
+        return await pipeline.TryFallbacksAsync(app, now, ct)
+            ?? pipeline.Fail(app, now, $"GitLab release {release.TagName} of {projectPath} has no .apk asset link.");
     }
 }
