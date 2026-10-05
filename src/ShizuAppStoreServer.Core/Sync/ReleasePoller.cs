@@ -44,17 +44,13 @@ public sealed class ReleasePoller(
     FdroidIndexProvider fdroid,
     EnrichmentOptions enrichment,
     SyncOptions sync,
-    ILogger<ReleasePoller>? log = null) : IReleasePoller
+    ILogger<ReleasePoller>? log = null,
+    IAppSourceOverrides? sourceOverrides = null) : IReleasePoller
 {
-    // Shared special cases live in ForgeReleaseHomes (instafel, LinkSheet),
-    // so the poll and enrichment always watch the same repo. hlbmerge
-    // rebuilds only on GitCode, so skip the GitHub poll. SmartspacerPlugins
-    // spreads its apps across many releases, so one latest-release compare
-    // cannot see them; it stays on the due window.
-    private const string HlbmergeOwner = "molihuan";
-    private const string HlbmergeRepo = "hlbmerge_flutter";
-    private const string SmartspacerOwner = "KieronQuinn";
-    private const string SmartspacerRepo = "SmartspacerPlugins";
+    // Shared with the enricher so the poll and enrichment always watch the
+    // same release repo (remaps) and skip feeds with no cheap signal.
+    private readonly IAppSourceOverrides sourceOverrides =
+        sourceOverrides ?? StaticAppSourceOverrides.Instance;
 
     private sealed record Candidate(long Id, string Url, string? SourceUrl, string? Etag);
     private sealed record ForgeTarget(Candidate App, string OwnerOrProject, string Repo, bool IsGitHub);
@@ -182,7 +178,7 @@ public sealed class ReleasePoller(
         return changed;
     }
 
-    private static ForgeTarget? TryForgeTarget(Candidate app)
+    private ForgeTarget? TryForgeTarget(Candidate app)
     {
         if (SourceClassifier.TryParseGitHubRepo(app.Url, out var owner, out var repo)
             || SourceClassifier.TryParseGitHubRepo(app.SourceUrl, out owner, out repo))
@@ -190,18 +186,11 @@ public sealed class ReleasePoller(
             // Instafel and LinkSheet publish from a repo other than the listed
             // one; watching the listed repo would compare a feed that never
             // changes. Same remap as AppEnricher, shared so it cannot drift.
-            (owner, repo) = ForgeReleaseHomes.Remap(owner, repo);
+            (owner, repo) = sourceOverrides.RemapReleaseHome(owner, repo);
 
-            // hlbmerge rebuilds only on GitCode, so a GitHub poll would
-            // compare the wrong feed.
-            if (owner == HlbmergeOwner && repo == HlbmergeRepo)
-            {
-                return null;
-            }
-
-            // SmartspacerPlugins publishes one app per release; a single
-            // latest-release compare would keep flagging the other apps.
-            if (owner == SmartspacerOwner && repo == SmartspacerRepo)
+            // hlbmerge rebuilds only on GitCode and SmartspacerPlugins
+            // publishes one app per release; both feeds stay on the due window.
+            if (sourceOverrides.SkipReleasePoll(owner, repo))
             {
                 return null;
             }

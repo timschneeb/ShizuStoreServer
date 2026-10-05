@@ -1373,7 +1373,8 @@ Play, link-only, Codeberg and the GitCode special case have no
 cheap signal and stay on the due window; instafel's list entry is
 polled through its real release repo (instafel/u-rel) and LinkSheet
 through its nightly release repo (LinkSheet/nightly), both shared
-with enrichment via `ForgeReleaseHomes`, while SmartspacerPlugins is
+with enrichment via `IAppSourceOverrides` (the in-code special cases
+live in `StaticAppSourceOverrides`), while SmartspacerPlugins is
 skipped (its apps span separate releases, §5.2). Skipped apps
 (excluded) and rows without a matching download still count as
 changed, so they enrich on the next pass. Poll failures are soft

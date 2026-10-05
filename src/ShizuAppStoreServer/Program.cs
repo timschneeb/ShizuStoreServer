@@ -190,6 +190,9 @@ enrichment.GitLabToken ??= Environment.GetEnvironmentVariable("SHIZU_GITLAB_TOKE
 FdroidRepos.Configure(enrichment.FdroidRepoBase, enrichment.IzzyRepoBase, enrichment.IzzyRepoBaseFallback);
 
 builder.Services.AddSingleton(enrichment);
+// Per-entry source special cases (release-home remaps, mirror feeds),
+// shared by AppEnricher and ReleasePoller so they cannot drift.
+builder.Services.AddSingleton<IAppSourceOverrides>(StaticAppSourceOverrides.Instance);
 ConfigureEnrichmentClients(builder.Services, enrichment);
 // Singleton (not scoped): the M6 loop enriches apps in parallel per-app
 // scopes, so the index cache must outlive any one scope (thread-safe since M6).
@@ -265,7 +268,8 @@ builder.Services.AddScoped<AppEnricher>(sp => new AppEnricher(
     sp.GetRequiredService<ILogger<AppEnricher>>(),
     sp.GetRequiredService<IRepoScreenshotResolver>(),
     sp.GetRequiredService<ITrackerCatalog>(),
-    sp.GetRequiredService<IUsageAnalysisQueue>()));
+    sp.GetRequiredService<IUsageAnalysisQueue>(),
+    sp.GetRequiredService<IAppSourceOverrides>()));
 
 // Sync engine (M6): fast loop + nightly full re-check in this same binary
 // Workers resolve SyncService per pass; enrichment fans out over per-app scopes.

@@ -51,20 +51,13 @@ public sealed class AppEnricher(
     ILogger<AppEnricher>? log = null,
     IRepoScreenshotResolver? repoScreenshots = null,
     ITrackerCatalog? trackers = null,
-    IUsageAnalysisQueue? usageQueue = null)
+    IUsageAnalysisQueue? usageQueue = null,
+    IAppSourceOverrides? sourceOverrides = null)
 {
-    // Special-case release homes (instafel, LinkSheet) live in
-    // ForgeReleaseHomes so enrichment and the release poll cannot drift.
-    // hlbmerge rebuilds only on GitCode, so its releases are fetched there.
-    private const string HlbmergeGitHubOwner = "molihuan";
-    private const string HlbmergeGitHubRepo = "hlbmerge_flutter";
-    private const string HlbmergeGitCodeOwner = "bigmolihuan";
-    private const string HlbmergeGitCodeRepo = "hlbmerge_flutter";
-
-    // One repo, several distinct apps, each in its own GitHub release; the
-    // newest release only carries one of them, so scan them all.
-    private const string SmartspacerOwner = "KieronQuinn";
-    private const string SmartspacerRepo = "SmartspacerPlugins";
+    // Hand-built callers (tests) fall back to the in-code special cases;
+    // production registers the singleton instance.
+    private readonly IAppSourceOverrides sourceOverrides =
+        sourceOverrides ?? StaticAppSourceOverrides.Instance;
 
     // Matches the history endpoint's longest window (days=365), so the client
     // can always draw a full year without asking GitHub again.
@@ -506,12 +499,13 @@ public sealed class AppEnricher(
 
             // Instafel and LinkSheet publish from separate release repos; the
             // list target stays the analysis source for usage and screenshots.
-            (owner, repo) = ForgeReleaseHomes.Remap(owner, repo);
+            (owner, repo) = sourceOverrides.RemapReleaseHome(owner, repo);
 
             EnrichResult result;
-            if (gitcode is not null && owner == HlbmergeGitHubOwner && repo == HlbmergeGitHubRepo)
+            var mirror = sourceOverrides.GitCodeMirrorFor(owner, repo);
+            if (gitcode is not null && mirror is not null)
             {
-                result = await EnrichFromGitCodeAsync(app, now, ct);
+                result = await EnrichFromGitCodeAsync(app, mirror, now, ct);
             }
             else
             {
@@ -779,7 +773,7 @@ public sealed class AppEnricher(
     {
         var target = new SourceTarget(SourceKind.GitHub, $"{owner}/{repo}");
 
-        if (owner == SmartspacerOwner && repo == SmartspacerRepo)
+        if (sourceOverrides.ScansAllReleases(owner, repo))
         {
             return await EnrichFromAllReleasesAsync(app, owner, repo, target, now, ct);
         }
@@ -999,22 +993,22 @@ public sealed class AppEnricher(
     /// code skips the download.
     /// </summary>
     private async Task<EnrichResult> EnrichFromGitCodeAsync(
-        App app, DateTimeOffset now, CancellationToken ct)
+        App app, GitCodeMirror mirror, DateTimeOffset now, CancellationToken ct)
     {
         // The APK lives on the mirror but the list links the GitHub repo, so
         // the README still comes from GitHub.
         await RefreshFullDescriptionAsync(
             app,
             () => github.GetLinkedMarkdownAsync(app.Url, ct),
-            () => github.GetReadmeMarkdownAsync(HlbmergeGitHubOwner, HlbmergeGitHubRepo, ct));
+            () => github.GetReadmeMarkdownAsync(mirror.ReadmeOwner, mirror.ReadmeRepo, ct));
 
         SourceRelease release;
         try
         {
             var target = new SourceTarget(
-                SourceKind.Other, $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo}");
+                SourceKind.Other, $"{mirror.Owner}/{mirror.Repo}");
             var latest = await TimedAsync(
-                $"gitcode release list {HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo}",
+                $"gitcode release list {mirror.Owner}/{mirror.Repo}",
                 () => gitcode!.GetLatestReleaseAsync(target, app.EnrichEtag, ct));
             if (latest is null)
             {
@@ -1035,7 +1029,7 @@ public sealed class AppEnricher(
         }
 
         return Fail(app, now, $"GitCode release {release.TagName} of "
-            + $"{HlbmergeGitCodeOwner}/{HlbmergeGitCodeRepo} has no .apk asset.");
+            + $"{mirror.Owner}/{mirror.Repo} has no .apk asset.");
     }
 
     private async Task<EnrichResult> EnrichFromGitLabAsync(
