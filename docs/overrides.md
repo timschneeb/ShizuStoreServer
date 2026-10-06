@@ -62,6 +62,7 @@ Names are lowercase and exact. Unknown fields are logged and skipped.
 | --- | --- |
 | `name` | Text, required (empty rejected). |
 | `description` | Text, required (empty rejected). |
+| `added_at` | ISO-8601 timestamp, required (empty rejected). Affects `sort=added` and the added/updated split in `/v1/changes`. |
 | `license` | Text, empty clears. |
 | `is_recommended`, `has_paid`, `has_iap`, `has_ads`, `requires_root` | `true` or `false`. |
 | `trial_days` | Non-negative integer, empty clears. |
@@ -115,7 +116,7 @@ migration; add more like any other row.
 
 Identity and bookkeeping (`id`, `slug`, `url`, `listing`, `category_id`,
 `parent_id`, `root_app_id`), publish and schedule state (`published_at`,
-`added_at`, `updated_at`, `list_updated_at`, `last_checked_at`, `last_error`,
+`updated_at`, `list_updated_at`, `last_checked_at`, `last_error`,
 `enrich_etag`, `forge_assets_stale`), install counters and all `usage_*`
 columns. Use the dedicated mechanisms instead: `app_unlist_overrides` to hide
 an entry, `app_download_exclusions` to drop packages, `package_exceptions` and

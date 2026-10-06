@@ -34,6 +34,7 @@ internal static class AppOverrideFields
     {
         ["name"] = RequiredText("name", AppOverrideOwnership.List, app => app.Name, (app, value) => app.Name = value),
         ["description"] = RequiredText("description", AppOverrideOwnership.List, app => app.Description, (app, value) => app.Description = value),
+        ["added_at"] = RequiredTimestamp("added_at", AppOverrideOwnership.List, app => app.AddedAt, (app, value) => app.AddedAt = value),
         ["display_name"] = OptionalText("display_name", AppOverrideOwnership.Enrichment, app => app.DisplayName, (app, value) => app.DisplayName = value),
         ["apk_label"] = OptionalText("apk_label", AppOverrideOwnership.Enrichment, app => app.ApkLabel, (app, value) => app.ApkLabel = value),
         ["license"] = OptionalText("license", AppOverrideOwnership.List, app => app.License, (app, value) => app.License = value),
@@ -169,6 +170,28 @@ internal static class AppOverrideFields
             if (value.Length == 0)
             {
                 return Set(() => set(app, null));
+            }
+            if (!DateTimeOffset.TryParse(
+                    value,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out var parsed))
+            {
+                return "expected an ISO-8601 timestamp";
+            }
+            set(app, parsed);
+            return null;
+        });
+
+    private static AppOverrideField RequiredTimestamp(
+        string name, AppOverrideOwnership ownership, Func<App, DateTimeOffset> get, Action<App, DateTimeOffset> set) => new(
+        name, ownership,
+        app => get(app).ToString("O", CultureInfo.InvariantCulture),
+        (app, value) =>
+        {
+            if (value.Length == 0)
+            {
+                return "value is required";
             }
             if (!DateTimeOffset.TryParse(
                     value,

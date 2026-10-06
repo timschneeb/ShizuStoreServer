@@ -436,8 +436,9 @@ bundle` is rebuilt per deploy, never committed.
   applier wrote), `baseline_value` (the natural value captured on first
   apply; a null value round-trips as empty string), optional `note`,
   timestamps, `deleted_at`. `field` is the snake_case `apps` column;
-  overridable are the list-owned presentation fields (`name`,
-  `description`, `license`, `is_recommended`, `has_paid`, `has_iap`,
+  overridable are the list-owned fields (`name`, `description`,
+  `added_at` (drives `sort=added` and the added/updated split), `license`,
+  `is_recommended`, `has_paid`, `has_iap`,
   `has_ads`, `trial_days`, `requires_root`, `source_url`), the
   enrichment-owned fields (`display_name`, `apk_label`, `package_name`,
   `permissions`, `author_name`, `author_url`, `author_key`,
@@ -445,7 +446,7 @@ bundle` is rebuilt per deploy, never committed.
   `store_url`, `version_name`, `version_updated_at`, `stars`,
   `download_total`, `icon_hash` (64 hex), `icon_adaptive`,
   `screenshots`) and visibility (`availability`, `excluded_reason`).
-  Identity, list bookkeeping, scheduling and usage columns are not
+  Identity, publish and schedule state, and usage columns are not
   overridable. The applier (§7) runs after enrichment on every pass, so
   an override re-asserts the value enrichment just rewrote; a
   steady-state write-back keeps `updated_at` still, a new or edited
