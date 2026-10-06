@@ -2,8 +2,8 @@
 
 C# / .NET 10 backend for a Shizuku-app store. Single binary + systemd, Postgres.
 Behavior spec: `docs/SPEC.md`. App developer guide: `docs/listing-and-metadata.md`.
-Ops: `docs/server-setup.md`. Storefront: `docs/storefront.md`.
-Governance: `docs/constitution.md`.
+Ops: `docs/server-setup.md`. Overrides: `docs/overrides.md`.
+Storefront: `docs/storefront.md`. Governance: `docs/constitution.md`.
 
 ## Commands
 
