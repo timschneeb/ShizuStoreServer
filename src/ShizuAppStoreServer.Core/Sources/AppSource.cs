@@ -57,6 +57,12 @@ public sealed record SourceRelease(
 /// </summary>
 public sealed record SourceTarget(SourceKind Kind, string Key)
 {
+    /// <summary>
+    /// True for repos whose stable channel is empty: the client picks the
+    /// newest servable prerelease first and only falls back to stable tiers.
+    /// </summary>
+    public bool PreferPrerelease { get; init; }
+
     /// <summary>Splits an <c>owner/repo</c> key (GitHub, GitCode).</summary>
     public (string Owner, string Repo) SplitRepoKey()
     {

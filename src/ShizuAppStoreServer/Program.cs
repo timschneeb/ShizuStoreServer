@@ -194,9 +194,11 @@ enrichment.GitLabToken ??= Environment.GetEnvironmentVariable("SHIZU_GITLAB_TOKE
 FdroidRepos.Configure(enrichment.FdroidRepoBase, enrichment.IzzyRepoBase, enrichment.IzzyRepoBaseFallback);
 
 builder.Services.AddSingleton(enrichment);
-// Per-entry source special cases (release-home remaps, mirror feeds),
-// shared by AppEnricher and ReleasePoller so they cannot drift.
-builder.Services.AddSingleton<IAppSourceOverrides>(StaticAppSourceOverrides.Instance);
+// Per-entry source behavior (release-home remaps, mirror feeds, prerelease
+// channels) lives in app_overrides so operators edit it with SQL. Scoped so
+// the seam caches one read per scope; AppEnricher and ReleasePoller share the
+// seam so they cannot drift.
+builder.Services.AddScoped<IAppSourceOverrides, DbAppSourceOverrides>();
 ConfigureEnrichmentClients(builder.Services, enrichment);
 // Singleton (not scoped): the M6 loop enriches apps in parallel per-app
 // scopes, so the index cache must outlive any one scope (thread-safe since M6).

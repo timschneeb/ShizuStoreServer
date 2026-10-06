@@ -241,6 +241,31 @@ public sealed class AppEnricherTests : IDisposable
                 }),
             }).ToJsonString();
 
+    /// <summary>Servable stable above a servable prerelease, newest first.</summary>
+    private static string StableAndPrereleaseFeed(
+        string stableTag, string stableUrl, long stableSize,
+        string prereleaseTag, string prereleaseUrl, long prereleaseSize)
+    {
+        JsonObject Release(string tag, string url, long size, bool prerelease) => new()
+        {
+            ["tag_name"] = tag,
+            ["draft"] = false,
+            ["prerelease"] = prerelease,
+            ["published_at"] = "2024-06-01T00:00:00Z",
+            ["assets"] = new JsonArray(new JsonObject
+            {
+                ["name"] = "app-release.apk",
+                ["browser_download_url"] = url,
+                ["size"] = size,
+                ["content_type"] = "application/vnd.android.package-archive",
+            }),
+        };
+
+        return new JsonArray(
+            Release(stableTag, stableUrl, stableSize, false),
+            Release(prereleaseTag, prereleaseUrl, prereleaseSize, true)).ToJsonString();
+    }
+
     private static HttpResponseMessage JsonReleases(string json, string? etag = null)
     {
         var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) };
@@ -342,7 +367,25 @@ public sealed class AppEnricherTests : IDisposable
             signer ?? new FakeSignerRunner(_ => throw new ApkSignerException("must not run apksigner")),
             launcherIcons ?? new LauncherIconService(),
             new HttpClient(downloads), _options, _db, gitcode, play, izzyStats,
-            repoScreenshots: repoScreenshots, trackers: trackers, usageQueue: usageQueue);
+            repoScreenshots: repoScreenshots, trackers: trackers, usageQueue: usageQueue,
+            sourceOverrides: new DbAppSourceOverrides(_db));
+
+    /// <summary>
+    /// Seeds a source-behavior row the way an operator would: the seam reads
+    /// <c>app_overrides</c>, so the in-code special cases now live in the DB.
+    /// </summary>
+    private void AddSourceOverride(string slug, string field, string value)
+    {
+        _db.AppOverrides.Add(new AppOverride
+        {
+            AppSlug = slug,
+            Field = field,
+            Value = value,
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        _db.SaveChanges();
+    }
 
     private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
@@ -3859,6 +3902,7 @@ public sealed class AppEnricherTests : IDisposable
         });
         var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "511"));
         var app = NewApp("instafel", "Instafel", "https://github.com/mamiiblt/instafel");
+        AddSourceOverride("instafel", "source_release_home", "instafel/u-rel");
 
         var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
 
@@ -3899,6 +3943,7 @@ public sealed class AppEnricherTests : IDisposable
         });
         var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "141"));
         var app = NewApp("linksheet", "LinkSheet", "https://github.com/LinkSheet/LinkSheet");
+        AddSourceOverride("linksheet", "source_release_home", "LinkSheet/nightly");
 
         var result = await BuildEnricher(github, downloads, aapt2).EnrichAsync(app, T0);
 
@@ -3911,6 +3956,46 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal(SourceKind.GitHub, primary.Source);
         Assert.Equal(assetUrl, primary.ApkUrl);
         Assert.Equal("nightly-2026091203", primary.ReleaseTag);
+    }
+
+    [Fact]
+    public async Task SourcePreferPrereleaseRowFlipsTheGitHubTier()
+    {
+        var stableZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var prereleaseZip = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(600, 600, Color.Green)));
+        var github = new StubHandler(_ => JsonReleases(StableAndPrereleaseFeed(
+            "v1.0", "https://cdn.example/stable.apk", stableZip.Length,
+            "v2.0-beta", "https://cdn.example/beta.apk", prereleaseZip.Length), "\"rel-etag\""));
+        var downloads = new StubHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(request.RequestUri!.AbsolutePath.Contains("beta", StringComparison.Ordinal)
+                ? prereleaseZip
+                : stableZip),
+        });
+        var aapt2 = new FakeAapt2Runner(path => new FileInfo(path).Length == prereleaseZip.Length
+            ? TestAssets.CannedBadging(versionCode: "200")
+            : TestAssets.CannedBadging(versionCode: "100"));
+        var app = NewApp("revanced", "ReVanced", "https://github.com/Jman-Github/Universal-ReVanced-Manager");
+        AddSourceOverride("revanced", "source_prefer_prerelease", "true");
+
+        var result = await BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA))
+            .EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.Equal("v2.0-beta", Primary(app).ReleaseTag);
+
+        // Deleting the row hands the repo back to the default stable tier.
+        _db.AppOverrides.RemoveRange(_db.AppOverrides);
+        await _db.SaveChangesAsync();
+        var plain = NewApp("revanced-plain", "ReVanced Plain",
+            "https://github.com/Jman-Github/Universal-ReVanced-Manager");
+        var fallback = await BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA))
+            .EnrichAsync(plain, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, fallback.Outcome);
+        Assert.Equal("v1.0", Primary(plain).ReleaseTag);
     }
 
     [Fact]
@@ -3936,6 +4021,8 @@ public sealed class AppEnricherTests : IDisposable
         ]));
         var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(versionCode: "205"));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
+        AddSourceOverride("hlbmerge-flutter", "source_gitcode_mirror",
+            "bigmolihuan/hlbmerge_flutter|molihuan/hlbmerge_flutter");
 
         var result = await BuildEnricher(github, downloads, aapt2, gitcode: gitcode).EnrichAsync(app, T0);
 
@@ -3966,6 +4053,8 @@ public sealed class AppEnricherTests : IDisposable
             new SourceAsset("app-arm64-v8a-release.apk", url, Primary: true),
         ]));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
+        AddSourceOverride("hlbmerge-flutter", "source_gitcode_mirror",
+            "bigmolihuan/hlbmerge_flutter|molihuan/hlbmerge_flutter");
 
         var first = BuildEnricher(github,
             new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(apk) }),
@@ -3998,6 +4087,8 @@ public sealed class AppEnricherTests : IDisposable
                 "https://gitcode.com/bigmolihuan/hlbmerge_flutter/releases/download/v2.0.5/source.zip"),
         ]));
         var app = NewApp("hlbmerge-flutter", "HLBmerge Flutter", "https://github.com/molihuan/hlbmerge_flutter");
+        AddSourceOverride("hlbmerge-flutter", "source_gitcode_mirror",
+            "bigmolihuan/hlbmerge_flutter|molihuan/hlbmerge_flutter");
 
         var result = await BuildEnricher(github,
             new StubHandler(_ => throw new InvalidOperationException("must not download")),
@@ -5409,6 +5500,7 @@ public sealed class AppEnricherTests : IDisposable
         var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
         var app = NewApp("smartspacer-plugins", "SmartspacerPlugins",
             "https://github.com/KieronQuinn/SmartspacerPlugins");
+        AddSourceOverride("smartspacer-plugins", "source_scan_all_releases", "true");
 
         var result = await enricher.EnrichAsync(app, T0);
 

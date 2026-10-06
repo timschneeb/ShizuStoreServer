@@ -740,6 +740,27 @@ sudo -u postgres psql -d shizuappstore -c \
   "UPDATE app_overrides SET deleted_at = now() WHERE app_slug = 'mixplorer' AND field = 'display_name';"
 ```
 
+App-shape overrides use the same table with `source_*` fields and a
+single `value` (no baseline): `source_release_home` (`owner/repo`, the
+release home enrichment and polling resolve instead of the listed
+repo), `source_gitcode_mirror`
+(`targetOwner/targetRepo|readmeOwner/readmeRepo`),
+`source_scan_all_releases` and `source_prefer_prerelease` (`true`). A
+new or edited row forces one re-enrichment, steady state is a no-op,
+and soft-deleting it forces one more recheck. The five known cases
+(instafel, LinkSheet, hlbmerge, SmartspacerPlugins,
+Universal-ReVanced-Manager) ship as a data-migration seed; add more
+like any other override:
+
+```bash
+sudo -u postgres psql -d shizuappstore -c "
+INSERT INTO app_overrides (app_slug, field, value, note, created_at, updated_at)
+VALUES ('some-owner-some-app', 'source_release_home', 'instafel/u-rel',
+        'releases live in a separate repo', now(), now())
+ON CONFLICT (app_slug, field) DO UPDATE
+SET value = EXCLUDED.value, note = EXCLUDED.note, updated_at = now();"
+```
+
 An `availability` override (`'excluded'`) hides the entry with a
 `removed[]` tombstone and restores it when soft-deleted, exactly like an
 unlist; operator unlists and `ARCHIVED.md` still win while they apply.

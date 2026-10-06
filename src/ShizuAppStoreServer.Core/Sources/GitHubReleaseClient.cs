@@ -110,15 +110,6 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         PropertyNameCaseInsensitive = false,
     };
 
-    // Stable releases are so rare for these repos that users are better served
-    // by the newest prerelease: a prerelease-only repo would otherwise sit on a
-    // months-old build between tagged releases.
-    private static readonly HashSet<string> PrereleasePreferredRepos =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            "Jman-Github/Universal-ReVanced-Manager",
-        };
-
     // stargazers/history caps per_page at 30 and page at 100; four pages
     // (120 weeks) is more than any lookback needs while bounding request cost.
     private const int StarHistoryPageSize = 30;
@@ -178,9 +169,9 @@ public sealed class GitHubReleaseClient : IGitHubReleaseClient
         // pipeline) on a release-per-commit treadmill. A repo without a
         // servable stable on the first page falls back to its newest servable
         // prerelease, and a release without assets is only used as a last
-        // resort so the existing index/Play fallbacks still run. Repos in
-        // PrereleasePreferredRepos flip the first two tiers.
-        var preferPrerelease = PrereleasePreferredRepos.Contains($"{owner}/{repo}");
+        // resort so the existing index/Play fallbacks still run. A target with
+        // PreferPrerelease flips the first two tiers.
+        var preferPrerelease = target.PreferPrerelease;
         var candidates = releases
             .Where(r => !r.Draft)
             .Select(r => (Release: r, Assets: r.Assets

@@ -75,7 +75,9 @@ public sealed class AppOverrideApplier(
 
         // Restores run first: a row re-added for the same field then captures
         // the restored value as its new baseline.
-        foreach (var row in rows.Where(r => r.DeletedAt is not null && !AppOverrideFields.IsVisibility(r.Field)).ToList())
+        foreach (var row in rows.Where(r => r.DeletedAt is not null
+            && !AppOverrideFields.IsVisibility(r.Field)
+            && !SourceOverrideKinds.IsSource(r.Field)).ToList())
         {
             if (!AppOverrideFields.TryGet(row.Field, out var field) || row.BaselineValue is null)
             {
@@ -96,13 +98,52 @@ public sealed class AppOverrideApplier(
 
         ApplyFields(app, rows, now, ref dirty);
         ApplyVisibility(app, rows, now, ref dirty);
+        ApplySourceFields(app, rows, ref dirty);
 
         return dirty;
     }
 
+    /// <summary>
+    /// Source-kind rows steer the enrichment/poll seam instead of writing a
+    /// column, so they are consume-once: a new or edited value clears the
+    /// recheck window once and is marked applied, and a soft-deleted row is
+    /// removed with one recheck when it had been consumed. The seam itself
+    /// reads the row while it is active, so nothing here touches the app's
+    /// value or the delta clock.
+    /// </summary>
+    private void ApplySourceFields(App app, List<AppOverride> rows, ref bool dirty)
+    {
+        foreach (var row in rows.Where(r => SourceOverrideKinds.IsSource(r.Field)))
+        {
+            if (SourceOverrideKinds.Validate(row.Field, row.Value) is { } error)
+            {
+                Warn(row, error);
+                continue;
+            }
+
+            if (row.DeletedAt is not null)
+            {
+                if (row.AppliedValue is not null)
+                {
+                    ForceRecheck(app, ref dirty);
+                }
+                Remove(row, ref dirty);
+                continue;
+            }
+
+            if (!string.Equals(row.AppliedValue, row.Value, StringComparison.Ordinal))
+            {
+                row.AppliedValue = row.Value;
+                ForceRecheck(app, ref dirty);
+            }
+        }
+    }
+
     private void ApplyFields(App app, List<AppOverride> rows, DateTimeOffset now, ref bool dirty)
     {
-        foreach (var row in rows.Where(r => r.DeletedAt is null && !AppOverrideFields.IsVisibility(r.Field)))
+        foreach (var row in rows.Where(r => r.DeletedAt is null
+            && !AppOverrideFields.IsVisibility(r.Field)
+            && !SourceOverrideKinds.IsSource(r.Field)))
         {
             if (!AppOverrideFields.TryGet(row.Field, out var field))
             {

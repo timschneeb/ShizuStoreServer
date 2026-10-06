@@ -57,10 +57,10 @@ public sealed class AppEnricher(
     IAppSourceOverrides? sourceOverrides = null)
     : IEnrichmentPipeline
 {
-    // Hand-built callers (tests) fall back to the in-code special cases;
-    // production registers the singleton instance.
+    // Hand-built callers (tests) fall back to a pass-through seam;
+    // production registers the database-backed one.
     private readonly IAppSourceOverrides sourceOverrides =
-        sourceOverrides ?? StaticAppSourceOverrides.Instance;
+        sourceOverrides ?? NoAppSourceOverrides.Instance;
 
     private readonly StarHistoryService starHistory = new(github, gitlab, db, log);
     private readonly ScreenshotService screenshots = new(fdroid, repoScreenshots, options, db, log);
@@ -310,10 +310,14 @@ public sealed class AppEnricher(
 
             // Instafel and LinkSheet publish from separate release repos; the
             // list target stays the analysis source for usage and screenshots.
-            (owner, repo) = sourceOverrides.RemapReleaseHome(owner, repo);
+            if (sourceOverrides.RemapReleaseHome(app.Slug) is { } releaseHome)
+            {
+                owner = releaseHome.Owner;
+                repo = releaseHome.Repo;
+            }
 
             EnrichResult result;
-            var mirror = sourceOverrides.GitCodeMirrorFor(owner, repo);
+            var mirror = sourceOverrides.GitCodeMirrorFor(app.Slug);
             if (gitcode is not null && mirror is not null)
             {
                 result = await gitcodeEnricher.EnrichFromGitCodeAsync(app, mirror, now, ct);

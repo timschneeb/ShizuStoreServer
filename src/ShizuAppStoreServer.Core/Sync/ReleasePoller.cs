@@ -51,10 +51,10 @@ public sealed class ReleasePoller(
     // Shared with the enricher so the poll and enrichment always watch the
     // same release repo (remaps) and skip feeds with no cheap signal.
     private readonly IAppSourceOverrides sourceOverrides =
-        sourceOverrides ?? StaticAppSourceOverrides.Instance;
+        sourceOverrides ?? NoAppSourceOverrides.Instance;
 
-    private sealed record Candidate(long Id, string Url, string? SourceUrl, string? Etag);
-    private sealed record ForgeTarget(Candidate App, string OwnerOrProject, string Repo, bool IsGitHub);
+    private sealed record Candidate(long Id, string Slug, string Url, string? SourceUrl, string? Etag);
+    private sealed record ForgeTarget(Candidate App, string OwnerOrProject, string Repo, bool IsGitHub, bool PreferPrerelease);
     private sealed record FdroidTarget(Candidate App, string RepoBase, string PackageId, SourceKind Kind);
 
     public async Task<IReadOnlySet<long>> FindChangedAsync(CancellationToken ct = default)
@@ -69,7 +69,7 @@ public sealed class ReleasePoller(
 
         var apps = await db.Apps.AsNoTracking()
             .Where(a => a.Availability != Availability.Excluded && a.RootAppId == null)
-            .Select(a => new Candidate(a.Id, a.Url, a.SourceUrl, a.EnrichEtag))
+            .Select(a => new Candidate(a.Id, a.Slug, a.Url, a.SourceUrl, a.EnrichEtag))
             .ToListAsync(ct);
         if (apps.Count == 0)
         {
@@ -187,22 +187,26 @@ public sealed class ReleasePoller(
             // Instafel and LinkSheet publish from a repo other than the listed
             // one; watching the listed repo would compare a feed that never
             // changes. Same remap as AppEnricher, shared so it cannot drift.
-            (owner, repo) = sourceOverrides.RemapReleaseHome(owner, repo);
+            if (sourceOverrides.RemapReleaseHome(app.Slug) is { } home)
+            {
+                owner = home.Owner;
+                repo = home.Repo;
+            }
 
             // hlbmerge rebuilds only on GitCode and SmartspacerPlugins
             // publishes one app per release; both feeds stay on the due window.
-            if (sourceOverrides.SkipReleasePoll(owner, repo))
+            if (sourceOverrides.SkipReleasePoll(app.Slug))
             {
                 return null;
             }
 
-            return new ForgeTarget(app, owner, repo, true);
+            return new ForgeTarget(app, owner, repo, true, sourceOverrides.PrefersPrerelease(app.Slug));
         }
 
         if (SourceClassifier.TryParseGitLabRepo(app.Url, out var project)
             || SourceClassifier.TryParseGitLabRepo(app.SourceUrl, out project))
         {
-            return new ForgeTarget(app, project, string.Empty, false);
+            return new ForgeTarget(app, project, string.Empty, false, false);
         }
 
         return null;
@@ -249,7 +253,10 @@ public sealed class ReleasePoller(
             if (target.IsGitHub)
             {
                 release = await github.GetLatestReleaseAsync(
-                    new SourceTarget(SourceKind.GitHub, $"{target.OwnerOrProject}/{target.Repo}"),
+                    new SourceTarget(SourceKind.GitHub, $"{target.OwnerOrProject}/{target.Repo}")
+                    {
+                        PreferPrerelease = target.PreferPrerelease,
+                    },
                     target.App.Etag, ct);
             }
             else

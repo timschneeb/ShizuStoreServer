@@ -457,8 +457,21 @@ bundle` is rebuilt per deploy, never committed.
   both; operator unlists and `ARCHIVED.md` outrank it. Postgres triggers
   bump the app's `updated_at` on insert/delete and on
   `value`/`deleted_at`/`app_slug` edits, so `/v1/changes` emits the entry
-  immediately, before the next pass materializes it. Seeded with SQL; no
-  admin endpoint.
+  immediately, before the next pass materializes it. Four `source_*`
+  kinds store app-shape switches instead of column values, slug-keyed
+  with a single `value` text column: `source_release_home`
+  (`owner/repo`, the home whose releases enrichment and polling resolve
+  instead of the listed repo), `source_gitcode_mirror`
+  (`targetOwner/targetRepo|readmeOwner/readmeRepo`), and
+  `source_scan_all_releases` / `source_prefer_prerelease` (`true`). The
+  applier consumes them once: a new or edited row sets `applied_value`
+  and clears `last_checked_at`/`last_error` so the next pass
+  re-enriches, steady state is a no-op, and soft-deleting a consumed row
+  forces one more recheck. No app column and no delta clock move. Code
+  reads them through `IAppSourceOverrides` (§7.2); a data migration
+  seeds the known cases (instafel, LinkSheet, hlbmerge,
+  SmartspacerPlugins, Universal-ReVanced-Manager) by matching
+  `apps.url`. Seeded with SQL; no admin endpoint.
 - **blocked_screenshot_urls** - global screenshot URL blocklist: unique
   `url`, optional `note`, timestamps, `deleted_at`. Blocked URLs are
   dropped at intake (F-Droid/Izzy index and repo scans), every pass
@@ -640,9 +653,10 @@ F-Droid/Izzy build can take the primary slot.
   stable (else the newest non-draft) so the changelog still resolves.
   Automatic CI prereleases therefore never outrank a stable release,
   while repos that only tag prereleases keep a download link.
-  Repos in `PrereleasePreferredRepos` (currently Jman-Github /
-  Universal-ReVanced-Manager, whose stable builds are rare) flip the
-  first two tiers and prefer the newest servable prerelease.
+  Entries with a `source_prefer_prerelease` override (currently
+  Jman-Github / Universal-ReVanced-Manager, whose stable builds are
+  rare) carry that flag on the source target, which flips the first two
+  tiers and prefers the newest servable prerelease.
   When the newest release of the served channel ships no installable
   artifact (an assetless successor), the repo is treated as no longer
   distributing binaries: `forge_assets_stale` is set and an F-Droid/Izzy
@@ -1421,9 +1435,10 @@ Play, link-only, Codeberg and the GitCode special case have no
 cheap signal and stay on the due window; instafel's list entry is
 polled through its real release repo (instafel/u-rel) and LinkSheet
 through its nightly release repo (LinkSheet/nightly), both shared
-with enrichment via `IAppSourceOverrides` (the in-code special cases
-live in `StaticAppSourceOverrides`), while SmartspacerPlugins is
-skipped (its apps span separate releases, §5.2). Skipped apps
+with enrichment through `IAppSourceOverrides`, whose production
+implementation (`DbAppSourceOverrides`) reads the active `source_*`
+rows from `app_overrides` (§3) once per pass, while SmartspacerPlugins
+is skipped (its apps span separate releases, §5.2). Skipped apps
 (excluded) and rows without a matching download still count as
 changed, so they enrich on the next pass. Poll failures are soft
 (unchanged): a flapping upstream never marks rows failed, and a

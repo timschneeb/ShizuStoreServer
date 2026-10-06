@@ -249,7 +249,7 @@ public sealed class SourcesTests
     }
 
     [Fact]
-    public async Task PreferPrereleaseRepoPicksNewestServablePrereleaseOverStable()
+    public async Task PreferPrereleaseTargetPicksNewestServablePrereleaseOverStable()
     {
         var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -258,7 +258,11 @@ public sealed class SourcesTests
                 Release("v1.0", prerelease: false, ApkAsset("v1.0"))).ToJsonString()),
         });
         var release = (await Client(stub).GetLatestReleaseAsync(
-            "Jman-Github", "Universal-ReVanced-Manager", null))!;
+            new SourceTarget(SourceKind.GitHub, "Jman-Github/Universal-ReVanced-Manager")
+            {
+                PreferPrerelease = true,
+            },
+            null))!;
 
         // Stable builds are rare for this repo, so the newest prerelease wins.
         Assert.Equal("v2.0-beta", release.TagName);
@@ -266,12 +270,34 @@ public sealed class SourcesTests
     }
 
     [Fact]
-    public async Task PreferPrereleaseRepoFallsBackToStableWithoutPrereleases()
+    public async Task PreferPrereleaseTargetFallsBackToStableWithoutPrereleases()
     {
         var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(
                 new JsonArray(Release("v1.0", prerelease: false, ApkAsset("v1.0"))).ToJsonString()),
+        });
+        var release = (await Client(stub).GetLatestReleaseAsync(
+            new SourceTarget(SourceKind.GitHub, "Jman-Github/Universal-ReVanced-Manager")
+            {
+                PreferPrerelease = true,
+            },
+            null))!;
+
+        Assert.Equal("v1.0", release.TagName);
+        Assert.False(release.IsPrerelease);
+    }
+
+    [Fact]
+    public async Task RepoNameAloneDoesNotPreferPrereleases()
+    {
+        // The prerelease channel is per-entry operator data, not a repo
+        // default: without the target flag the stable tier still wins.
+        var stub = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonArray(
+                Release("v2.0-beta", prerelease: true, ApkAsset("v2.0-beta")),
+                Release("v1.0", prerelease: false, ApkAsset("v1.0"))).ToJsonString()),
         });
         var release = (await Client(stub).GetLatestReleaseAsync(
             "Jman-Github", "Universal-ReVanced-Manager", null))!;

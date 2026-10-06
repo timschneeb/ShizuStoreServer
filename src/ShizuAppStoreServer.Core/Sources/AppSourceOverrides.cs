@@ -9,90 +9,51 @@ public sealed record GitCodeMirror(
     string Owner, string Repo, string ReadmeOwner, string ReadmeRepo);
 
 /// <summary>
-/// Per-entry source behavior that does not follow from the list URL alone.
-/// AppEnricher and ReleasePoller both consult this so the two cannot drift:
-/// when the poll keeps the listed repo it watches a feed that never changes
-/// and force-enriches the app on every fast pass. A database-backed
-/// implementation can replace <see cref="StaticAppSourceOverrides"/> when
-/// operator overrides land.
+/// Per-entry source behavior that does not follow from the list URL alone,
+/// keyed by <c>apps.slug</c>. AppEnricher and ReleasePoller both consult this
+/// so the two cannot drift: when the poll keeps the listed repo it watches a
+/// feed that never changes and force-enriches the app on every fast pass.
+/// Rows live in <c>app_overrides</c> (<see cref="DbAppSourceOverrides"/>), so
+/// operators edit them with SQL and the applier's consume-once invalidation
+/// gets the behavior applied on the next pass.
 /// </summary>
 public interface IAppSourceOverrides
 {
     /// <summary>Listed repo whose releases live in a different repo.</summary>
-    (string Owner, string Repo) RemapReleaseHome(string owner, string repo);
+    (string Owner, string Repo)? RemapReleaseHome(string appSlug);
 
     /// <summary>GitCode mirror for a listed GitHub repo, when one exists.</summary>
-    GitCodeMirror? GitCodeMirrorFor(string owner, string repo);
+    GitCodeMirror? GitCodeMirrorFor(string appSlug);
 
     /// <summary>Every release carries a different app, so latest-only compare misses them.</summary>
-    bool ScansAllReleases(string owner, string repo);
+    bool ScansAllReleases(string appSlug);
+
+    /// <summary>The repo's stable channel is empty; prefer its newest prerelease.</summary>
+    bool PrefersPrerelease(string appSlug);
 
     /// <summary>Release polling has no cheap signal; the entry stays on the due window.</summary>
-    bool SkipReleasePoll(string owner, string repo);
+    bool SkipReleasePoll(string appSlug);
 }
 
 /// <summary>
-/// The in-code special cases. Remap answers the release home, the mirror and
-/// all-releases answers pick the fetch shape before dispatch, and the poll
-/// skip folds both into the fast-path decision.
+/// Pass-through implementation for hand-built callers (tests) that do not
+/// construct a database-backed seam.
 /// </summary>
-public sealed class StaticAppSourceOverrides : IAppSourceOverrides
+public sealed class NoAppSourceOverrides : IAppSourceOverrides
 {
-    public static StaticAppSourceOverrides Instance { get; } = new();
+    public static NoAppSourceOverrides Instance { get; } = new();
 
-    private StaticAppSourceOverrides()
+    private NoAppSourceOverrides()
     {
     }
 
-    // The list links instafel's source monorepo; the updater APK ships from a
-    // separate release repo.
-    private const string InstafelListOwner = "mamiiblt";
-    private const string InstafelListRepo = "instafel";
-    private const string InstafelUpdaterOwner = "instafel";
-    private const string InstafelUpdaterRepo = "u-rel";
+    public (string Owner, string Repo)? RemapReleaseHome(string appSlug) => null;
 
-    // LinkSheet stopped publishing releases from its source repo; the nightly
-    // repo carries them. The source repo stays the analysis target.
-    private const string LinkSheetListOwner = "LinkSheet";
-    private const string LinkSheetListRepo = "LinkSheet";
-    private const string LinkSheetNightlyRepo = "nightly";
+    public GitCodeMirror? GitCodeMirrorFor(string appSlug) => null;
 
-    // hlbmerge_flutter rebuilds only on the GitCode mirror; its README comes
-    // from the listed GitHub repo.
-    private const string HlbmergeGitHubOwner = "molihuan";
-    private const string HlbmergeGitHubRepo = "hlbmerge_flutter";
-    private const string HlbmergeGitCodeOwner = "bigmolihuan";
-    private const string HlbmergeGitCodeRepo = "hlbmerge_flutter";
+    public bool ScansAllReleases(string appSlug) => false;
 
-    // One repo, several distinct apps, each in its own GitHub release.
-    private const string SmartspacerOwner = "KieronQuinn";
-    private const string SmartspacerRepo = "SmartspacerPlugins";
+    public bool PrefersPrerelease(string appSlug) => false;
 
-    public (string Owner, string Repo) RemapReleaseHome(string owner, string repo)
-    {
-        if (owner == InstafelListOwner && repo == InstafelListRepo)
-        {
-            return (InstafelUpdaterOwner, InstafelUpdaterRepo);
-        }
-
-        if (owner == LinkSheetListOwner && repo == LinkSheetListRepo)
-        {
-            return (owner, LinkSheetNightlyRepo);
-        }
-
-        return (owner, repo);
-    }
-
-    public GitCodeMirror? GitCodeMirrorFor(string owner, string repo) =>
-        owner == HlbmergeGitHubOwner && repo == HlbmergeGitHubRepo
-            ? new GitCodeMirror(
-                HlbmergeGitCodeOwner, HlbmergeGitCodeRepo,
-                HlbmergeGitHubOwner, HlbmergeGitHubRepo)
-            : null;
-
-    public bool ScansAllReleases(string owner, string repo) =>
-        owner == SmartspacerOwner && repo == SmartspacerRepo;
-
-    public bool SkipReleasePoll(string owner, string repo) =>
-        GitCodeMirrorFor(owner, repo) is not null || ScansAllReleases(owner, repo);
+    public bool SkipReleasePoll(string appSlug) => false;
 }

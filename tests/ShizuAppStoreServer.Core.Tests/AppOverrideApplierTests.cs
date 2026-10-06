@@ -536,4 +536,123 @@ public sealed class AppOverrideApplierTests : IDisposable
         var app = await _db.Apps.SingleAsync();
         Assert.Equal(["https://cdn.example/bad.png"], app.Screenshots);
     }
+
+    [Fact]
+    public async Task SourceOverrideForcesOneRecheckAndIsConsumed()
+    {
+        await SeedAppAsync(configure: a => a.LastError = "old failure");
+        await AddOverrideAsync("demo", "source_release_home", "instafel/u-rel");
+        _db.ChangeTracker.Clear();
+
+        var changed = await Applier().ApplyAsync(T0.AddHours(1));
+
+        Assert.Equal(1, changed);
+        _db.ChangeTracker.Clear();
+        var app = await _db.Apps.SingleAsync();
+        Assert.Null(app.LastCheckedAt);
+        Assert.Null(app.LastError);
+
+        // Source rows steer the seam; they never write app columns or capture
+        // a baseline, and they leave the delta clock alone.
+        Assert.Equal(T0, app.UpdatedAt);
+        var row = await _db.AppOverrides.SingleAsync();
+        Assert.Equal("instafel/u-rel", row.AppliedValue);
+        Assert.Null(row.BaselineValue);
+
+        // A consumed row is inert until the operator edits the value.
+        app.LastCheckedAt = T0.AddHours(2);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        Assert.Equal(0, await Applier().ApplyAsync(T0.AddHours(3)));
+        _db.ChangeTracker.Clear();
+        app = await _db.Apps.SingleAsync();
+        Assert.Equal(T0.AddHours(2), app.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task EditedSourceValueForcesAnotherRecheck()
+    {
+        await SeedAppAsync();
+        await AddOverrideAsync("demo", "source_release_home", "instafel/u-rel");
+        _db.ChangeTracker.Clear();
+        await Applier().ApplyAsync(T0.AddHours(1));
+        _db.ChangeTracker.Clear();
+
+        var row = await _db.AppOverrides.SingleAsync();
+        row.Value = "instafel/v-rel";
+        await _db.SaveChangesAsync();
+        var app = await _db.Apps.SingleAsync();
+        app.LastCheckedAt = T0.AddHours(2);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        Assert.Equal(1, await Applier().ApplyAsync(T0.AddHours(3)));
+
+        _db.ChangeTracker.Clear();
+        app = await _db.Apps.SingleAsync();
+        Assert.Null(app.LastCheckedAt);
+        row = await _db.AppOverrides.SingleAsync();
+        Assert.Equal("instafel/v-rel", row.AppliedValue);
+    }
+
+    [Fact]
+    public async Task SoftDeletedConsumedSourceRowIsRemovedWithOneRecheck()
+    {
+        await SeedAppAsync();
+        await AddOverrideAsync("demo", "source_scan_all_releases", "true");
+        _db.ChangeTracker.Clear();
+        await Applier().ApplyAsync(T0.AddHours(1));
+        _db.ChangeTracker.Clear();
+
+        var row = await _db.AppOverrides.SingleAsync();
+        row.DeletedAt = T0.AddHours(2);
+        await _db.SaveChangesAsync();
+        var app = await _db.Apps.SingleAsync();
+        app.LastCheckedAt = T0.AddHours(2);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        Assert.Equal(1, await Applier().ApplyAsync(T0.AddHours(3)));
+
+        _db.ChangeTracker.Clear();
+        app = await _db.Apps.SingleAsync();
+        Assert.Null(app.LastCheckedAt);
+        Assert.Empty(await _db.AppOverrides.ToListAsync());
+    }
+
+    [Fact]
+    public async Task NeverAppliedSoftDeletedSourceRowIsRemovedWithoutRecheck()
+    {
+        await SeedAppAsync();
+        await AddOverrideAsync("demo", "source_release_home", "instafel/u-rel");
+        _db.ChangeTracker.Clear();
+        var row = await _db.AppOverrides.SingleAsync();
+        row.DeletedAt = T0.AddHours(1);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        Assert.Equal(1, await Applier().ApplyAsync(T0.AddHours(2)));
+
+        _db.ChangeTracker.Clear();
+        var app = await _db.Apps.SingleAsync();
+        Assert.Equal(T0, app.LastCheckedAt);
+        Assert.Empty(await _db.AppOverrides.ToListAsync());
+    }
+
+    [Fact]
+    public async Task InvalidSourceValueIsIgnored()
+    {
+        await SeedAppAsync();
+        await AddOverrideAsync("demo", "source_release_home", "not-a-repo");
+        _db.ChangeTracker.Clear();
+
+        Assert.Equal(0, await Applier().ApplyAsync(T0.AddHours(1)));
+
+        _db.ChangeTracker.Clear();
+        var app = await _db.Apps.SingleAsync();
+        Assert.Equal(T0, app.LastCheckedAt);
+        var row = await _db.AppOverrides.SingleAsync();
+        Assert.Null(row.AppliedValue);
+        Assert.Null(row.BaselineValue);
+    }
 }

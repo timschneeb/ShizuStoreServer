@@ -18,9 +18,12 @@ internal sealed class GitHubReleaseEnricher(
     internal async Task<EnrichResult> EnrichFromGitHubAsync(
         App app, string owner, string repo, DateTimeOffset now, CancellationToken ct)
     {
-        var target = new SourceTarget(SourceKind.GitHub, $"{owner}/{repo}");
+        var target = new SourceTarget(SourceKind.GitHub, $"{owner}/{repo}")
+        {
+            PreferPrerelease = sourceOverrides.PrefersPrerelease(app.Slug),
+        };
 
-        if (sourceOverrides.ScansAllReleases(owner, repo))
+        if (sourceOverrides.ScansAllReleases(app.Slug))
         {
             return await EnrichFromAllReleasesAsync(app, owner, repo, target, now, ct);
         }

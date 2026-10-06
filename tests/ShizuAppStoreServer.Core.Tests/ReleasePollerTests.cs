@@ -67,6 +67,17 @@ public sealed class ReleasePollerTests : IDisposable
             fn(target.Key, etag);
     }
 
+    private sealed class CaptureGitHub : IGitHubReleaseClient
+    {
+        public SourceTarget? Target { get; private set; }
+
+        public Task<SourceRelease?> GetLatestReleaseAsync(SourceTarget target, string? etag, CancellationToken ct = default)
+        {
+            Target = target;
+            return Task.FromResult<SourceRelease?>(null);
+        }
+    }
+
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
@@ -149,7 +160,22 @@ public sealed class ReleasePollerTests : IDisposable
                     ? throw new InvalidOperationException("F-Droid must not be called")
                     : IndexV2Response(fdroidIndexV2Json))))),
             new EnrichmentOptions { GitHubToken = token },
-            new SyncOptions { PollEnabled = pollEnabled, PollParallelism = 4 });
+            new SyncOptions { PollEnabled = pollEnabled, PollParallelism = 4 },
+            sourceOverrides: new DbAppSourceOverrides(_db));
+
+    /// <summary>Seeds a source-behavior row the way an operator would.</summary>
+    private void AddSourceOverride(string slug, string field, string value)
+    {
+        _db.AppOverrides.Add(new AppOverride
+        {
+            AppSlug = slug,
+            Field = field,
+            Value = value,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        });
+        _db.SaveChanges();
+    }
 
     [Fact]
     public async Task EmptyWhenNoToken()
@@ -380,6 +406,7 @@ public sealed class ReleasePollerTests : IDisposable
         // SmartspacerPlugins ships a separate release per plugin, so the
         // latest-release compare cannot see them and polling is skipped.
         SeedApp("smartspacer", "https://github.com/KieronQuinn/SmartspacerPlugins");
+        AddSourceOverride("smartspacer", "source_scan_all_releases", "true");
 
         Assert.Empty(await Poller().FindChangedAsync());
     }
@@ -391,6 +418,7 @@ public sealed class ReleasePollerTests : IDisposable
         // watch LinkSheet/nightly like the enricher does, not the listed repo.
         const string url = "https://github.com/LinkSheet/nightly/releases/download/nightly-2026091203/LinkSheet-foss-nightly.apk";
         var app = SeedApp("linksheet", "https://github.com/LinkSheet/LinkSheet");
+        AddSourceOverride("linksheet", "source_release_home", "LinkSheet/nightly");
         SeedDownload(app.Id, url, SourceKind.GitHub);
         var poller = Poller(github: new StubGitHub((owner, repo, _) =>
         {
@@ -408,6 +436,7 @@ public sealed class ReleasePollerTests : IDisposable
     public async Task InstafelPolledThroughUpdaterRepo()
     {
         SeedApp("instafel", "https://github.com/mamiiblt/instafel");
+        AddSourceOverride("instafel", "source_release_home", "instafel/u-rel");
         var poller = Poller(github: new StubGitHub((owner, repo, _) =>
         {
             Assert.Equal("instafel", owner);
@@ -416,6 +445,19 @@ public sealed class ReleasePollerTests : IDisposable
         }));
 
         Assert.Empty(await poller.FindChangedAsync());
+    }
+
+    [Fact]
+    public async Task PreferPrereleaseRowReachesThePollTarget()
+    {
+        SeedApp("revanced", "https://github.com/Jman-Github/Universal-ReVanced-Manager");
+        AddSourceOverride("revanced", "source_prefer_prerelease", "true");
+        var github = new CaptureGitHub();
+
+        await Poller(github: github).FindChangedAsync();
+
+        Assert.NotNull(github.Target);
+        Assert.True(github.Target.PreferPrerelease);
     }
 
     [Fact]

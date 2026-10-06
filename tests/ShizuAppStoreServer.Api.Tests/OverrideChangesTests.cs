@@ -190,6 +190,42 @@ public sealed class OverrideChangesTests(ShizuApiFactory factory) : IClassFixtur
         Assert.Contains((await ChangesAsync()).Updated, a => a.Slug == "hideable");
     }
 
+    [Fact]
+    public async Task SourceKindOverrideEditTouchesAndForcesOneRecheck()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.Add(Seeds.NewApp("instafel", audio, addedAt: Jan, updatedAt: Jan));
+        });
+        await InstallTriggersAsync(Jul2);
+
+        await InsertOverrideAsync("instafel", "source_release_home", "instafel/u-rel", Jul2);
+
+        // The trigger surfaces the edit immediately; the applier then consumes
+        // the row so the next enrich resolves the new release home once.
+        Assert.Equal(Jul2, await UpdatedAtAsync("instafel"));
+        Assert.Contains((await ChangesAsync()).Updated, a => a.Slug == "instafel");
+
+        Assert.Equal(1, await ApplyOverridesAsync(Jul3));
+
+        var state = await factory.QueryAsync(db => db.Apps.AsNoTracking()
+            .Select(a => new { a.LastCheckedAt, a.UpdatedAt }).SingleAsync());
+        Assert.Null(state.LastCheckedAt);
+        Assert.Equal(Jul2, state.UpdatedAt);
+        var row = await factory.QueryAsync(db => db.AppOverrides.AsNoTracking().SingleAsync());
+        Assert.Equal("instafel/u-rel", row.AppliedValue);
+        Assert.Null(row.BaselineValue);
+
+        // A consumed row is inert: only a value edit forces another recheck.
+        await factory.QueryAsync(db => db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE apps SET last_checked_at = {Jul4} WHERE slug = 'instafel'"));
+        Assert.Equal(0, await ApplyOverridesAsync(Jul5));
+        Assert.Equal(Jul4, await factory.QueryAsync(db =>
+            db.Apps.AsNoTracking().Select(a => a.LastCheckedAt).SingleAsync()));
+    }
+
     private Task InstallTriggersAsync(DateTimeOffset stamp) =>
         factory.QueryAsync(async db =>
         {
