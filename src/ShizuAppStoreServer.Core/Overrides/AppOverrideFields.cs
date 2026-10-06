@@ -6,15 +6,16 @@ namespace ShizuAppStoreServer.Core.Overrides;
 /// <summary>
 /// Registry of the App columns an <c>app_overrides</c> row may target. Values
 /// are text and parsed here, so the applier never has to know individual
-/// columns. Identity, list bookkeeping, scheduling, publish-gate and usage
-/// columns are deliberately absent: overriding them would break matching or
-/// the delta feed.
+/// columns. Identity, scheduling, publish-gate and usage columns are
+/// deliberately absent: overriding them would break matching or the delta feed.
 /// </summary>
 internal static class AppOverrideFields
 {
     internal const string AvailabilityName = "availability";
     internal const string ExcludedReasonName = "excluded_reason";
     internal const string IconHashName = "icon_hash";
+    internal const string AddedAtName = "added_at";
+    internal const string ListUpdatedAtName = "list_updated_at";
 
     internal static readonly AppOverrideField AvailabilityField = new(
         AvailabilityName,
@@ -34,7 +35,10 @@ internal static class AppOverrideFields
     {
         ["name"] = RequiredText("name", AppOverrideOwnership.List, app => app.Name, (app, value) => app.Name = value),
         ["description"] = RequiredText("description", AppOverrideOwnership.List, app => app.Description, (app, value) => app.Description = value),
-        ["added_at"] = RequiredTimestamp("added_at", AppOverrideOwnership.List, app => app.AddedAt, (app, value) => app.AddedAt = value),
+        [AddedAtName] = RequiredTimestamp(AddedAtName, AppOverrideOwnership.List, app => app.AddedAt, (app, value) => app.AddedAt = value),
+        // Served as listUpdatedAt, which drives the client's Recently added
+        // row and the storefront's listed-age label.
+        [ListUpdatedAtName] = Timestamp(ListUpdatedAtName, AppOverrideOwnership.List, app => app.ListUpdatedAt, (app, value) => app.ListUpdatedAt = value),
         ["display_name"] = OptionalText("display_name", AppOverrideOwnership.Enrichment, app => app.DisplayName, (app, value) => app.DisplayName = value),
         ["apk_label"] = OptionalText("apk_label", AppOverrideOwnership.Enrichment, app => app.ApkLabel, (app, value) => app.ApkLabel = value),
         ["license"] = OptionalText("license", AppOverrideOwnership.List, app => app.License, (app, value) => app.License = value),

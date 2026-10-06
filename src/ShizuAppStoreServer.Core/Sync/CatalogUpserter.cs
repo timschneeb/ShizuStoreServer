@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.History;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Parsing;
 
 namespace ShizuAppStoreServer.Core.Sync;
@@ -75,6 +76,23 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         // staling. Only the root rows are the list's rows.
         var apps = allApps.Where(a => a.RootAppId is null).ToList();
         var tombstones = await db.RemovedApps.ToListAsync(ct);
+        // An active date override owns its column. Skipping the history refresh
+        // for it keeps the operator value from flickering mid-pass and from
+        // bumping updated_at through the summary interceptor every pass; the
+        // applier re-asserts and restores it.
+        var protectedDates = await db.AppOverrides.AsNoTracking()
+            .Where(o => o.DeletedAt == null
+                && (o.Field == AppOverrideFields.AddedAtName || o.Field == AppOverrideFields.ListUpdatedAtName))
+            .Select(o => new { o.AppSlug, o.Field })
+            .ToListAsync(ct);
+        var addedAtProtected = protectedDates
+            .Where(o => o.Field == AppOverrideFields.AddedAtName)
+            .Select(o => o.AppSlug)
+            .ToHashSet(StringComparer.Ordinal);
+        var listUpdatedAtProtected = protectedDates
+            .Where(o => o.Field == AppOverrideFields.ListUpdatedAtName)
+            .Select(o => o.AppSlug)
+            .ToHashSet(StringComparer.Ordinal);
         // Variants own slugs too, so root slug generation must avoid them.
         var usedSlugs = new HashSet<string>(
             categories.Select(c => c.Slug).Concat(allApps.Select(a => a.Slug)), StringComparer.Ordinal);
@@ -110,6 +128,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 foreach (var entry in parsed.Entries)
                 {
                     UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
+                        addedAtProtected, listUpdatedAtProtected,
                         listing, category, type, entry, parent: null, history, now, commitNow, ref added, ref updated);
                 }
             }
@@ -264,6 +283,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         List<App> apps, List<RemovedApp> tombstones, Dictionary<long, Category> categoriesById, HashSet<string> usedSlugs,
         HashSet<(Listing, string, long)> parsedKeys, HashSet<Location> parsedLocations,
         HashSet<(Listing, string)> seenEntries,
+        HashSet<string> addedAtProtected, HashSet<string> listUpdatedAtProtected,
         Listing listing, Category category, AppType type,
         ParsedEntry entry, App? parent,
         IReadOnlyDictionary<string, EntryHistory> history,
@@ -371,10 +391,18 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             // History is authoritative for both the introduction and the
             // list-change dates (silent commits already filtered out), and
             // refreshes them even when the parsed entry itself is unchanged.
+            // An active override wins instead: the applier owns that column.
             if (h is not null)
             {
-                match.AddedAt = h.AddedAt;
-                match.ListUpdatedAt = h.UpdatedAt;
+                if (!addedAtProtected.Contains(match.Slug))
+                {
+                    match.AddedAt = h.AddedAt;
+                }
+
+                if (!listUpdatedAtProtected.Contains(match.Slug))
+                {
+                    match.ListUpdatedAt = h.UpdatedAt;
+                }
             }
         }
 
@@ -383,6 +411,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         foreach (var child in entry.Children)
         {
             UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
+                addedAtProtected, listUpdatedAtProtected,
                 listing, category, type, child, parent: match, history, now, commitNow, ref added, ref updated);
         }
     }

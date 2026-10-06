@@ -136,6 +136,61 @@ public sealed class CatalogUpserterTests : IDisposable
     }
 
     [Fact]
+    public async Task ActiveDateOverridesSurviveTheHistoryRefresh()
+    {
+        var history = new Dictionary<string, EntryHistory>
+        {
+            ["https://github.com/papergray/MicUp"] = new(T0, T1),
+        };
+        await Upserter().UpsertAsync([ParseMain()], history, T1);
+
+        var overridden = T0.AddDays(-5);
+        var micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        micUp.AddedAt = overridden;
+        micUp.ListUpdatedAt = overridden;
+        foreach (var field in new[] { "added_at", "list_updated_at" })
+        {
+            _db.AppOverrides.Add(new AppOverride
+            {
+                AppSlug = "micup",
+                Field = field,
+                Value = overridden.ToString("O"),
+                CreatedAt = T1,
+                UpdatedAt = T1,
+            });
+        }
+
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var clock = (await _db.Apps.SingleAsync(a => a.Slug == "micup")).UpdatedAt;
+
+        // The history refresh must leave an overridden date alone: rewriting
+        // it would flicker the value mid-pass and bump the delta clock.
+        await Upserter().UpsertAsync([ParseMain()], history, T1);
+
+        _db.ChangeTracker.Clear();
+        micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(overridden, micUp.AddedAt);
+        Assert.Equal(overridden, micUp.ListUpdatedAt);
+        Assert.Equal(clock, micUp.UpdatedAt);
+
+        // Soft-deleting the rows hands the columns back to history.
+        foreach (var row in await _db.AppOverrides.ToListAsync())
+        {
+            row.DeletedAt = T1;
+        }
+
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        await Upserter().UpsertAsync([ParseMain()], history, T1);
+
+        _db.ChangeTracker.Clear();
+        micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(T0, micUp.AddedAt);
+        Assert.Equal(T1, micUp.ListUpdatedAt);
+    }
+
+    [Fact]
     public async Task RenameKeepsIdAndSlug()
     {
         await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);

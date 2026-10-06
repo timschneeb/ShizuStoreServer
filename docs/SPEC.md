@@ -437,7 +437,8 @@ bundle` is rebuilt per deploy, never committed.
   apply; a null value round-trips as empty string), optional `note`,
   timestamps, `deleted_at`. `field` is the snake_case `apps` column;
   overridable are the list-owned fields (`name`, `description`,
-  `added_at` (drives `sort=added` and the added/updated split), `license`,
+  `added_at` (drives `sort=added` and the added/updated split),
+  `list_updated_at` (drives the client's "Recently added" list; §4), `license`,
   `is_recommended`, `has_paid`, `has_iap`,
   `has_ads`, `trial_days`, `requires_root`, `source_url`), the
   enrichment-owned fields (`display_name`, `apk_label`, `package_name`,
@@ -450,7 +451,10 @@ bundle` is rebuilt per deploy, never committed.
   overridable. The applier (§7) runs after enrichment on every pass, so
   an override re-asserts the value enrichment just rewrote; a
   steady-state write-back keeps `updated_at` still, a new or edited
-  override moves it only when the served value actually changes.
+  override moves it only when the served value actually changes. While an
+  active override for `added_at` or `list_updated_at` exists, the
+  upserter skips the git-history refresh for that column so the applier
+  remains its only writer (§4).
   Soft-deleting the row restores `baseline_value`, drops the row and
   forces a recheck; a physical DELETE does not restore. An
   `availability` override excludes the entry with reason
@@ -557,7 +561,8 @@ bundle` is rebuilt per deploy, never committed.
   files keeps its main-list dates. The upserter seeds
   `list_updated_at` from that last non-silent sighting (the changelog's
   "recently changed" clock) and re-seeds `added_at`/`list_updated_at` on
-  every pass; afterwards
+  every pass, unless an active `app_overrides` row owns that date (§3);
+  afterwards
   `updated_at` is the change clock (any summary change bumps it, §3/§8)
   while `version_updated_at` tracks the served APK version.
 - **Upserter** (`Sync/CatalogUpserter`): matches rows by

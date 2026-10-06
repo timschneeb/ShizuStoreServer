@@ -347,6 +347,55 @@ public sealed class AppOverrideApplierTests : IDisposable
     }
 
     [Fact]
+    public async Task ListUpdatedAtOverrideAppliesRestoresAndLeavesTheScheduleAlone()
+    {
+        await SeedAppAsync(configure: app => app.ListUpdatedAt = T0);
+        await AddOverrideAsync("demo", "list_updated_at", "2024-01-02T03:04:05+00:00");
+        _db.ChangeTracker.Clear();
+
+        await Applier().ApplyAsync(T0.AddHours(1));
+
+        _db.ChangeTracker.Clear();
+        var app = await _db.Apps.SingleAsync();
+        Assert.Equal(DateTimeOffset.Parse("2024-01-02T03:04:05+00:00"), app.ListUpdatedAt);
+        Assert.Equal(T0.AddHours(1), app.UpdatedAt);
+        var row = await _db.AppOverrides.SingleAsync();
+        Assert.Equal(T0, DateTimeOffset.Parse(row.BaselineValue!));
+        Assert.Equal("2024-01-02T03:04:05+00:00", row.AppliedValue);
+
+        _db.ChangeTracker.Clear();
+        row = await _db.AppOverrides.SingleAsync();
+        row.DeletedAt = T0.AddHours(2);
+        await _db.SaveChangesAsync();
+
+        _db.ChangeTracker.Clear();
+        await Applier().ApplyAsync(T0.AddHours(3));
+
+        _db.ChangeTracker.Clear();
+        app = await _db.Apps.SingleAsync();
+        Assert.Equal(T0, app.ListUpdatedAt);
+        Assert.Equal(T0, app.LastCheckedAt);
+        Assert.False(await _db.AppOverrides.AnyAsync());
+    }
+
+    [Fact]
+    public async Task InvalidListUpdatedAtIsRejected()
+    {
+        await SeedAppAsync(configure: app => app.ListUpdatedAt = T0);
+        await AddOverrideAsync("demo", "list_updated_at", "not-a-date");
+        _db.ChangeTracker.Clear();
+
+        Assert.Equal(0, await Applier().ApplyAsync(T0.AddHours(1)));
+
+        _db.ChangeTracker.Clear();
+        var app = await _db.Apps.SingleAsync();
+        Assert.Equal(T0, app.ListUpdatedAt);
+        var row = await _db.AppOverrides.SingleAsync();
+        Assert.Null(row.BaselineValue);
+        Assert.Null(row.AppliedValue);
+    }
+
+    [Fact]
     public async Task UnparsableAndUnknownFieldsAreSkipped()
     {
         await SeedAppAsync();
