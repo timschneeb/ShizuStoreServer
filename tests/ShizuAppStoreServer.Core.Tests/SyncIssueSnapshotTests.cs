@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Icons;
 using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Jobs;
 using ShizuAppStoreServer.Core.Sync;

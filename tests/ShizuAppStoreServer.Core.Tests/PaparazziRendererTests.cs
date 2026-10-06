@@ -1,4 +1,5 @@
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Icons;
 using Xunit;
 
 namespace ShizuAppStoreServer.Core.Tests;

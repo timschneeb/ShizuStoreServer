@@ -1,6 +1,8 @@
 using System.IO.Compression;
 using System.Text;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Apk;
+using ShizuAppStoreServer.Core.Enrichment.Icons;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;

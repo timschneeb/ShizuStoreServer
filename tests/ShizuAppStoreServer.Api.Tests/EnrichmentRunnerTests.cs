@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Apk;
+using ShizuAppStoreServer.Core.Enrichment.Icons;
 using ShizuAppStoreServer.Core.Sources;
 using ShizuAppStoreServer.Core.Sync;
 using ShizuAppStoreServer.Sync;

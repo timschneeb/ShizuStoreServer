@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Downloads;
 using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Sync;

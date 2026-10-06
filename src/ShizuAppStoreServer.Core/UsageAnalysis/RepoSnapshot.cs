@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Repo;
 using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.UsageAnalysis;

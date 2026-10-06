@@ -1,3 +1,5 @@
+using ShizuAppStoreServer.Core.Enrichment.Icons;
+
 namespace ShizuAppStoreServer.Core.Enrichment;
 
 /// <summary>

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Repo;
 using ShizuAppStoreServer.Core.UsageAnalysis;
 
 namespace ShizuAppStoreServer.Core.Tests;

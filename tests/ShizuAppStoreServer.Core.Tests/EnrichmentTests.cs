@@ -1,5 +1,7 @@
 using System.IO.Compression;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Apk;
+using ShizuAppStoreServer.Core.Enrichment.Icons;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.Formats.Webp;

@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Icons;
 using ShizuAppStoreServer.Core.Sources;
 using SixLabors.ImageSharp;
 using Xunit;

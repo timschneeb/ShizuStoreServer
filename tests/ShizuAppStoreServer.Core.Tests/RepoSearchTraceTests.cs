@@ -1,4 +1,5 @@
 using ShizuAppStoreServer.Core.Enrichment;
+using ShizuAppStoreServer.Core.Enrichment.Repo;
 using ShizuAppStoreServer.Core.UsageAnalysis;
 
 namespace ShizuAppStoreServer.Core.Tests;
