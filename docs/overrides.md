@@ -219,7 +219,7 @@ SET value = EXCLUDED.value,
 
 ```sql
 INSERT INTO blocked_screenshot_urls (url, note, created_at, updated_at)
-VALUES ('https://raw.githubusercontent.com/foo/bar/abcdef/screenshots/banner.png',
+VALUES ('https://raw.githubusercontent.com/foo/bar/screenshots/banner.png',
         'banner, not a screenshot', now(), now())
 ON CONFLICT (url) DO UPDATE SET note = EXCLUDED.note, updated_at = now();
 ```
@@ -233,7 +233,7 @@ throttled to the weekly `RepoScreenshotsRecheckInterval`.
 | Column | Meaning |
 | --- | --- |
 | `id` | Surrogate key. |
-| `url` | Exact URL string, unique. Matching is ordinal: scheme, host and path must match the stored screenshot string byte for byte. |
+| `url` | Unique. Matching is ordinal and exact, except that the commit segment of the pinned raw URL shapes (`raw.githubusercontent.com/{owner}/{repo}/{sha}/...` and `gitlab.com/{project}/-/raw/{sha}/...`, sha 40 or 64 hex chars) is ignored. Block either the pinned or the commitless form; the block survives repository re-pins. |
 | `note` | Operator note. |
 | `created_at`, `updated_at` | Bookkeeping timestamps. |
 | `deleted_at` | Soft delete; the row stops hiding the URL. |
@@ -248,6 +248,9 @@ Effects:
   the API detail endpoint and the storefront never serve a blocked URL.
 - INSERT and DELETE touch every carrier's `updated_at` for `/v1/changes`. A
   physical DELETE works like a soft delete but loses the note history.
+- Because the delta trigger compares the stored URL text, a block that only
+  matches a re-pinned URL (different commit segment) reaches `/v1/changes`
+  with the next-pass purge instead of on the INSERT itself.
 
 ## Verifying and troubleshooting
 

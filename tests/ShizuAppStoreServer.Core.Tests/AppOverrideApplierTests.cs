@@ -615,6 +615,28 @@ public sealed class AppOverrideApplierTests : IDisposable
     }
 
     [Fact]
+    public async Task CommitlessBlockPurgesAPinnedStoredScreenshot()
+    {
+        var pinned = "https://raw.githubusercontent.com/o/r/722a6de918853fa4e1c0b9256527a1d0b035d253/shots/bad.png";
+        await SeedAppAsync(configure: a => a.Screenshots = ["https://cdn.example/keep.png", pinned]);
+        _db.BlockedScreenshotUrls.Add(new BlockedScreenshotUrl
+        {
+            Url = "https://raw.githubusercontent.com/o/r/shots/bad.png",
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        var changed = await Applier().ApplyAsync(T0.AddHours(1));
+
+        Assert.Equal(1, changed);
+        _db.ChangeTracker.Clear();
+        var app = await _db.Apps.SingleAsync();
+        Assert.Equal(["https://cdn.example/keep.png"], app.Screenshots);
+    }
+
+    [Fact]
     public async Task SoftDeletedBlockedUrlsDoNotPurge()
     {
         await SeedAppAsync(configure: a => a.Screenshots = ["https://cdn.example/bad.png"]);

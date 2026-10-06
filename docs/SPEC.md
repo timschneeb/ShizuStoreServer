@@ -478,13 +478,18 @@ bundle` is rebuilt per deploy, never committed.
   SmartspacerPlugins, Universal-ReVanced-Manager) by matching
   `apps.url`. Seeded with SQL; no admin endpoint.
 - **blocked_screenshot_urls** - global screenshot URL blocklist: unique
-  `url`, optional `note`, timestamps, `deleted_at`. Blocked URLs are
+  `url`, optional `note`, timestamps, `deleted_at`. Matching is exact
+  except that the commit segment of the pinned raw repo URL shapes
+  (`raw.githubusercontent.com/{owner}/{repo}/{sha}/...` and
+  `gitlab.com/{project}/-/raw/{sha}/...`, sha 40 or 64 hex) is ignored,
+  so a block survives repository re-pins. Blocked URLs are
   dropped at intake (F-Droid/Izzy index and repo scans), every pass
   purges stored hits, and the API detail plus the storefront filter at
   read time so already-stored URLs disappear immediately; a soft delete
   unblocks. Postgres triggers bump `updated_at` for every app carrying
-  the URL in `screenshots` or through an active `screenshots` override.
-  Seeded with SQL; no admin endpoint.
+  the URL in `screenshots` or through an active `screenshots` override;
+  a block that only matches after a re-pin reaches the feed with the
+  next-pass purge instead. Seeded with SQL; no admin endpoint.
 - **client_user_agents** - anonymous usage aggregate per `User-Agent`
   string (`user_agent` unique, truncated to 512 chars): `request_count`,
   `first_seen_at`, `last_seen_at`, `last_path` (512 chars, nullable).

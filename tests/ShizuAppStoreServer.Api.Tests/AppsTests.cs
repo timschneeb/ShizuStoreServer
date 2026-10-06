@@ -330,6 +330,37 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
+    public async Task DetailHidesCommitRepinnedScreenshotsBlockedByTheCommitlessUrl()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.Add(Seeds.NewApp(
+                "repinnedshots",
+                audio,
+                screenshots:
+                [
+                    "https://raw.githubusercontent.com/o/r/722a6de918853fa4e1c0b9256527a1d0b035d253/shots/bad.png",
+                    "https://raw.githubusercontent.com/o/r/722a6de918853fa4e1c0b9256527a1d0b035d253/shots/good.png",
+                ]));
+            db.BlockedScreenshotUrls.Add(new BlockedScreenshotUrl
+            {
+                Url = "https://raw.githubusercontent.com/o/r/shots/bad.png",
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            });
+        });
+
+        var response = await factory.NewClient().GetAsync("/v1/apps/repinnedshots");
+        var detail = (await response.Content.ReadFromJsonAsync<AppDetailDto>(Json))!;
+
+        Assert.Equal(
+            ["https://raw.githubusercontent.com/o/r/722a6de918853fa4e1c0b9256527a1d0b035d253/shots/good.png"],
+            detail.Screenshots);
+    }
+
+    [Fact]
     public async Task UnpublishedAppIsNotServed()
     {
         await SeedAsync(SeedDirectory);

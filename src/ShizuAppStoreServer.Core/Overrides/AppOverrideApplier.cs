@@ -344,7 +344,7 @@ public sealed class AppOverrideApplier(
         var purged = 0;
         foreach (var app in await db.Apps.ToListAsync(ct))
         {
-            if (app.Screenshots.Count == 0 || !app.Screenshots.Any(blocked.Contains))
+            if (app.Screenshots.Count == 0 || !app.Screenshots.Any(url => ScreenshotBlocklist.IsBlocked(url, blocked)))
             {
                 continue;
             }
