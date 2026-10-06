@@ -375,10 +375,16 @@ public sealed class PaparazziRenderer(
                 // The API unit's Nice=5 does not cover the render once it
                 // sits outside the cgroup, and Nice is not a settable
                 // transient property, so lower priority in-band; the daemon
-                // the client starts inherits it.
+                // the client starts inherits it. The same goes for the OOM
+                // score: if the host runs out of memory globally, the kernel
+                // must pick the render, which is retried, over the API.
                 command.Insert(0, "nice");
                 command.Insert(1, "-n");
                 command.Insert(2, "5");
+                command.Insert(3, "choom");
+                command.Insert(4, "-n");
+                command.Insert(5, "500");
+                command.Insert(6, "--");
             }
 
             var startInfo = new ProcessStartInfo

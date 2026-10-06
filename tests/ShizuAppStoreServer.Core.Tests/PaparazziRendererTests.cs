@@ -242,7 +242,10 @@ public sealed class PaparazziRendererTests : IDisposable
         Assert.True(separator > 0);
         Assert.Equal("nice", args[separator + 1]);
         Assert.Equal("5", args[separator + 3]);
-        Assert.EndsWith("fake-gradle", args[separator + 4], StringComparison.Ordinal);
+        Assert.Equal("choom", args[separator + 4]);
+        Assert.Equal("500", args[separator + 6]);
+        Assert.Equal("--", args[separator + 7]);
+        Assert.EndsWith("fake-gradle", args[separator + 8], StringComparison.Ordinal);
         Assert.Contains("-PiconName=shizu_0", args);
     }
 

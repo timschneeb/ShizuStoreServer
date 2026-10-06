@@ -315,3 +315,314 @@ groups:
         labels:
           service: shizustore-web
           severity: warning
+
+  - orgId: 1
+    name: srv1-host
+    folder: ShizuStore
+    interval: 1m
+    rules:
+      - uid: srv1-node-scrape-down
+        title: srv1 node exporter scrape down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: up{job="node-srv1"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: Prometheus cannot scrape srv1 host metrics.
+          description: up{job="node-srv1"} has been below 1 for 2 minutes; srv1 may be down, wedged or its exporter stopped.
+        labels:
+          service: srv1
+          severity: critical
+
+      - uid: srv1-memory-available-low
+        title: srv1 memory available low
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: node_memory_MemAvailable_bytes{job="node-srv1"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 536870912
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: srv1 has less than 512 MiB of memory available.
+          description: MemAvailable below 512 MiB for 10 minutes. Check running renders, usage analyses and other tenants.
+        labels:
+          service: srv1
+          severity: warning
+
+      - uid: srv1-memory-available-critical
+        title: srv1 memory available critical
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: node_memory_MemAvailable_bytes{job="node-srv1"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 201326592
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 3m
+        annotations:
+          summary: srv1 has less than 192 MiB of memory available.
+          description: MemAvailable below 192 MiB for 3 minutes; an OOM kill or a reclaim hang is likely.
+        labels:
+          service: srv1
+          severity: critical
+
+      - uid: srv1-memory-pressure-waiting
+        title: srv1 memory pressure waiting high
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: rate(node_pressure_memory_waiting_seconds_total{job="node-srv1"}[5m])
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.25
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: srv1 tasks are waiting on memory more than 25% of the time.
+          description: PSI memory waiting above 0.25 for 10 minutes. Identify the growing tenant before the host wedges.
+        labels:
+          service: srv1
+          severity: warning
+
+      - uid: srv1-memory-pressure-stalled
+        title: srv1 memory pressure stalled critical
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: rate(node_pressure_memory_stalled_seconds_total{job="node-srv1"}[5m])
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.05
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: srv1 has been fully memory stalled for over 5% of the last 5 minutes.
+          description: PSI memory stalled above 0.05. This is the state that preceded the Oct 6 wedge; intervene now.
+        labels:
+          service: srv1
+          severity: critical
+
+      - uid: srv1-swap-free-low
+        title: srv1 swap nearly exhausted
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: node_memory_SwapFree_bytes{job="node-srv1"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 268435456
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: srv1 has less than 256 MiB of swap free.
+          description: The host is leaning on swap for its memory spikes; check what is growing and whether the box needs a resize.
+        labels:
+          service: srv1
+          severity: warning

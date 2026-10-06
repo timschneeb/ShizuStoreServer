@@ -322,8 +322,10 @@ user's manager, bounded by `IconRenderScopeMemoryHigh` (default `1G`),
 `IconRenderScopeMemoryMax` (default `1400M`), `IconRenderScopeSwapMax`
 (default `0`, so render memory stays out of swap) and
 `IconRenderScopeCpuQuota` (default `150%`), with the render started under
-`nice -n 5` (`Nice=` is not a settable transient property, and the API
-unit's own `Nice=5` no longer covers it). This is the fix for the outage where a batch render charged two
+`nice -n 5 choom -n 500 --` (`Nice=` is not a settable transient property,
+and the API unit's own `Nice=5` no longer covers it; the raised OOM score
+makes the kernel pick the retryable render over the API when the host runs
+out of memory globally). This is the fix for the outage where a batch render charged two
 JVMs (~1GB) to the API unit: the cgroup crossed `MemoryHigh=1500M`, the
 kernel reclaimed inside it, and Kestrel stopped answering while
 `MemoryMax` was never reached and no OOM kill fired, leaving only a
@@ -335,6 +337,13 @@ because `%U` expands to the system manager's UID), and
 `ProtectHome=read-only` rather than `yes`, which would mask `/run/user`
 and break the manager bus. Do not add an IO weight to the scope: the
 service user's slice provides `cpu memory pids` controllers only.
+
+The host must let the kernel use its swapfile: `/etc/sysctl.d/99-swappiness.conf`
+on srv1 sets `vm.swappiness=10`, overriding the Hetzner installimage default
+of `0` in `99-hetzner.conf`. With `0` the 2GB swap stayed empty and the
+October 2026 memory spikes became global OOM kills of the API and a reclaim
+hang that only a power cycle cleared. Recheck `free -h` and
+`sysctl vm.swappiness` after provisioning a replacement host.
 
 Knobs (`Enrichment:` section): `GradlePath` (point at
 `/opt/gradle-8.14/bin/gradle`), `IconToolDir` (point at
