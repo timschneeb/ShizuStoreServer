@@ -476,7 +476,8 @@ bundle` is rebuilt per deploy, never committed.
   reads them through `IAppSourceOverrides` (§7.2); a data migration
   seeds the known cases (instafel, LinkSheet, hlbmerge,
   SmartspacerPlugins, Universal-ReVanced-Manager) by matching
-  `apps.url`. Seeded with SQL; no admin endpoint.
+  `apps.url`. There is no API admin endpoint: rows are managed with SQL or
+  through the stats dashboard, which writes these tables directly.
 - **blocked_screenshot_urls** - global screenshot URL blocklist: unique
   `url`, optional `note`, timestamps, `deleted_at`. Matching is exact
   except that the commit segment of the pinned raw repo URL shapes
@@ -489,7 +490,8 @@ bundle` is rebuilt per deploy, never committed.
   unblocks. Postgres triggers bump `updated_at` for every app carrying
   the URL in `screenshots` or through an active `screenshots` override;
   a block that only matches after a re-pin reaches the feed with the
-  next-pass purge instead. Seeded with SQL; no admin endpoint.
+  next-pass purge instead. There is no API admin endpoint: rows are managed
+  with SQL or through the stats dashboard, which writes these tables directly.
 - **client_user_agents** - anonymous usage aggregate per `User-Agent`
   string (`user_agent` unique, truncated to 512 chars): `request_count`,
   `first_seen_at`, `last_seen_at`, `last_path` (512 chars, nullable).

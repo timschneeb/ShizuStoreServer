@@ -5,7 +5,8 @@ namespace ShizuAppStoreServer.Core.Data;
 /// <c>app_overrides</c>). The sync materializer applies active rows to the
 /// <c>apps</c> row after enrichment and stores the pre-override value in
 /// <see cref="BaselineValue"/> so deleting the row restores it. Rows are
-/// seeded with SQL, there is no admin endpoint.
+/// seeded with SQL or managed through the stats dashboard; there is no API
+/// admin endpoint.
 /// </summary>
 public sealed class AppOverride
 {

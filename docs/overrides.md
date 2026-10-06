@@ -1,9 +1,11 @@
 # App overrides and screenshot blocks
 
-Operator manual for the two SQL-edited tables that steer the catalog without
-code changes: `app_overrides` (per-entry field overrides, visibility overrides
-and app-shape source overrides) and `blocked_screenshot_urls` (global
-screenshot blocklist). Both are edited directly in Postgres; there is no admin
+Operator manual for the two tables that steer the catalog without code
+changes: `app_overrides` (per-entry field overrides, visibility overrides and
+app-shape source overrides) and `blocked_screenshot_urls` (global screenshot
+blocklist). The stats dashboard's `/overrides`, `/overrides/{slug}` and
+`/overrides/blocks` pages are the primary UI; the SQL below remains the
+fallback and the reference for the table shapes. There is no API admin
 endpoint.
 
 ```bash

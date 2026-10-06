@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using ShizuAppStoreServer.Core.Data;
 
 namespace ShizuAppStoreServer.Core.Overrides;
@@ -8,8 +9,11 @@ namespace ShizuAppStoreServer.Core.Overrides;
 /// are text and parsed here, so the applier never has to know individual
 /// columns. Identity, scheduling, publish-gate and usage columns are
 /// deliberately absent: overriding them would break matching or the delta feed.
+/// <see cref="Catalog"/>, <see cref="Validate"/> and <see cref="FormatHint"/>
+/// are the public surface operator tooling uses so the allowlist and every
+/// error string stay defined in one place.
 /// </summary>
-internal static class AppOverrideFields
+public static class AppOverrideFields
 {
     internal const string AvailabilityName = "availability";
     internal const string ExcludedReasonName = "excluded_reason";
@@ -70,6 +74,73 @@ internal static class AppOverrideFields
         [ExcludedReasonName] = ExcludedReasonField,
     };
 
+    /// <summary>
+    /// Every field an override may target: the column fields grouped by
+    /// ownership, then the source kinds. Built from <see cref="Fields"/> so the
+    /// two cannot drift; declared after it for static initialization order.
+    /// </summary>
+    public static IReadOnlyList<OverrideFieldInfo> Catalog { get; } = BuildCatalog();
+
+    /// <summary>
+    /// Validates an operator value with the same parser the applier uses and
+    /// returns the error string to show (null when valid) plus the normalized
+    /// form to store (lowercase hex, canonical availability, round-tripped
+    /// timestamps and lists; trimmed text for source kinds).
+    /// </summary>
+    public static string? Validate(string field, string value, out string normalized)
+    {
+        normalized = value;
+        if (SourceOverrideKinds.IsSource(field))
+        {
+            var sourceError = SourceOverrideKinds.Validate(field, value);
+            if (sourceError is not null)
+            {
+                return sourceError;
+            }
+
+            normalized = field is SourceOverrideKinds.ScanAllReleases or SourceOverrideKinds.PreferPrerelease
+                ? bool.Parse(value.Trim()) ? "true" : "false"
+                : value.Trim();
+            return null;
+        }
+
+        if (!Fields.TryGetValue(field, out var entry))
+        {
+            return "unknown field";
+        }
+
+        // A throwaway row gives the column writers a target without touching a
+        // real app, so validation and assignment share one implementation.
+        var probe = new App { Slug = "probe", Name = "probe", Url = "probe" };
+        var error = entry.Write(probe, value);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        normalized = field == AvailabilityName ? SnakeCase(probe.Availability) : entry.Read(probe);
+        return null;
+    }
+
+    /// <summary>Short input hint for operator tooling.</summary>
+    public static string FormatHint(string field) => field switch
+    {
+        "name" or "description" => "text, required",
+        AvailabilityName => "direct_apk, play_redirect, link_only or excluded",
+        AddedAtName => "ISO-8601 timestamp, required",
+        ListUpdatedAtName or "version_updated_at" => "ISO-8601 timestamp, empty clears",
+        "is_recommended" or "has_paid" or "has_iap" or "has_ads" or "requires_root"
+            or "icon_adaptive" => "true or false",
+        "trial_days" or "stars" or "download_total" => "non-negative integer, empty clears",
+        IconHashName => "64 hex characters, empty clears",
+        "permissions" => "newline-separated permission names, empty clears",
+        "screenshots" => "newline-separated URLs, empty clears",
+        SourceOverrideKinds.ReleaseHome => "owner/repo",
+        SourceOverrideKinds.GitCodeMirror => "targetOwner/targetRepo|readmeOwner/readmeRepo",
+        SourceOverrideKinds.ScanAllReleases or SourceOverrideKinds.PreferPrerelease => "true or false",
+        _ => "text, empty clears",
+    };
+
     internal static bool TryGet(string name, out AppOverrideField field) => Fields.TryGetValue(name, out field!);
 
     internal static bool IsVisibility(string name) =>
@@ -85,6 +156,49 @@ internal static class AppOverrideFields
     {
         action();
         return null;
+    }
+
+    private static IReadOnlyList<OverrideFieldInfo> BuildCatalog()
+    {
+        var items = new List<OverrideFieldInfo>();
+        foreach (var ownership in new[]
+                 {
+                     AppOverrideOwnership.List,
+                     AppOverrideOwnership.Enrichment,
+                     AppOverrideOwnership.Visibility,
+                 })
+        {
+            items.AddRange(Fields.Values
+                .Where(entry => entry.Ownership == ownership)
+                .OrderBy(entry => entry.Name, StringComparer.Ordinal)
+                .Select(entry => new OverrideFieldInfo(entry.Name, entry.Ownership)));
+        }
+
+        // Source kinds steer the source seam instead of writing a column, so
+        // they are listed last and outside the ownership groups.
+        items.Add(new OverrideFieldInfo(SourceOverrideKinds.ReleaseHome, AppOverrideOwnership.Source));
+        items.Add(new OverrideFieldInfo(SourceOverrideKinds.GitCodeMirror, AppOverrideOwnership.Source));
+        items.Add(new OverrideFieldInfo(SourceOverrideKinds.ScanAllReleases, AppOverrideOwnership.Source));
+        items.Add(new OverrideFieldInfo(SourceOverrideKinds.PreferPrerelease, AppOverrideOwnership.Source));
+        return items;
+    }
+
+    // DirectApk -> direct_apk; operators read and write the column form.
+    private static string SnakeCase(Availability availability)
+    {
+        var name = availability.ToString();
+        var builder = new StringBuilder(name.Length + 2);
+        for (var i = 0; i < name.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(name[i]))
+            {
+                builder.Append('_');
+            }
+
+            builder.Append(char.ToLowerInvariant(name[i]));
+        }
+
+        return builder.ToString();
     }
 
     private static AppOverrideField RequiredText(

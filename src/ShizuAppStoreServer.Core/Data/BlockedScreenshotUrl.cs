@@ -4,7 +4,8 @@ namespace ShizuAppStoreServer.Core.Data;
 /// Global blocklist of screenshot URLs that are false detections in source
 /// repos (table <c>blocked_screenshot_urls</c>). Blocked URLs are filtered
 /// when screenshots are collected and when they are served, so they never
-/// appear in the catalog. Rows are seeded with SQL, there is no admin endpoint.
+/// appear in the catalog. Rows are seeded with SQL or managed through the
+/// stats dashboard; there is no API admin endpoint.
 /// </summary>
 public sealed class BlockedScreenshotUrl
 {
