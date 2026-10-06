@@ -17,6 +17,7 @@ using ShizuAppStoreServer.Core.Enrichment.Icons;
 using ShizuAppStoreServer.Core.Enrichment.Repo;
 using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Jobs;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Sources;
 using ShizuAppStoreServer.Core.Sync;
 using ShizuAppStoreServer.Core.UsageAnalysis;
@@ -299,6 +300,7 @@ if (!string.IsNullOrWhiteSpace(enrichment.RunLogPath))
 
 builder.Services.AddSingleton<IJobLog>(sp => new JobLog([.. sp.GetServices<IJobSink>()]));
 builder.Services.AddHostedService<JobLogWorker>();
+builder.Services.AddScoped<AppOverrideApplier>();
 builder.Services.AddScoped<SyncService>();
 builder.Services.AddScoped<IEnrichmentRunner, EnrichmentRunner>();
 builder.Services.AddSingleton<SyncGate>();

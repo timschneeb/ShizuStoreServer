@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.AspNetCore.OutputCaching;
 using Sentry;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Web.Mapping;
 using ShizuAppStoreServer.Web.Rendering;
 using ShizuAppStoreServer.Web.Services;
@@ -42,6 +43,9 @@ public sealed class AppModel(CatalogService catalog, MarkdownRenderer markdown) 
             return Page();
         }
 
+        // Read-side blocklist filter: the stored column converges on the next
+        // sync pass, but the detail page must not show a blocked URL until then.
+        app.Screenshots = ScreenshotBlocklist.Filter(app.Screenshots, await catalog.GetBlockedScreenshotsAsync(ct));
         var view = new AppDetailView(app);
         View = view;
         DescriptionHtml = markdown.Render(app.FullDescription, view.BaseUrl);

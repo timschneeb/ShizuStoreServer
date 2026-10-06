@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.AspNetCore.OutputCaching;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Web.Services;
 
 namespace ShizuAppStoreServer.Web.Pages;
@@ -17,7 +18,8 @@ public sealed class IndexModel(IAppReleaseProvider releaseProvider, CatalogServi
     {
         ApkUrl = await releaseProvider.GetLatestApkUrlAsync(ct);
         var app = await catalog.GetAppAsync(AppSlug, ct);
-        Screenshots = app?.Screenshots.Take(4).ToList() ?? [];
+        var blocked = await catalog.GetBlockedScreenshotsAsync(ct);
+        Screenshots = app is null ? [] : ScreenshotBlocklist.Filter(app.Screenshots, blocked).Take(4).ToList();
         Response.Headers.CacheControl = "public, max-age=300";
     }
 }

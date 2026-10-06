@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Enrichment.Repo;
@@ -38,6 +39,8 @@ internal sealed class ScreenshotService(
     {
         try
         {
+            var blocked = await ScreenshotBlocklist.LoadAsync(db, ct);
+
             // Rebuild instead of append: an index that answers replaces its
             // URLs entirely (an empty answer clears them), an unreachable one
             // keeps the URLs it contributed earlier.
@@ -50,7 +53,7 @@ internal sealed class ScreenshotService(
             // is never cloned while the index supplies shots.
             if (indexUrls.Count > 0)
             {
-                SetScreenshots(app, indexUrls);
+                SetScreenshots(app, indexUrls, blocked);
                 return;
             }
 
@@ -61,13 +64,13 @@ internal sealed class ScreenshotService(
             var storedRepo = app.Screenshots.Where(url => !IsFdroidSourced(url)).ToList();
             if (!ShouldTryRepoScreenshots(app, now, force))
             {
-                SetScreenshots(app, storedRepo);
+                SetScreenshots(app, storedRepo, blocked);
                 return;
             }
 
             app.ScreenshotsCheckedAt = now;
             var resolved = await repoScreenshots!.ResolveAsync(app.Url, app.SourceUrl, ct);
-            SetScreenshots(app, resolved.Reached ? resolved.Urls : storedRepo);
+            SetScreenshots(app, resolved.Reached ? resolved.Urls : storedRepo, blocked);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -75,10 +78,11 @@ internal sealed class ScreenshotService(
         }
     }
 
-    /// <summary>Stores a fresh list, capped, and leaves identical content untouched.</summary>
-    private static void SetScreenshots(App app, IReadOnlyList<string> urls)
+    /// <summary>Stores a fresh list, blocklist-filtered and capped; identical content stays untouched.</summary>
+    private static void SetScreenshots(App app, IReadOnlyList<string> urls, IReadOnlySet<string> blocked)
     {
-        var capped = urls.Count > MaxScreenshots ? urls.Take(MaxScreenshots).ToList() : [.. urls];
+        var filtered = ScreenshotBlocklist.Filter(urls, blocked);
+        var capped = filtered.Count > MaxScreenshots ? filtered.Take(MaxScreenshots).ToList() : filtered;
         if (!capped.SequenceEqual(app.Screenshots))
         {
             app.Screenshots = capped;

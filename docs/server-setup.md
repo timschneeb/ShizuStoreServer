@@ -710,6 +710,55 @@ sudo -u postgres psql -d shizuappstore -c \
 While unlisted, `GET /v1/apps/{slug}` returns 404 and the next
 `/v1/changes?since=` carries the slug in `removed[]`.
 
+Per-entry field overrides replace one column of one list entry without
+touching the pipeline (a wrong label, a broken README, a manually
+rendered icon). `field` is a snake_case `apps` column from the allowlist
+in SPEC.md §3; the edit bumps the app's `updated_at` immediately, so
+synced clients see the update in `/v1/changes` before the next pass
+materializes it:
+
+```bash
+sudo -u postgres psql -d shizuappstore -c "
+INSERT INTO app_overrides (app_slug, field, value, note, created_at, updated_at)
+VALUES ('mixplorer', 'display_name', 'MiXplorer', 'operator choice', now(), now())
+ON CONFLICT (app_slug, field) DO UPDATE
+SET value = EXCLUDED.value, note = EXCLUDED.note, updated_at = now();"
+```
+
+The applier re-asserts the value after every enrichment, so the override
+survives; the first apply captures the natural value as the baseline.
+Icons work the same way: name the PNG after the SHA-256 of its bytes,
+copy it into the icon store (`/opt/shizuappstore/icons` on the server),
+then insert `icon_hash` (the 64 hex digits) and `icon_adaptive` (`true`
+for a squircle/full-bleed icon, `false` otherwise). The orphan cleaner
+keeps any hash an active override references.
+
+Soft-delete the row to restore the natural value and force a recheck:
+
+```bash
+sudo -u postgres psql -d shizuappstore -c \
+  "UPDATE app_overrides SET deleted_at = now() WHERE app_slug = 'mixplorer' AND field = 'display_name';"
+```
+
+An `availability` override (`'excluded'`) hides the entry with a
+`removed[]` tombstone and restores it when soft-deleted, exactly like an
+unlist; operator unlists and `ARCHIVED.md` still win while they apply.
+
+Screenshot false positives are blocked globally, not per app: a blocked
+URL is dropped from new scans, purged from stored rows by the next pass,
+and filtered from API and storefront responses immediately, and every app
+carrying it gets a `/v1/changes` update via the trigger:
+
+```bash
+sudo -u postgres psql -d shizuappstore -c "
+INSERT INTO blocked_screenshot_urls (url, note, created_at, updated_at)
+VALUES ('https://raw.githubusercontent.com/foo/bar/abcdef/screenshots/banner.png',
+        'banner, not a screenshot', now(), now())
+ON CONFLICT (url) DO UPDATE SET note = EXCLUDED.note, updated_at = now();"
+```
+
+Soft-delete the row (`SET deleted_at = now()`) to unblock the URL again.
+
 To force every client to drop its cached catalog and pull a fresh one
 (after a server-side repair left dead rows in local caches), stamp the
 purge flag. Clients wipe only their app list and downloads; favourites

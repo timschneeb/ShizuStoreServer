@@ -7,6 +7,7 @@ using ShizuAppStoreServer.Core.Enrichment.Apk;
 using ShizuAppStoreServer.Core.Enrichment.Icons;
 using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Jobs;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Parsing;
 using ShizuAppStoreServer.Core.Sync;
 using Xunit;
@@ -476,6 +477,86 @@ public sealed class SyncServiceTests : IDisposable
         tuner = _db.Apps.Single(a => a.Slug == "tuner");
         Assert.Equal(SyncService.ArchivedReason, tuner.ExcludedReason);
         Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+    }
+
+    [Fact]
+    public async Task AppOverrideIsMaterializedByThePass()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        _db.AppOverrides.Add(new AppOverride
+        {
+            AppSlug = "tuner",
+            Field = "display_name",
+            Value = "Overridden Tuner",
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        await Service(appOverrides: new AppOverrideApplier(_db))
+            .RunAsync("nightly", fullRecheck: true, T0.AddMinutes(16));
+
+        _db.ChangeTracker.Clear();
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        Assert.Equal("Overridden Tuner", tuner.DisplayName);
+        Assert.Equal("Overridden Tuner", _db.AppOverrides.Single().AppliedValue);
+    }
+
+    [Fact]
+    public async Task AppOverrideExclusionAppliesAndRestoresEvenWithoutDueApps()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1), ("pages/CLOSED_SOURCE.md", ClosedV1));
+        await SeedDirectApkAsync();
+
+        _db.AppOverrides.Add(new AppOverride
+        {
+            AppSlug = "tuner",
+            Field = "availability",
+            Value = "excluded",
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        // Every app is fresh, so this pass enriches nothing; the override stage
+        // must still run before the "nothing due" early return.
+        var excluded = await Service(appOverrides: new AppOverrideApplier(_db))
+            .RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
+
+        Assert.True(excluded.Skipped);
+        _db.ChangeTracker.Clear();
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        Assert.Equal(Availability.Excluded, tuner.Availability);
+        Assert.Equal(AppOverrideApplier.ExcludedReason, tuner.ExcludedReason);
+        Assert.Single(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+
+        // Soft delete restores the captured baseline and forces a recheck.
+        var row = _db.AppOverrides.Single();
+        row.DeletedAt = T0.AddMinutes(17);
+        await _db.SaveChangesAsync();
+        var restored = await Service(appOverrides: new AppOverrideApplier(_db))
+            .RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(30));
+
+        Assert.True(restored.Skipped);
+        _db.ChangeTracker.Clear();
+        tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        Assert.Equal(Availability.DirectApk, tuner.Availability);
+        Assert.Null(tuner.ExcludedReason);
+        Assert.Null(tuner.LastCheckedAt);
+        Assert.DoesNotContain(_db.RemovedApps.ToList(), t => t.Slug == "tuner");
+        Assert.Empty(_db.AppOverrides.ToList());
     }
 
     [Fact]
@@ -954,7 +1035,8 @@ public sealed class SyncServiceTests : IDisposable
         Assert.Equal(JobStatus.Skipped, runs[1].Status);
     }
 
-    private SyncService Service(string? listPath = null, IReleasePoller? poll = null, IJobLog? jobLog = null) => new(
+    private SyncService Service(string? listPath = null, IReleasePoller? poll = null, IJobLog? jobLog = null,
+        AppOverrideApplier? appOverrides = null) => new(
         _db,
         new CatalogUpserter(_db),
         new GitHistoryService(),
@@ -963,7 +1045,8 @@ public sealed class SyncServiceTests : IDisposable
         new ThrowingRenderer(),
         new SyncOptions { ListPath = listPath ?? _repo },
         new EnrichmentOptions { MaxParallelism = 1 },
-        jobLog ?? new RecordingJobSink(_db).Log);
+        jobLog ?? new RecordingJobSink(_db).Log,
+        appOverrides: appOverrides);
 
     [Fact]
     public async Task RunnerCrashSurfacesMessageInResult()

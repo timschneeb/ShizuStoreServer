@@ -6,6 +6,7 @@ using ShizuAppStoreServer.Core.Enrichment.Apk;
 using ShizuAppStoreServer.Core.Enrichment.Icons;
 using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Jobs;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Parsing;
 using ShizuAppStoreServer.Core.Sources;
 
@@ -95,11 +96,13 @@ public sealed class SyncService(
     EnrichmentOptions enrichment,
     IJobLog? jobLog = null,
     ILogger<SyncService>? log = null,
-    FdroidIndexProvider? fdroid = null)
+    FdroidIndexProvider? fdroid = null,
+    AppOverrideApplier? appOverrides = null)
 {
     private readonly IJobLog _jobs = jobLog ?? NullJobLog.Instance;
     private readonly ILogger<SyncService>? _log = log;
     private readonly FdroidIndexProvider? _fdroid = fdroid;
+    private readonly AppOverrideApplier? _appOverrides = appOverrides;
 
     /// <summary>Exclusion reason for apps listed in <c>pages/ARCHIVED.md</c>.</summary>
     public const string ArchivedReason = "Archived in the upstream list.";
@@ -197,6 +200,9 @@ public sealed class SyncService(
             var freshIds = (await PollChangedAsync(ct)).Except(dueIds).ToList();
             if (dueIds.Count == 0 && freshIds.Count == 0)
             {
+                // Operator edits must materialize even when no app is due: the
+                // override pickup latency is the fast-pass cadence itself.
+                await ApplyOperatorOverridesAsync(now, ct);
                 // Keep the observed head on the row: the next tick compares
                 // against it, and /v1/meta and /v1/issues read it.
                 _jobs.Skipped(start with { Reference = head }, "nothing due");
@@ -212,6 +218,7 @@ public sealed class SyncService(
                 enrichment.SkipIconRenders = skipIcons;
                 var (enriched, upToDate, failed, failedMessages) =
                     await EnrichWithFreshAsync(dueIds, false, freshIds, now, ct);
+                await ApplyOperatorOverridesAsync(now, ct);
                 await ApplyShizukuFilterAsync(ct);
                 return await FinishRunAsync(dueSession, effectiveTrigger, head,
                     0, 0, 0, enriched, upToDate, failed,
@@ -301,6 +308,7 @@ public sealed class SyncService(
                 enrichment.DeferXmlIconRenders = false;
             }
 
+            await ApplyOperatorOverridesAsync(now, ct);
             await ApplyShizukuFilterAsync(ct);
 
             if (batchIcons)
@@ -363,15 +371,33 @@ public sealed class SyncService(
             .Select(a => new { a.Id, a.LastCheckedAt, a.LastError, a.ExcludedReason })
             .ToListAsync(ct);
         return rows
-            // Operator unlists are hidden on purpose: the recheck window would
-            // otherwise re-enrich and re-publish them.
-            .Where(r => r.ExcludedReason != UnlistedReason)
+            // Operator unlists and override exclusions are hidden on purpose:
+            // the recheck window would otherwise re-enrich and re-publish them.
+            .Where(r => r.ExcludedReason != UnlistedReason
+                && r.ExcludedReason != AppOverrideApplier.ExcludedReason)
             .Where(r => r.LastCheckedAt is null
                 || r.LastCheckedAt + (r.LastError is null
                     ? enrichment.SuccessRecheckInterval
                     : enrichment.FailedRecheckInterval) <= now)
             .Select(r => r.Id)
             .ToList();
+    }
+
+    /// <summary>
+    /// Materializes operator overrides after enrichment and before the Shizuku
+    /// gate; a null applier (hand-built tests) disables the stage.
+    /// </summary>
+    private async Task ApplyOperatorOverridesAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        if (_appOverrides is null)
+        {
+            return;
+        }
+        var changed = await _appOverrides.ApplyAsync(now, ct);
+        if (changed > 0)
+        {
+            _log?.LogInformation("Materialized operator overrides on {Count} apps.", changed);
+        }
     }
 
     /// <summary>Poll-changed ids (best-effort: any failure means no forced extras).</summary>

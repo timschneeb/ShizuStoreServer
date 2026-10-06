@@ -21,7 +21,7 @@ namespace ShizuAppStoreServer.Core.Migrations
             // served, so it must stay visible; only rows created after this
             // change start unpublished.
             migrationBuilder.Sql(
-                "UPDATE apps SET published_at = COALESCE(last_checked_at, added_at, updated_at)");
+                "UPDATE apps SET published_at = COALESCE(last_checked_at, added_at, updated_at);");
         }
 
         /// <inheritdoc />

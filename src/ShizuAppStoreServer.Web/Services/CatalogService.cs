@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Web.Mapping;
 
 namespace ShizuAppStoreServer.Web.Services;
@@ -21,6 +22,10 @@ public sealed class CatalogService(ShizuDbContext db)
             .Include(a => a.Downloads)
             .FirstOrDefaultAsync(
                 a => a.Slug == slug && a.Availability != Availability.Excluded && a.PublishedAt != null, ct);
+
+    /// <summary>Active operator-blocked screenshot URLs for read-side filtering.</summary>
+    public Task<HashSet<string>> GetBlockedScreenshotsAsync(CancellationToken ct = default) =>
+        ScreenshotBlocklist.LoadAsync(db, ct);
 
     /// <summary>Carousel source: other apps by the same author, best installed first.</summary>
     public Task<List<App>> GetMoreFromAuthorAsync(App app, int limit, CancellationToken ct = default) =>

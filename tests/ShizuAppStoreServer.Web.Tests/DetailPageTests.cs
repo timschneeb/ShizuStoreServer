@@ -57,6 +57,34 @@ public sealed class DetailPageTests(WebAppFactory factory) : IClassFixture<WebAp
     }
 
     [Fact]
+    public async Task Detail_HidesOperatorBlockedScreenshots()
+    {
+        await factory.ResetAsync(db =>
+        {
+            db.Add(Seeds.Category(1, "tools", "Tools"));
+            var app = Seeds.App(1, "foo", "Foo", 1);
+            app.Screenshots =
+            [
+                "https://example.com/00.png",
+                "https://example.com/01.png",
+            ];
+            db.Add(app);
+            db.Add(Seeds.Download(1, "https://example.com/foo.apk"));
+            db.Add(new BlockedScreenshotUrl
+            {
+                Url = "https://example.com/00.png",
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            });
+        });
+
+        var html = await GetBodyAsync(factory.NewClient(), "/apps/foo");
+
+        Assert.DoesNotContain("https://example.com/00.png", html);
+        Assert.Contains("https://example.com/01.png", html);
+    }
+
+    [Fact]
     public async Task Detail_OgMetadataUsesTrimmedNameAndIcon()
     {
         var iconHash = new string('a', 64);

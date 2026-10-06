@@ -1,4 +1,5 @@
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Api;
@@ -61,8 +62,13 @@ public static class AppMapper
     /// <summary>
     /// Detail projection. <paramref name="path"/> is the root→leaf category
     /// chain (built by the caller, which already holds the category rows).
+    /// <paramref name="blockedScreenshots"/> drops operator-blocked URLs at
+    /// read time, before the next pass purges the stored column.
     /// </summary>
-    public static AppDetailDto ToDetail(App a, IReadOnlyList<CategoryPathDto> path)
+    public static AppDetailDto ToDetail(
+        App a,
+        IReadOnlyList<CategoryPathDto> path,
+        IReadOnlySet<string>? blockedScreenshots = null)
     {
         var primary = Primary(a);
         return new(
@@ -113,7 +119,7 @@ public static class AppMapper
             a.ReadmeUrl,
             a.Changelog,
             a.ChangelogUrl,
-            a.Screenshots,
+            ScreenshotBlocklist.Filter(a.Screenshots, blockedScreenshots),
             SourceName(a),
             primary?.TargetSdk,
             primary?.CompileSdk,

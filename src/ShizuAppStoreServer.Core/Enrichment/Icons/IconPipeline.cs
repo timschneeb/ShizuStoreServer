@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.Enrichment.Apk;
+using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Enrichment.Icons;
@@ -172,7 +173,11 @@ internal sealed class IconPipeline(
         var stillUsedLocal = db.Apps.Local.Any(a =>
             a.Id != app.Id && a.IconHash == oldIcon && db.Entry(a).State != EntityState.Deleted);
         var stillUsed = stillUsedLocal
-            || await db.Apps.AnyAsync(a => a.Id != app.Id && a.IconHash == oldIcon, ct);
+            || await db.Apps.AnyAsync(a => a.Id != app.Id && a.IconHash == oldIcon, ct)
+            // A pending or applied icon_hash override is an operator-placed
+            // file; the applier restores it after this pass, so keep it.
+            || await db.AppOverrides.AnyAsync(
+                o => o.DeletedAt == null && o.Field == AppOverrideFields.IconHashName && o.Value == oldIcon, ct);
         if (!stillUsed)
         {
             // Warning on purpose: mass disappearance of icon files once went

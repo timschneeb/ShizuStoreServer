@@ -431,6 +431,42 @@ bundle` is rebuilt per deploy, never committed.
   `Availability.Excluded` with reason `"Unlisted by the operator."` and
   tombstoned; deleting the row restores the entry. Seeded with SQL; no
   admin endpoint.
+- **app_overrides** - operator overrides for one field of one entry:
+  unique `(app_slug, field)`, `value`, `applied_value` (last value the
+  applier wrote), `baseline_value` (the natural value captured on first
+  apply; a null value round-trips as empty string), optional `note`,
+  timestamps, `deleted_at`. `field` is the snake_case `apps` column;
+  overridable are the list-owned presentation fields (`name`,
+  `description`, `license`, `is_recommended`, `has_paid`, `has_iap`,
+  `has_ads`, `trial_days`, `requires_root`, `source_url`), the
+  enrichment-owned fields (`display_name`, `apk_label`, `package_name`,
+  `permissions`, `author_name`, `author_url`, `author_key`,
+  `full_description`, `readme_url`, `changelog`, `changelog_url`,
+  `store_url`, `version_name`, `version_updated_at`, `stars`,
+  `download_total`, `icon_hash` (64 hex), `icon_adaptive`,
+  `screenshots`) and visibility (`availability`, `excluded_reason`).
+  Identity, list bookkeeping, scheduling and usage columns are not
+  overridable. The applier (§7) runs after enrichment on every pass, so
+  an override re-asserts the value enrichment just rewrote; a
+  steady-state write-back keeps `updated_at` still, a new or edited
+  override moves it only when the served value actually changes.
+  Soft-deleting the row restores `baseline_value`, drops the row and
+  forces a recheck; a physical DELETE does not restore. An
+  `availability` override excludes the entry with reason
+  `"Excluded by an override."` and a tombstone, and its restore clears
+  both; operator unlists and `ARCHIVED.md` outrank it. Postgres triggers
+  bump the app's `updated_at` on insert/delete and on
+  `value`/`deleted_at`/`app_slug` edits, so `/v1/changes` emits the entry
+  immediately, before the next pass materializes it. Seeded with SQL; no
+  admin endpoint.
+- **blocked_screenshot_urls** - global screenshot URL blocklist: unique
+  `url`, optional `note`, timestamps, `deleted_at`. Blocked URLs are
+  dropped at intake (F-Droid/Izzy index and repo scans), every pass
+  purges stored hits, and the API detail plus the storefront filter at
+  read time so already-stored URLs disappear immediately; a soft delete
+  unblocks. Postgres triggers bump `updated_at` for every app carrying
+  the URL in `screenshots` or through an active `screenshots` override.
+  Seeded with SQL; no admin endpoint.
 - **client_user_agents** - anonymous usage aggregate per `User-Agent`
   string (`user_agent` unique, truncated to 512 chars): `request_count`,
   `first_seen_at`, `last_seen_at`, `last_path` (512 chars, nullable).
@@ -694,7 +730,9 @@ F-Droid/Izzy build can take the primary slot.
   merely named `screenshot` with no image does not count. Raw URLs are
   pinned to the fetched commit (GitHub
   `raw.githubusercontent.com/{owner}/{repo}/{sha}/{path}`, GitLab
-  `gitlab.com/{project}/-/raw/{sha}/{path}`), capped at 12.
+  `gitlab.com/{project}/-/raw/{sha}/{path}`), capped at 12; URLs on the
+  operator blocklist (§3) never enter the list, and the read paths filter
+  them as well.
   Resolution rebuilds the list instead of only filling holes: an index
   that answers replaces the index-sourced URLs wholesale (an empty answer
   clears them) and repo leftovers are dropped, so one source can never pin
@@ -1308,9 +1346,10 @@ exception clears the change tracker and closes the run as
    dirty tree) deletes the clone and re-clones it from origin.
 3. Compares HEAD against the latest run's commit: unchanged HEAD +
    no requests + no `force` → enrich due-only apps plus
-   poll-changed apps (forced) and close the run, or record a
-   `status=Skipped` bookkeeping row (no app mutations) when neither
-   has anything.
+   poll-changed apps (forced), materialize operator overrides and the
+   screenshot blocklist (`app_overrides`, §3), then close the run, or
+   record a `status=Skipped` bookkeeping row (still materializing
+   operator overrides) when neither has anything.
 4. Else full pass: read + parse `README.md` (Apps section) →
    history → upsert (the empty closed doc sweeps stale listings) →
    `ARCHIVED.md` → operator unlist reconciliation
@@ -1318,7 +1357,9 @@ exception clears the change tracker and closes the run as
    non-excluded with `force=true`; else the client-side due
    window plus poll-changed extras, forced) fanned out per-app through `BulkEnricher` with
    `IEnrichmentRunner` (fresh scope per app, persists its own
-   save; vanished rows count `Failed`) → mark requests processed +
+   save; vanished rows count `Failed`) → materialize operator
+   overrides and the screenshot blocklist (`AppOverrideApplier`, §3) →
+   the Shizuku-permission gate (§5.3) → mark requests processed +
    write the health snapshot (§7.1) and close the run. No app
    mutations happen after the upsert save, so the final pass-scope
    save writes only requests + issues; the `job_runs`/`job_events`

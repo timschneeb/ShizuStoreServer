@@ -1698,6 +1698,41 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task KeepsIconFileReferencedByAnActiveOverride()
+    {
+        var (enricher, _, _, _, _) = HappyPath();
+        var app = NewApp("overrideicon", "Override Icon", "https://github.com/o/ri");
+        await enricher.EnrichAsync(app, T0);
+        var operatorIcon = app.IconHash;
+        Assert.NotNull(operatorIcon);
+        var operatorFile = Path.Combine(_iconDir, $"{operatorIcon}.png");
+        Assert.True(File.Exists(operatorFile));
+
+        // An active icon_hash override points at the operator's own file; the
+        // next pass adopts the natural icon, and the orphan sweep must keep it
+        // for the applier to restore.
+        _db.AppOverrides.Add(new AppOverride
+        {
+            AppSlug = app.Slug,
+            Field = "icon_hash",
+            Value = operatorIcon,
+            AppliedValue = operatorIcon,
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        var (second, _, _, _, _) = HappyPath(
+            tag: "v1.1", versionCode: "43", iconColor: Color.Red,
+            assetUrl: "https://cdn.example/app-v1.1.apk");
+        await second.EnrichAsync(app, T0);
+
+        Assert.NotEqual(operatorIcon, app.IconHash);
+        Assert.True(File.Exists(operatorFile));
+    }
+
+    [Fact]
     public async Task DeferredXmlRendersKeepTheExistingIcon()
     {
         var (enricher, _, _, _, _) = HappyPath();
@@ -2660,6 +2695,58 @@ public sealed class AppEnricherTests : IDisposable
                 "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png",
                 "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/01.png",
             ],
+            app.Screenshots);
+    }
+
+    [Fact]
+    public async Task BlockedScreenshotUrlsAreDroppedAtIntake()
+    {
+        const string indexV2 = """
+            {
+              "packages": {
+                "com.example.app": {
+                  "metadata": {
+                    "screenshots": {
+                      "phone": {
+                        "en-US": [
+                          { "name": "/com.example.app/en-US/phoneScreenshots/00.png" },
+                          { "name": "/com.example.app/en-US/phoneScreenshots/01.png" }
+                        ]
+                      }
+                    }
+                  },
+                  "versions": {
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": {
+                      "file": {
+                        "name": "/com.example.app_20.apk",
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "size": 1234567
+                      },
+                      "manifest": {
+                        "versionCode": 20,
+                        "versionName": "2.0",
+                        "usesSdk": { "minSdkVersion": 26 }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        _db.BlockedScreenshotUrls.Add(new BlockedScreenshotUrl
+        {
+            Url = "https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/00.png",
+            CreatedAt = T0,
+            UpdatedAt = T0,
+        });
+        await _db.SaveChangesAsync();
+
+        var (enricher, _, _) = FdroidHappyPath(indexV2Json: indexV2);
+        var app = NewApp("catshare", "CatShare", "https://f-droid.org/packages/com.example.app/");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        Assert.Equal(
+            ["https://f-droid.org/repo/com.example.app/en-US/phoneScreenshots/01.png"],
             app.Screenshots);
     }
 

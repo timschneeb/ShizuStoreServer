@@ -20,6 +20,8 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
     public DbSet<PackageException> PackageExceptions => Set<PackageException>();
     public DbSet<AppDownloadExclusion> AppDownloadExclusions => Set<AppDownloadExclusion>();
     public DbSet<AppUnlistOverride> AppUnlistOverrides => Set<AppUnlistOverride>();
+    public DbSet<AppOverride> AppOverrides => Set<AppOverride>();
+    public DbSet<BlockedScreenshotUrl> BlockedScreenshotUrls => Set<BlockedScreenshotUrl>();
     public DbSet<ConfigFlag> ConfigFlags => Set<ConfigFlag>();
     public DbSet<ClientUserAgent> ClientUserAgents => Set<ClientUserAgent>();
     public DbSet<ClientUserAgentDay> ClientUserAgentDays => Set<ClientUserAgentDay>();
@@ -473,6 +475,36 @@ public sealed class ShizuDbContext(DbContextOptions<ShizuDbContext> options) : D
             e.Property(x => x.Note).HasColumnName("note").HasMaxLength(500);
             e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+        });
+
+        b.Entity<AppOverride>(e =>
+        {
+            e.ToTable("app_overrides");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.AppSlug).HasColumnName("app_slug").IsRequired();
+            e.Property(x => x.Field).HasColumnName("field").IsRequired();
+            e.HasIndex(x => new { x.AppSlug, x.Field }).IsUnique();
+            e.Property(x => x.Value).HasColumnName("value").IsRequired();
+            e.Property(x => x.AppliedValue).HasColumnName("applied_value");
+            e.Property(x => x.BaselineValue).HasColumnName("baseline_value");
+            e.Property(x => x.Note).HasColumnName("note");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+            e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
+        });
+
+        b.Entity<BlockedScreenshotUrl>(e =>
+        {
+            e.ToTable("blocked_screenshot_urls");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").UseIdentityByDefaultColumn();
+            e.Property(x => x.Url).HasColumnName("url").IsRequired();
+            e.HasIndex(x => x.Url).IsUnique();
+            e.Property(x => x.Note).HasColumnName("note");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").IsRequired();
+            e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
         });
 
         b.Entity<ConfigFlag>(e =>

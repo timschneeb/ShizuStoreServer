@@ -301,6 +301,35 @@ public sealed class AppsTests(ShizuApiFactory factory) : IClassFixture<ShizuApiF
     }
 
     [Fact]
+    public async Task DetailHidesOperatorBlockedScreenshots()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            db.Apps.Add(Seeds.NewApp(
+                "blockedshots",
+                audio,
+                screenshots:
+                [
+                    "https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png",
+                    "https://f-droid.org/repo/example/en-US/phoneScreenshots/01.png",
+                ]));
+            db.BlockedScreenshotUrls.Add(new BlockedScreenshotUrl
+            {
+                Url = "https://f-droid.org/repo/example/en-US/phoneScreenshots/00.png",
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            });
+        });
+
+        var response = await factory.NewClient().GetAsync("/v1/apps/blockedshots");
+        var detail = (await response.Content.ReadFromJsonAsync<AppDetailDto>(Json))!;
+
+        Assert.Equal(["https://f-droid.org/repo/example/en-US/phoneScreenshots/01.png"], detail.Screenshots);
+    }
+
+    [Fact]
     public async Task UnpublishedAppIsNotServed()
     {
         await SeedAsync(SeedDirectory);

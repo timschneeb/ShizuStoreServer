@@ -328,4 +328,73 @@ public sealed class DbContextTests : IDisposable
         });
         await Assert.ThrowsAsync<DbUpdateException>(() => _db.SaveChangesAsync());
     }
+
+    [Fact]
+    public async Task AppOverridesRoundTripAndRejectDuplicate()
+    {
+        var now = new DateTimeOffset(2026, 10, 6, 0, 0, 0, TimeSpan.Zero);
+        _db.AppOverrides.Add(new AppOverride
+        {
+            AppSlug = "mixplorer",
+            Field = "icon_hash",
+            Value = new string('a', 64),
+            Note = "manual icon",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await _db.SaveChangesAsync();
+
+        var saved = await _db.AppOverrides.SingleAsync();
+        Assert.Equal("mixplorer", saved.AppSlug);
+        Assert.Equal("icon_hash", saved.Field);
+        Assert.Null(saved.AppliedValue);
+        Assert.Null(saved.BaselineValue);
+        Assert.Null(saved.DeletedAt);
+
+        saved.AppliedValue = new string('a', 64);
+        saved.BaselineValue = "previous";
+        saved.DeletedAt = now;
+        await _db.SaveChangesAsync();
+
+        var updated = await _db.AppOverrides.AsNoTracking().SingleAsync();
+        Assert.Equal(new string('a', 64), updated.AppliedValue);
+        Assert.Equal("previous", updated.BaselineValue);
+        Assert.Equal(now, updated.DeletedAt);
+
+        _db.AppOverrides.Add(new AppOverride
+        {
+            AppSlug = "mixplorer",
+            Field = "icon_hash",
+            Value = "b",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await Assert.ThrowsAsync<DbUpdateException>(() => _db.SaveChangesAsync());
+    }
+
+    [Fact]
+    public async Task BlockedScreenshotUrlsRoundTripAndRejectDuplicate()
+    {
+        var now = new DateTimeOffset(2026, 10, 6, 0, 0, 0, TimeSpan.Zero);
+        _db.BlockedScreenshotUrls.Add(new BlockedScreenshotUrl
+        {
+            Url = "https://raw.githubusercontent.com/example/repo/abc/screenshots/false.png",
+            Note = "false detection",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await _db.SaveChangesAsync();
+
+        var saved = await _db.BlockedScreenshotUrls.SingleAsync();
+        Assert.Equal("false detection", saved.Note);
+        Assert.Null(saved.DeletedAt);
+
+        _db.BlockedScreenshotUrls.Add(new BlockedScreenshotUrl
+        {
+            Url = "https://raw.githubusercontent.com/example/repo/abc/screenshots/false.png",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await Assert.ThrowsAsync<DbUpdateException>(() => _db.SaveChangesAsync());
+    }
 }

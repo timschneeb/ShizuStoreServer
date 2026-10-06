@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Sentry;
 using ShizuAppStoreServer.Api;
 using ShizuAppStoreServer.Core.Data;
+using ShizuAppStoreServer.Core.Overrides;
 
 namespace ShizuAppStoreServer.Controllers;
 
@@ -210,7 +211,8 @@ public sealed class AppsController(ShizuDbContext db, ShizuMetrics metrics) : Co
         }
 
         Response.Headers.ETag = etag;
-        return Ok(AppMapper.ToDetail(app, AppMapper.CategoryPath(app.Category)));
+        var blockedScreenshots = await ScreenshotBlocklist.LoadAsync(db, ct);
+        return Ok(AppMapper.ToDetail(app, AppMapper.CategoryPath(app.Category), blockedScreenshots));
     }
 
     /// <summary>
