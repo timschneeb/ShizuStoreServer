@@ -59,6 +59,7 @@ public static class ApiEnums
         IssueKind.Parse => "parse",
         IssueKind.Enrich => "enrich",
         IssueKind.Quality => "quality",
+        IssueKind.Catalog => "catalog",
         _ => throw new ArgumentOutOfRangeException(nameof(v), v, null),
     };
 

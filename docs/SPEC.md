@@ -159,7 +159,7 @@ bundle` is rebuilt per deploy, never committed.
 - **apps** - one awesome-list entry. `slug` globally unique and
   **stable across renames**. `url` is deliberately **non-unique**
   across listings, but within one listing a URL maps to a single row:
-  identity is `(listing, url)`. When the source lists the same URL under
+  identity is `(listing, url, category)`. When the source lists the same URL under
   several categories, the first occurrence owns the row and the rest are
   ignored, so the catalog never shows the same app twice.
   - Multi-app repos: enrichment creates one extra `apps` row per
@@ -373,7 +373,7 @@ bundle` is rebuilt per deploy, never committed.
   passes, repo commit for analyses), item counts (`items_total`/`ok`/
   `skipped`/`failed`), `events_count`/`events_dropped`, `summary`,
   `error`, a `metadata` `jsonb` object (per-bucket counts, parse/
-  enrich/quality issue counts, and similar run-specific values) and
+  enrich/quality/catalog issue counts, and similar run-specific values) and
   an optional `usage_analysis_run_id` (set null on delete). A
   `Skipped` pass writes a bookkeeping row and nothing else, so the
   cadence stays visible without a catalog mutation. Rows are kept
@@ -388,7 +388,7 @@ bundle` is rebuilt per deploy, never committed.
   buffer (overflow increments `events_dropped`); kept indefinitely.
   See §7.3 for the writer behavior and the optional file mirror.
 - **sync_issues** - current catalog health snapshot: `job_run_id`
-  (FK cascade to `job_runs`), `kind` (`parse|enrich|quality`), `rule`,
+  (FK cascade to `job_runs`), `kind` (`parse|enrich|quality|catalog`), `rule`,
   `app_id` (nullable, set null on delete), `slug`, `message`,
   `location` (parser context, parse rows only), `created_at`. Holds
   only the latest completed run: successful passes replace all rows,
@@ -568,18 +568,35 @@ bundle` is rebuilt per deploy, never committed.
   files keeps its main-list dates. The upserter seeds
   `list_updated_at` from that last non-silent sighting (the changelog's
   "recently changed" clock) and re-seeds `added_at`/`list_updated_at` on
-  every pass, unless an active `app_overrides` row owns that date (§3);
-  afterwards
+  every pass, unless an active `app_overrides` row owns that date (§3; a
+  soft-deleted date override hands the column back to history). The
+  re-seed never moves `added_at` forward or `list_updated_at` backward, so
+  an adopted row keeps its original dates; afterwards
   `updated_at` is the change clock (any summary change bumps it, §3/§8)
   while `version_updated_at` tracks the served APK version.
 - **Upserter** (`Sync/CatalogUpserter`): matches rows by
-  `(listing, url)`. Rows from sections no longer ingested
+  `(listing, url, category)`. Rows from sections no longer ingested
   (libraries, misc) sweep out as stale, and closed rows sweep when the
   closed list drops them. Same-URL
   rename keeps id + slug and moves the row to the new category; a URL
   repeated in another category is a duplicate and is skipped. Stale
   `(url, category)` pairs, including duplicates created by earlier
-  syncs, are hard-deleted and reported by slug. Only root rows
+  syncs, are hard-deleted and reported by slug. An entry whose URL moved
+  is not a new app: before creating a row the upserter adopts a root row
+  of the same listing that vanished from this parse, keeping its id,
+  slug, install stats and `app_overrides`. A unique trimmed
+  case-insensitive name match wins; otherwise a unique row whose
+  `author_key` equals the new URL's owner and whose description is
+  identical is adopted (a rename where name and URL both moved). Several
+  candidates decline the adoption and record an `ambiguous_identity`
+  catalog issue (§7.1). A new entry whose slug is still held by a live
+  root row that left the parse is skipped, so the owner keeps its slug
+  and no `-2` row appears; that `slug_clash` is recorded as a catalog
+  issue too. Slug suffixes remain only for same-pass duplicates, category
+  slugs, variant slugs and parser collisions. When a stale root with
+  `install_count > 0` is hard-deleted, the delete is recorded as a
+  `stale_with_installs` catalog issue, because its install history
+  cascades away with the row. Only root rows
   (`root_app_id` null) are matched or swept: a variant shares its
   root's URL, so it must never look like a duplicate or go stale on
   its own. When a root does sweep out, its variants are hard-deleted
@@ -1396,7 +1413,9 @@ exception clears the change tracker and closes the run as
 ### 7.1 Health snapshot (`sync_issues`, served by `GET /v1/issues`)
 
 Each successful pass replaces the snapshot: parse rows from this
-pass's warnings (README plus `ARCHIVED.md`), enrich rows from every
+pass's warnings (README plus `ARCHIVED.md`), catalog rows from the
+upserter's identity warnings (`ambiguous_identity`, `slug_clash`,
+`stale_with_installs`, §4), enrich rows from every
 non-excluded row currently carrying `last_error`, quality rows from
 `CatalogHealthCheck` (missing license/description/icon, non-http
 entry or source URL, direct-APK rows without package name or primary
@@ -1412,7 +1431,7 @@ as `not_published` so a pass cannot silently leave it hidden; rows
 with a `last_error` skip that finding because their enrich issue
 already reports them. Due-only
 passes (HEAD unchanged) keep the previous
-parse rows and refresh only enrich + quality rows. Skipped and failed
+parse and catalog rows and refresh only enrich + quality rows. Skipped and failed
 passes write no issues (a skipped pass still records its bookkeeping
 row), so a crashed pass keeps the last good snapshot. Staleness is
 evaluated against the pass clock. The run `metadata` records the
@@ -1609,7 +1628,7 @@ rather than persisting them.
 | `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `readme_url`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded and unpublished omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
 | `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded and unpublished hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. `generated_at` is captured before the response's reads and is the cursor clients must persist: a client-side clock (or a later `/v1/meta` timestamp) can pass a concurrent enrichment commit and skip the update forever. Output-cached 30s, `VaryByQuery(*)`. |
-| `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
+| `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/catalog/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality\|catalog`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (published, non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
 | `GET /metrics` | Prometheus text exposition (OpenTelemetry exporter: `# HELP`/`# TYPE` lines, `target_info`). Requires `Authorization: Bearer <token>` (`Metrics:Token`, `SHIZU_METRICS_TOKEN`, else the admin token) → 401 otherwise; the route is not mapped without a token. The scrape itself does not count in HTTP metrics; no rate limit, no cache. |
@@ -1724,6 +1743,11 @@ all environments; Scalar UI is development-only.
   and never switch a user between signatures.
 - `apps.url` is not an identity - always key on
   `(listing, url, category)`.
+- Identity survives URL moves: an entry that changes its repo URL keeps
+  its row, id, slug, install stats and overrides through adoption, and a
+  slug is never minted as `-2` while a live row holds it. Ambiguity
+  skips the adoption and reports it; both guards exist because losing a
+  row loses its install history for good.
 - Variant rows (`root_app_id` set) are not list rows: list matching,
   staling and due/recheck selection only ever touch roots, and
   candidate-only resolution never creates variants. Grouping is by APK

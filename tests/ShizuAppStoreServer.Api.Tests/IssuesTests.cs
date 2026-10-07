@@ -79,6 +79,23 @@ public sealed class IssuesTests(ShizuApiFactory factory) : IClassFixture<ShizuAp
     }
 
     [Fact]
+    public async Task CatalogIssuesAreListedAndSummarized()
+    {
+        await factory.ResetAsync(db => SeedRun(db, "abc123",
+            (IssueKind.Catalog, "slug_clash", "micup"),
+            (IssueKind.Catalog, "stale_with_installs", "tuner"),
+            (IssueKind.Quality, "missing_icon", "tuner")));
+
+        var body = (await factory.NewClient()
+            .GetFromJsonAsync<IssuesDto>("/v1/issues?kind=catalog", Json))!;
+
+        Assert.Equal(2, body.Total);
+        Assert.All(body.Items, i => Assert.Equal("catalog", i.Kind));
+        Assert.Equal(2, body.Summary.Catalog);
+        Assert.Equal(3, body.Summary.Total);
+    }
+
+    [Fact]
     public async Task KindAndRuleFiltersApply()
     {
         await factory.ResetAsync(db => SeedRun(db, "abc123",

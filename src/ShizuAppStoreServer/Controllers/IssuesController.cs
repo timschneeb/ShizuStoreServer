@@ -45,7 +45,7 @@ public sealed class IssuesController(ShizuDbContext db) : ControllerBase
         {
             if (!Enum.TryParse<IssueKind>(kind, ignoreCase: true, out var parsed))
             {
-                return Problem($"Invalid kind '{kind}'. Use parse|enrich|quality.",
+                return Problem($"Invalid kind '{kind}'. Use parse|enrich|quality|catalog.",
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
@@ -103,6 +103,7 @@ public sealed class IssuesController(ShizuDbContext db) : ControllerBase
             unfiltered.Count(i => i.Kind == IssueKind.Parse),
             unfiltered.Count(i => i.Kind == IssueKind.Enrich),
             unfiltered.Count(i => i.Kind == IssueKind.Quality),
+            unfiltered.Count(i => i.Kind == IssueKind.Catalog),
             unfiltered.Count);
 
         return Ok(new IssuesDto(

@@ -222,7 +222,7 @@ public sealed class SyncService(
                 await ApplyShizukuFilterAsync(ct);
                 return await FinishRunAsync(dueSession, effectiveTrigger, head,
                     0, 0, 0, enriched, upToDate, failed,
-                    [], [], false, 0, 0, now, ct, failedMessages);
+                    [], [], [], false, 0, 0, now, ct, failedMessages);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -319,7 +319,7 @@ public sealed class SyncService(
             return await FinishRunAsync(session, effectiveTrigger, head,
                 counts.Added, counts.Updated, counts.Removed,
                 full.Enriched, full.UpToDate, full.Failed,
-                pendingIds, parseWarnings, true, archivedChanged, unlistedChanged, now, ct, full.FailedMessages);
+                pendingIds, parseWarnings, counts.Warnings, true, archivedChanged, unlistedChanged, now, ct, full.FailedMessages);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -1039,7 +1039,8 @@ public sealed class SyncService(
         JobSession session, string trigger, string? head,
         int added, int updated, int removed,
         int enriched, int upToDate, int failed,
-        IReadOnlyList<long> drainedIds, IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse,
+        IReadOnlyList<long> drainedIds, IReadOnlyList<ParseWarning> parseWarnings,
+        IReadOnlyList<CatalogWarning> catalogWarnings, bool refreshParse,
         int archivedChanged, int unlistedChanged, DateTimeOffset started, CancellationToken ct,
         IReadOnlyList<string>? failedMessages = null)
     {
@@ -1059,17 +1060,18 @@ public sealed class SyncService(
         // Staleness is evaluated against the pass clock (started), not the
         // finished time: they differ only by the pass duration in production,
         // but tests run passes with a fixed historical clock.
-        var issues = await CollectIssuesAsync(parseWarnings, refreshParse, started, now, ct);
+        var issues = await CollectIssuesAsync(parseWarnings, catalogWarnings, refreshParse, started, now, ct);
         var parseIssues = issues.Count(i => i.Kind == IssueKind.Parse);
         var enrichIssues = issues.Count(i => i.Kind == IssueKind.Enrich);
         var qualityIssues = issues.Count(i => i.Kind == IssueKind.Quality);
+        var catalogIssues = issues.Count(i => i.Kind == IssueKind.Catalog);
 
         // The snapshot holds only the latest completed run: successful passes
-        // replace it wholesale (due-only passes keep the parse rows, whose
-        // source list did not change). Failed passes never reach here, so a
-        // crashed pass keeps the previous good snapshot. Without a run row
-        // (sink unavailable) the replace is skipped too: the old snapshot
-        // stays valid and no issue needs the run FK.
+        // replace it wholesale (due-only passes keep the parse and catalog
+        // rows, whose source lists did not change). Failed passes never reach
+        // here, so a crashed pass keeps the previous good snapshot. Without a
+        // run row (sink unavailable) the replace is skipped too: the old
+        // snapshot stays valid and no issue needs the run FK.
         if (session.RunId is { } jobRunId)
         {
             if (refreshParse)
@@ -1078,7 +1080,9 @@ public sealed class SyncService(
             }
             else
             {
-                await db.SyncIssues.Where(i => i.Kind != IssueKind.Parse).ExecuteDeleteAsync(ct);
+                await db.SyncIssues
+                    .Where(i => i.Kind != IssueKind.Parse && i.Kind != IssueKind.Catalog)
+                    .ExecuteDeleteAsync(ct);
             }
 
             foreach (var issue in issues)
@@ -1095,7 +1099,12 @@ public sealed class SyncService(
         foreach (var issue in issues)
         {
             session.Event(
-                issue.Kind == IssueKind.Enrich ? JobEventLevel.Warning : JobEventLevel.Info,
+                issue.Kind switch
+                {
+                    IssueKind.Enrich => JobEventLevel.Warning,
+                    IssueKind.Catalog => JobEventLevel.Error,
+                    _ => JobEventLevel.Info,
+                },
                 JobEventType.Issue,
                 issue.Message,
                 appId: issue.AppId,
@@ -1125,6 +1134,7 @@ public sealed class SyncService(
                     parse = parseIssues,
                     enrich = enrichIssues,
                     quality = qualityIssues,
+                    catalog = catalogIssues,
                 }),
             ct);
 
@@ -1138,12 +1148,13 @@ public sealed class SyncService(
 
     /// <summary>
     /// Current health snapshot rows for the run. Parse rows come from this
-    /// pass; enrich rows reflect every row carrying <c>last_error</c> right
-    /// now (not just this pass); quality rows are recomputed over the catalog.
+    /// pass, catalog rows from the import, enrich rows reflect every row
+    /// carrying <c>last_error</c> right now (not just this pass); quality rows
+    /// are recomputed over the catalog.
     /// </summary>
     private async Task<List<SyncIssue>> CollectIssuesAsync(
-        IReadOnlyList<ParseWarning> parseWarnings, bool refreshParse,
-        DateTimeOffset referenceNow, DateTimeOffset now, CancellationToken ct)
+        IReadOnlyList<ParseWarning> parseWarnings, IReadOnlyList<CatalogWarning> catalogWarnings,
+        bool refreshParse, DateTimeOffset referenceNow, DateTimeOffset now, CancellationToken ct)
     {
         var issues = new List<SyncIssue>();
         if (refreshParse)
@@ -1159,6 +1170,19 @@ public sealed class SyncService(
                     CreatedAt = now,
                 });
             }
+        }
+
+        foreach (var warning in catalogWarnings)
+        {
+            issues.Add(new SyncIssue
+            {
+                Kind = IssueKind.Catalog,
+                Rule = warning.Rule,
+                AppId = warning.AppId,
+                Slug = warning.Slug,
+                Message = warning.Message,
+                CreatedAt = now,
+            });
         }
 
         var failures = await db.Apps.AsNoTracking()

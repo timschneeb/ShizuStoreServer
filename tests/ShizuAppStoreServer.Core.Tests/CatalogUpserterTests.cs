@@ -208,6 +208,195 @@ public sealed class CatalogUpserterTests : IDisposable
     }
 
     [Fact]
+    public async Task UrlChangeAdoptsTheVanishingRow()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var before = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        before.InstallCount = 42;
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        const string moved = """
+            ## Apps
+
+            ### Audio
+
+            * [MicUp](https://github.com/papergray/MicUpNext) ✨ - Real-time mic `MIT`
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+              * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+            ### Vendor-specific
+
+            #### MIUI
+
+            * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+            """;
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(moved, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        // The new URL adopts the old row instead of forking it, so the id,
+        // slug and install count survive the move.
+        Assert.Equal(0, counts.Added);
+        Assert.Equal(1, counts.Updated);
+        Assert.Equal(0, counts.Removed);
+        Assert.Empty(counts.Warnings);
+        var after = await _db.Apps.SingleAsync(a => a.Url == "https://github.com/papergray/MicUpNext");
+        Assert.Equal(before.Id, after.Id);
+        Assert.Equal("micup", after.Slug);
+        Assert.Equal(42, after.InstallCount);
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
+
+        // A later non-silent edit of the new URL must not re-date the row:
+        // the adopted row keeps its original added date.
+        var later = new Dictionary<string, EntryHistory>
+        {
+            ["https://github.com/papergray/MicUpNext"] = new(T1, T1),
+        };
+        await Upserter().UpsertAsync([new AwesomeListParser().Parse(moved, "main")], later, T1);
+
+        _db.ChangeTracker.Clear();
+        after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(before.AddedAt, after.AddedAt);
+    }
+
+    [Fact]
+    public async Task RenamedEntryWithNewUrlAdoptsByAuthorAndDescription()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var before = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        before.AuthorKey = "github:papergray";
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        // Name and URL both change; the author key and description still
+        // identify the same app, so the row is adopted in place.
+        const string renamed = """
+            ## Apps
+
+            ### Audio
+
+            * [MicUp Next](https://github.com/papergray/micup-next) - Real-time mic `MIT`
+
+            ### Vendor-specific
+
+            #### MIUI
+
+            * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+            """;
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(renamed, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal(0, counts.Added);
+        Assert.Equal(1, counts.Updated);
+        Assert.Empty(counts.Warnings);
+        var after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(before.Id, after.Id);
+        Assert.Equal("MicUp Next", after.Name);
+        Assert.Equal("https://github.com/papergray/micup-next", after.Url);
+    }
+
+    [Fact]
+    public async Task AmbiguousAdoptionDeclinesAndWarns()
+    {
+        const string seed = """
+            ## Apps
+
+            ### Audio
+
+            * [MicUp One](https://github.com/papergray/one) - Shared text `MIT`
+            * [MicUp Two](https://github.com/papergray/one-alt) - Shared text `MIT`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(seed, "main")], new Dictionary<string, EntryHistory>(), T0);
+        foreach (var row in await _db.Apps.ToListAsync())
+        {
+            row.AuthorKey = "github:papergray";
+        }
+
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        // Two vanishing rows match the new entry (author plus description),
+        // so the upserter must not guess: it imports a new row and warns.
+        const string entry = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner anew](https://github.com/papergray/tuner-anew) - Shared text `MIT`
+            """;
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(entry, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        var warning = Assert.Single(counts.Warnings);
+        Assert.Equal("ambiguous_identity", warning.Rule);
+        Assert.Equal(1, counts.Added);
+        Assert.Equal(2, counts.Removed);
+        Assert.NotNull(await _db.Apps.SingleOrDefaultAsync(a => a.Slug == "tuner-anew"));
+    }
+
+    [Fact]
+    public async Task SlugClashSkipsTheNewEntryAndKeepsTheOwner()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var owner = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+
+        // A different entry that slugifies to an existing slug while the
+        // owner's URL vanishes from the list. Importing it would steal the
+        // owner's identity, so the upserter keeps the owner and warns.
+        const string clash = """
+            ## Apps
+
+            ### Audio
+
+            * [Micup!](https://example.com/micup-fork) - Fork of MicUp `MIT`
+            """;
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(clash, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        var warning = Assert.Single(counts.Warnings);
+        Assert.Equal("slug_clash", warning.Rule);
+        Assert.Equal(0, counts.Added);
+        // The owner stays; the other rows leave the list as usual.
+        Assert.Equal(3, counts.Removed);
+        Assert.DoesNotContain("micup", counts.RemovedSlugs);
+        Assert.Equal(owner.Id, (await _db.Apps.SingleAsync(a => a.Slug == "micup")).Id);
+        Assert.DoesNotContain(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+    }
+
+    [Fact]
+    public async Task StaleDeleteWithInstallsWarns()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        micUp.InstallCount = 7;
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+              * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+            ### Vendor-specific
+
+            #### MIUI
+
+            * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+            """;
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        var warning = Assert.Single(counts.Warnings);
+        Assert.Equal("stale_with_installs", warning.Rule);
+        Assert.Equal("micup", warning.Slug);
+        Assert.Contains("micup", counts.RemovedSlugs);
+    }
+
+    [Fact]
     public async Task SameUrlInTwoCategoriesKeepsOneRow()
     {
         const string md = """

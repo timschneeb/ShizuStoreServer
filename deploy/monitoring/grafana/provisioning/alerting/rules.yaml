@@ -316,6 +316,57 @@ groups:
           service: shizustore-web
           severity: warning
 
+      - uid: shizu-api-catalog-issue
+        title: ShizuStore catalog identity issue
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: shizu_sync_issues{job="shizu-api",kind="catalog"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        annotations:
+          summary: The ShizuStore catalog has identity issues (a slug clash, an ambiguous move or a deleted entry with installs).
+          description: The latest sync snapshot has catalog issues. Check the Stats /issues page and the API /v1/issues?kind=catalog.
+        labels:
+          service: shizu-api
+          severity: critical
+
   - orgId: 1
     name: srv1-host
     folder: ShizuStore

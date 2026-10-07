@@ -17,6 +17,7 @@ The client has a setting to show these entries which is off by default.
 | New release on GitHub/GitLab/F-Droid/IzzyOnDroid | within 30 minutes (+ analysis time) |
 | New release on Play/Codeberg/other sites | within 24 hours |
 | List entry added/edited | within 30 minutes (+ analysis time) |
+| List entry renamed or moved to a new repo URL | within 30 minutes; slug, install counts and overrides stay with the entry |
 | Entry hidden or restored by an operator | applied by the next full catalog pass (usually the nightly one) |
 | Metadata refresh (GitHub stars, etc.) | within 24 hours |
 | New screenshots added or removed | F-Droid/Izzy shots refresh within 24 hours; the app repo is re-scanned every week and dead URLs are cleared on the next scan |
@@ -25,6 +26,14 @@ A new entry is created hidden and becomes visible only after its first
 successful check, so an app never appears in the store without its icon,
 description or download link. A failed first check keeps it hidden and
 retries with the normal failure backoff.
+
+Renaming an entry or pointing it at a new repository URL does not create a
+new store entry: the server recognizes the row that left the list (same
+name, or the same developer plus an unchanged description) and carries its
+slug, install counts and operator overrides over. If a new entry would take
+the slug of an entry that just left the list, the server keeps the existing
+entry and records a catalog issue instead of creating a second entry with a
+suffixed slug. Both cases show up under `GET /v1/issues` (kind `catalog`).
 
 An operator can also hide an entry server-side (for example an abandoned
 project whose package conflicts with a maintained app). Hiding keeps the

@@ -33,6 +33,8 @@ public sealed class ShizuMetrics
             description: "App detail views by slug (API fetches and webstore pages).");
         meter.CreateObservableGauge("shizu.catalog.apps", () => ObserveCatalogApps(scopes, log),
             description: "Catalog rows per availability.");
+        meter.CreateObservableGauge("shizu.sync.issues", () => ObserveSyncIssues(scopes, log),
+            description: "Latest sync health snapshot rows by kind and rule.");
     }
 
     public void JobFinished(string kind, string trigger, string status, double durationSeconds)
@@ -71,6 +73,28 @@ public sealed class ShizuMetrics
         {
             // A broken collection must not fail the scrape.
             log.LogDebug(ex, "Catalog metrics collection failed");
+            return [];
+        }
+    }
+
+    private static IEnumerable<Measurement<long>> ObserveSyncIssues(IServiceScopeFactory scopes, ILogger log)
+    {
+        try
+        {
+            using var scope = scopes.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ShizuDbContext>();
+            var rows = db.SyncIssues.AsNoTracking()
+                .GroupBy(i => new { i.Kind, i.Rule })
+                .Select(g => new { g.Key.Kind, g.Key.Rule, Count = g.Count() })
+                .ToList();
+            return rows.Select(r => new Measurement<long>(
+                r.Count,
+                new KeyValuePair<string, object?>("kind", ApiEnums.ToApiString(r.Kind)),
+                new KeyValuePair<string, object?>("rule", r.Rule)));
+        }
+        catch (Exception ex)
+        {
+            log.LogDebug(ex, "Sync issue metrics collection failed");
             return [];
         }
     }

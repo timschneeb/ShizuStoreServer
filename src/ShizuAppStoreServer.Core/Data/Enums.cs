@@ -55,6 +55,9 @@ public enum IssueKind
     Parse,
     Enrich,
     Quality,
+
+    /// <summary>Identity conflicts detected while importing the list into the catalog.</summary>
+    Catalog,
 }
 
 /// <summary>What the client can do with an entry. Set by the resolvers (M4).</summary>

@@ -80,7 +80,8 @@ Provisioned from `grafana/provisioning/alerting/`:
 
 - `rules.yaml`: folder `ShizuStore`, group `shizu-health`, 1m interval. API
   scrape down, API p95 above 1.5s, sync stalled (no successful sync pass in
-  45m), storefront scrape down, storefront p95, storefront 5xx.
+  45m), catalog identity issue (a `catalog` kind row in the latest sync
+  snapshot), storefront scrape down, storefront p95, storefront 5xx.
 - `policies.yaml`: root route to `shizu-telegram`, grouped by alertname and
   service.
 - `templates.yaml`: `shizu.telegram.message`, an HTML message with a bold

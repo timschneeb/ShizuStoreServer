@@ -51,7 +51,10 @@ the toolchain must fail.
 
 ### IV. Data Integrity and Closure
 `slug` is globally unique and stable across renames; entry identity
-is `(listing, url, category)`; `apps.url` is never a key. Every
+is `(listing, url, category)`; `apps.url` is never a key. A moved URL
+adopts the vanished row, a live slug is never suffixed away, and
+identity conflicts are reported as catalog issues rather than resolved
+silently. Every
 delete path writes a tombstone and every re-add path clears it, or
 `/v1/changes removed[]` drifts. The sync worker makes no app
 mutations after the upsert save (final pass-scope save = requests +

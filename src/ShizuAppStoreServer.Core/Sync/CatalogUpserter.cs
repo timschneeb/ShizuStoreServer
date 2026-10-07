@@ -3,11 +3,16 @@ using ShizuAppStoreServer.Core.Data;
 using ShizuAppStoreServer.Core.History;
 using ShizuAppStoreServer.Core.Overrides;
 using ShizuAppStoreServer.Core.Parsing;
+using ShizuAppStoreServer.Core.Sources;
 
 namespace ShizuAppStoreServer.Core.Sync;
 
+/// <summary>An identity conflict from one import pass that needs operator attention.</summary>
+public sealed record CatalogWarning(string Rule, long? AppId, string Slug, string Message);
+
 /// <summary>Row counts from one import pass.</summary>
-public sealed record UpsertCounts(int Added, int Updated, int Removed, List<string> RemovedSlugs);
+public sealed record UpsertCounts(
+    int Added, int Updated, int Removed, List<string> RemovedSlugs, List<CatalogWarning> Warnings);
 
 /// <summary>
 /// Imports parsed list documents into the catalog. Used by the initial
@@ -22,10 +27,19 @@ public sealed record UpsertCounts(int Added, int Updated, int Removed, List<stri
 /// (e.g. <c>fluffy</c>, <c>krude</c>); those stay separate rows.</item>
 /// <item>An entry whose old <c>(url, category)</c> location vanished is treated
 /// as a move: the row is reused, not deleted + recreated.</item>
+/// <item>An entry whose URL changed outright is adopted onto the vanished row
+/// when exactly one row in the listing matches by name, or by author plus
+/// description; the row keeps its id, slug, stats and overrides.</item>
+/// <item>When no adoption applies and the parsed slug is taken by a row whose
+/// URL vanished, the existing row is kept and the new entry is skipped with a
+/// <see cref="IssueKind.Catalog"/> warning. Slugs are only suffixed for
+/// collisions inside one pass, category slugs, variant slugs and the parser's
+/// per-document dedupe.</item>
 /// <item>Rows whose <c>(url, category)</c> pair vanished from the parse are
 /// hard-deleted, and a <see cref="RemovedApp"/> tombstone is written (or
 /// refreshed) per deleted slug so <c>GET /v1/changes</c> can report
-/// <c>removed[]</c>. Re-adding a deleted slug clears its tombstone.</item>
+/// <c>removed[]</c>. Re-adding a deleted slug clears its tombstone. Deleting a
+/// row with recorded installs raises a warning, because its stats cascade.</item>
 /// <item>Only the <c>## Apps</c> section is ingested: Development libraries
 /// and Miscellaneous content stay out of the catalog entirely, so rows
 /// from an earlier import of those sections sweep out as stale.</item>
@@ -80,16 +94,26 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         // for it keeps the operator value from flickering mid-pass and from
         // bumping updated_at through the summary interceptor every pass; the
         // applier re-asserts and restores it.
-        var protectedDates = await db.AppOverrides.AsNoTracking()
-            .Where(o => o.DeletedAt == null
-                && (o.Field == AppOverrideFields.AddedAtName || o.Field == AppOverrideFields.ListUpdatedAtName))
-            .Select(o => new { o.AppSlug, o.Field })
+        var dateOverrides = await db.AppOverrides.AsNoTracking()
+            .Where(o => o.Field == AppOverrideFields.AddedAtName || o.Field == AppOverrideFields.ListUpdatedAtName)
+            .Select(o => new { o.AppSlug, o.Field, o.DeletedAt })
             .ToListAsync(ct);
-        var addedAtProtected = protectedDates
+        var addedAtProtected = dateOverrides
+            .Where(o => o.DeletedAt == null && o.Field == AppOverrideFields.AddedAtName)
+            .Select(o => o.AppSlug)
+            .ToHashSet(StringComparer.Ordinal);
+        var listUpdatedAtProtected = dateOverrides
+            .Where(o => o.DeletedAt == null && o.Field == AppOverrideFields.ListUpdatedAtName)
+            .Select(o => o.AppSlug)
+            .ToHashSet(StringComparer.Ordinal);
+        // A soft-deleted override hands the column back to history exactly, so
+        // slugs that ever owned one must not go through the min/max guard
+        // below or the removed operator value would stick forever.
+        var addedAtRestorable = dateOverrides
             .Where(o => o.Field == AppOverrideFields.AddedAtName)
             .Select(o => o.AppSlug)
             .ToHashSet(StringComparer.Ordinal);
-        var listUpdatedAtProtected = protectedDates
+        var listUpdatedAtRestorable = dateOverrides
             .Where(o => o.Field == AppOverrideFields.ListUpdatedAtName)
             .Select(o => o.AppSlug)
             .ToHashSet(StringComparer.Ordinal);
@@ -102,10 +126,14 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
         var added = 0;
         var updated = 0;
+        var warnings = new List<CatalogWarning>();
         // (listing, url, categoryId) pairs present in the parse, anything else
         // stored under a synced listing is stale.
         var parsedKeys = new HashSet<(Listing, string, long)>();
         var parsedLocations = CollectLocations(docs);
+        // URLs present in the parse (order independent), used to tell a row
+        // that is leaving the list from one that is merely being adopted.
+        var parsedUrls = CollectUrls(docs);
         // The source lists some apps under two categories. Keep the first
         // occurrence so the catalog holds one row per (listing, url); later
         // occurrences are left out and any existing duplicate rows go stale.
@@ -127,8 +155,9 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 var type = MapType(category.Section, parsed.Name, parsed.Subcategory);
                 foreach (var entry in parsed.Entries)
                 {
-                    UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
-                        addedAtProtected, listUpdatedAtProtected,
+                    UpsertEntry(apps, tombstones, categories, categoriesById, usedSlugs, parsedKeys, parsedLocations,
+                        parsedUrls, seenEntries, warnings,
+                        addedAtProtected, listUpdatedAtProtected, addedAtRestorable, listUpdatedAtRestorable,
                         listing, category, type, entry, parent: null, history, now, commitNow, ref added, ref updated);
                 }
             }
@@ -139,6 +168,17 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 && !parsedKeys.Contains((a.Listing, a.Url, EffectiveCategoryId(a, categories))))
             .ToList();
         var removedSlugs = stale.Select(a => a.Slug).ToList();
+        foreach (var app in stale.Where(a => a.Id != 0 && a.InstallCount > 0))
+        {
+            // The row and its daily/version stats cascade away with the delete,
+            // so an entry leaving the list silently loses its install history.
+            // The id is gone with the row, so the issue carries only the slug
+            // (an app_id FK to a deleted row would reject the snapshot insert).
+            warnings.Add(new CatalogWarning(
+                "stale_with_installs", null, app.Slug,
+                $"Deleted '{app.Name}' ({app.Url}) with {app.InstallCount} recorded installs; the entry left the list."));
+        }
+
         WriteTombstones(tombstones, stale, commitNow);
 
         // Variants cascade with their root at the DB level, but each owns a
@@ -153,7 +193,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         db.Apps.RemoveRange(stale);
 
         await db.SaveChangesAsync(ct);
-        return new UpsertCounts(added, updated, stale.Count, removedSlugs);
+        return new UpsertCounts(added, updated, stale.Count, removedSlugs, warnings);
     }
 
     /// <summary>
@@ -197,6 +237,35 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         }
 
         return set;
+    }
+
+    private static HashSet<(Listing, string)> CollectUrls(List<ParsedDocument> docs)
+    {
+        var set = new HashSet<(Listing, string)>();
+        foreach (var doc in docs)
+        {
+            var listing = MapListing(doc.ListingName);
+            foreach (var cat in doc.Categories)
+            {
+                if (MapSection(cat.Section) != CategorySection.Apps)
+                {
+                    continue;
+                }
+
+                CollectUrls(set, listing, cat.Entries);
+            }
+        }
+
+        return set;
+    }
+
+    private static void CollectUrls(HashSet<(Listing, string)> set, Listing listing, List<ParsedEntry> entries)
+    {
+        foreach (var e in entries)
+        {
+            set.Add((listing, e.Url));
+            CollectUrls(set, listing, e.Children);
+        }
     }
 
     private static void CollectEntries(
@@ -280,10 +349,13 @@ public sealed class CatalogUpserter(ShizuDbContext db)
     }
 
     private void UpsertEntry(
-        List<App> apps, List<RemovedApp> tombstones, Dictionary<long, Category> categoriesById, HashSet<string> usedSlugs,
+        List<App> apps, List<RemovedApp> tombstones, List<Category> categories, Dictionary<long, Category> categoriesById,
+        HashSet<string> usedSlugs,
         HashSet<(Listing, string, long)> parsedKeys, HashSet<Location> parsedLocations,
-        HashSet<(Listing, string)> seenEntries,
+        HashSet<(Listing, string)> parsedUrls, HashSet<(Listing, string)> seenEntries,
+        List<CatalogWarning> warnings,
         HashSet<string> addedAtProtected, HashSet<string> listUpdatedAtProtected,
+        HashSet<string> addedAtRestorable, HashSet<string> listUpdatedAtRestorable,
         Listing listing, Category category, AppType type,
         ParsedEntry entry, App? parent,
         IReadOnlyDictionary<string, EntryHistory> history,
@@ -307,8 +379,40 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
         history.TryGetValue(entry.Url, out var h);
 
+        // URL-change adoption runs before the clash guard: a rename that also
+        // moved the repo keeps the row, its slug, its stats and its overrides.
+        var adoptionMatches = 0;
         if (match is null)
         {
+            var (adopted, matched) = FindAdoptionTarget(apps, parsedUrls, listing, entry);
+            match = adopted;
+            adoptionMatches = matched;
+        }
+
+        if (match is null)
+        {
+            var clash = FindSlugClash(apps, parsedUrls, entry.Slug);
+            if (clash is not null)
+            {
+                // Keep the row that owns the slug instead of forking the app
+                // into a suffixed duplicate nobody would find. Sparing it from
+                // the stale sweep keeps its stats and overrides; the operator
+                // decides the outcome.
+                parsedKeys.Add((clash.Listing, clash.Url, EffectiveCategoryId(clash, categories)));
+                warnings.Add(new CatalogWarning(
+                    "slug_clash", clash.Id, clash.Slug,
+                    $"New entry '{entry.Name}' ({entry.Url}) wants slug '{entry.Slug}' " +
+                    $"held by '{clash.Name}' ({clash.Url}); kept the existing entry."));
+                return;
+            }
+
+            if (adoptionMatches > 1)
+            {
+                warnings.Add(new CatalogWarning(
+                    "ambiguous_identity", null, entry.Slug,
+                    $"Entry '{entry.Name}' ({entry.Url}) matches {adoptionMatches} rows that left the list; imported it as a new entry."));
+            }
+
             match = new App
             {
                 Name = entry.Name,
@@ -350,6 +454,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         else
         {
             var changed = match.Name != entry.Name
+                || match.Url != entry.Url
                 || match.Description != entry.Description
                 || match.License != entry.License
                 || match.SourceUrl != entry.SourceUrl
@@ -364,6 +469,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 || !IsSameAppParent(match, parent);
 
             match.Name = entry.Name;
+            match.Url = entry.Url;
             match.Description = entry.Description;
             match.License = entry.License;
             match.SourceUrl = entry.SourceUrl;
@@ -392,16 +498,25 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             // list-change dates (silent commits already filtered out), and
             // refreshes them even when the parsed entry itself is unchanged.
             // An active override wins instead: the applier owns that column.
+            // A removed override restores the exact history date; otherwise
+            // min/max keep an adopted row's original dates when the new URL's
+            // history starts later (added) or keeps an older last edit.
             if (h is not null)
             {
                 if (!addedAtProtected.Contains(match.Slug))
                 {
-                    match.AddedAt = h.AddedAt;
+                    match.AddedAt = addedAtRestorable.Contains(match.Slug) || h.AddedAt < match.AddedAt
+                        ? h.AddedAt
+                        : match.AddedAt;
                 }
 
                 if (!listUpdatedAtProtected.Contains(match.Slug))
                 {
-                    match.ListUpdatedAt = h.UpdatedAt;
+                    match.ListUpdatedAt = listUpdatedAtRestorable.Contains(match.Slug)
+                        ? h.UpdatedAt
+                        : match.ListUpdatedAt is { } existing && existing > h.UpdatedAt
+                            ? existing
+                            : h.UpdatedAt;
                 }
             }
         }
@@ -410,11 +525,71 @@ public sealed class CatalogUpserter(ShizuDbContext db)
 
         foreach (var child in entry.Children)
         {
-            UpsertEntry(apps, tombstones, categoriesById, usedSlugs, parsedKeys, parsedLocations, seenEntries,
-                addedAtProtected, listUpdatedAtProtected,
+            UpsertEntry(apps, tombstones, categories, categoriesById, usedSlugs, parsedKeys, parsedLocations,
+                parsedUrls, seenEntries, warnings,
+                addedAtProtected, listUpdatedAtProtected, addedAtRestorable, listUpdatedAtRestorable,
                 listing, category, type, child, parent: match, history, now, commitNow, ref added, ref updated);
         }
     }
+
+    /// <summary>
+    /// URL-change adoption: exactly one root row in this listing lost its URL
+    /// from the parse and matches the entry by name, or by author plus
+    /// description (a rename that also moved the repo). Zero matches means a
+    /// genuinely new entry; several matches stay untouched and are reported.
+    /// </summary>
+    private static (App? Target, int Matches) FindAdoptionTarget(
+        List<App> apps, HashSet<(Listing, string)> parsedUrls, Listing listing, ParsedEntry entry)
+    {
+        var candidates = apps
+            .Where(a => a.Id != 0 && a.Listing == listing && !parsedUrls.Contains((a.Listing, a.Url)))
+            .Where(a => MatchesEntry(a, entry))
+            .ToList();
+        return candidates.Count == 1 ? (candidates[0], 1) : (null, candidates.Count);
+    }
+
+    private static bool MatchesEntry(App app, ParsedEntry entry)
+    {
+        if (string.Equals(app.Name.Trim(), entry.Name.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // The author key is set by enrichment, so only enriched rows can match
+        // this way; an identical description keeps the false-positive rate low
+        // (cebian -> XGesture kept both name-independent columns).
+        return app.AuthorKey is not null
+            && app.AuthorKey == DeriveAuthorKey(entry.Url)
+            && string.Equals(app.Description, entry.Description, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Author identity derived from an entry URL, mirroring the enrichment
+    /// services so a pre-change row compares equal to its new URL.
+    /// </summary>
+    private static string? DeriveAuthorKey(string? url)
+    {
+        if (SourceClassifier.TryParseGitHubRepo(url, out var owner, out _))
+        {
+            return $"github:{owner.ToLowerInvariant()}";
+        }
+
+        if (SourceClassifier.TryParseGitLabRepo(url, out var projectPath))
+        {
+            var group = projectPath.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            return group is null ? null : $"gitlab:{group.ToLowerInvariant()}";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A live root row that owns the parsed slug while its own URL left the
+    /// list: inserting the entry under a suffixed slug would bury the row that
+    /// carries the install history, so it is kept and the entry is reported.
+    /// </summary>
+    private static App? FindSlugClash(List<App> apps, HashSet<(Listing, string)> parsedUrls, string slug) =>
+        apps.FirstOrDefault(a => a.Id != 0 && a.Slug == slug && !parsedUrls.Contains((a.Listing, a.Url)));
 
     /// <summary>
     /// Move reuse: exactly one row carries this URL elsewhere in the listing

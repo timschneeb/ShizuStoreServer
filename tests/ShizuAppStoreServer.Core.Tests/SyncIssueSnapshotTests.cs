@@ -143,6 +143,48 @@ public sealed class SyncIssueSnapshotTests : IDisposable
     }
 
     [Fact]
+    public async Task StaleDeleteWithInstallsIsReportedAsCatalogIssue()
+    {
+        if (!InitRepo())
+        {
+            return;
+        }
+
+        Commit("2026-01-05T10:00:00+00:00", ("README.md", ReadmeV1));
+        await Service().RunAsync("scheduled", fullRecheck: false, T0);
+
+        var micUp = _db.Apps.Single(a => a.Slug == "micup");
+        micUp.InstallCount = 5;
+        await _db.SaveChangesAsync();
+
+        const string shrunk = """
+            # Test list
+
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/acme/tuner) - Tuner description `GPL-3.0`
+            """;
+        Commit("2026-01-06T10:00:00+00:00", ("README.md", shrunk));
+        var result = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
+
+        Assert.Null(result.Error);
+        var row = Assert.Single(_db.SyncIssues.Where(i => i.Kind == IssueKind.Catalog).ToList());
+        Assert.Equal("stale_with_installs", row.Rule);
+        Assert.Equal("micup", row.Slug);
+        Assert.Null(await _db.Apps.SingleOrDefaultAsync(a => a.Slug == "micup"));
+
+        // Due-only passes keep catalog rows around, like parse warnings.
+        var tuner = _db.Apps.Single(a => a.Slug == "tuner");
+        tuner.LastCheckedAt = T0.AddHours(-25);
+        await _db.SaveChangesAsync();
+        await Service().RunAsync("scheduled", fullRecheck: false, T0.AddHours(1));
+
+        Assert.Equal(1, _db.SyncIssues.Count(i => i.Kind == IssueKind.Catalog));
+    }
+
+    [Fact]
     public async Task DueOnlyPassPreservesParseRows()
     {
         if (!InitRepo())

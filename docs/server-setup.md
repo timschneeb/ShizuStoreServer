@@ -751,3 +751,36 @@ call per forge app plus one F-Droid/Izzy index fetch per repo, so the
 PAT's 5000 calls/hr covers the ~1200/hr steady state. Without
 `SHIZU_GITHUB_TOKEN` the poll stays off (startup warning) and fast passes
 enrich due-only apps; `Sync:PollEnabled` / `Sync:PollParallelism` tune it.
+
+## Recovering forked catalog entries
+
+A list edit that changed an entry's URL used to import it as a new app
+(`service-keeper-2`) and hard-delete the old row, cascading away its install
+history. The upserter now adopts the vanished row (same trimmed name, or the
+new URL's owner plus an identical description) and the slug-clash guard keeps
+an existing row instead of suffixing; both are reported as `catalog` issues.
+Recovering counts lost before those guards still needs a pre-fork dump. The
+dumps live outside the repo and must never be committed (they contain env
+secrets); installs reported between a dump and the fork pass are not in
+`request_logs` and stay lost.
+
+1. Restore the newest predeploy dump into a scratch database on the server:
+   `sudo -u postgres createdb shizu_repair` then
+   `sudo -u postgres pg_restore -d shizu_repair --no-owner --no-acl <dump>`.
+2. Map each old row onto the live one: add `apps.install_count`, copy
+   `added_at` and `list_updated_at`, insert the daily rows
+   (`app_install_days`, `app_version_install_days`) re-keyed to the live app id
+   with `ON CONFLICT ... DO UPDATE SET install_count = <table>.install_count +
+   EXCLUDED.install_count` so a shared final day sums correctly, and set
+   `install_count_updated_at = now()` so `/v1/changes` republishes the count.
+3. Rename the `-2` slug back to the canonical slug, delete the canonical
+   `removed_apps` tombstone and insert a tombstone for the freed `-2` slug in
+   the same transaction, then bump `updated_at`. Clients that synced the forked
+   row drop it from `removed[]` and re-add the canonical row from `updated[]`.
+   Never leave a live slug and its tombstone coexisting. For a row deleted in
+   the same pass, report it with a null `sync_issues.app_id`: the FK rejects
+   the dangling id.
+4. Drop the scratch database, drain a sync pass (`POST /v1/admin/sync`) and
+   confirm a clean `+0 ~0 -0` summary with no `catalog` issues, then verify the
+   merged totals and daily series on `GET /v1/apps/{slug}` and
+   `GET /v1/apps/{slug}/history`.

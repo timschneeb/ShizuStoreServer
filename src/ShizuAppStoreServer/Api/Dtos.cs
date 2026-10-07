@@ -180,7 +180,7 @@ public sealed record IssueDto(
     string Message,
     string? Location);
 
-public sealed record IssueSummaryDto(int Parse, int Enrich, int Quality, int Total);
+public sealed record IssueSummaryDto(int Parse, int Enrich, int Quality, int Catalog, int Total);
 
 /// <summary>Current health snapshot: latest completed run plus its issues.</summary>
 public sealed record IssuesDto(
