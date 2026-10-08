@@ -424,6 +424,228 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.Equal((0, 0, 0), (again.Added, again.Updated, again.Removed));
     }
 
+    private const string MovedToNewCategoryList = """
+        ## Apps
+
+        ### Audio
+
+        * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+          * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+        ### Productivity
+
+        * [MicUp](https://github.com/papergray/MicUp) ✨ - Real-time mic `MIT`
+
+        ### Vendor-specific
+
+        #### MIUI
+
+        * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+        """;
+
+    private const string MovedToExistingCategoryList = """
+        ## Apps
+
+        ### Audio
+
+        * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+          * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+        ### Vendor-specific
+
+        * [MicUp](https://github.com/papergray/MicUp) ✨ - Real-time mic `MIT`
+
+        #### MIUI
+
+        * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+        """;
+
+    private const string RenamedCategoryList = """
+        ## Apps
+
+        ### Sound
+
+        * [MicUp](https://github.com/papergray/MicUp) ✨ - Real-time mic `MIT`
+        * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+          * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+        ### Vendor-specific
+
+        #### MIUI
+
+        * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+        """;
+
+    private const string RenamedSubcategoryList = """
+        ## Apps
+
+        ### Audio
+
+        * [MicUp](https://github.com/papergray/MicUp) ✨ - Real-time mic `MIT`
+        * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+          * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+        ### Vendor-specific
+
+        #### HyperOS
+
+        * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+        """;
+
+    private const string RenamedAndMovedList = """
+        ## Apps
+
+        ### Sound
+
+        * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+          * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+        ### Vendor-specific
+
+        * [MicUp](https://github.com/papergray/MicUp) ✨ - Real-time mic `MIT`
+
+        #### MIUI
+
+        * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+        """;
+
+    private async Task<App> SeedMicUpWithStats()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        micUp.InstallCount = 42;
+        _db.AppInstallDays.Add(new AppInstallDay
+        {
+            App = micUp,
+            Day = new DateOnly(2024, 6, 1),
+            InstallCount = 7,
+        });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        return await _db.Apps.SingleAsync(a => a.Slug == "micup");
+    }
+
+    [Fact]
+    public async Task MovingAnEntryToANewCategoryKeepsIdSlugAndStats()
+    {
+        var before = await SeedMicUpWithStats();
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(MovedToNewCategoryList)], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
+
+        var after = await _db.Apps.SingleAsync(a => a.Url == "https://github.com/papergray/MicUp");
+        Assert.Equal(before.Id, after.Id);
+        Assert.Equal("micup", after.Slug);
+        Assert.Equal(42, after.InstallCount);
+        var productivity = await _db.Categories.SingleAsync(c => c.Name == "Productivity");
+        Assert.Equal(productivity.Id, after.CategoryId);
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
+    }
+
+    [Fact]
+    public async Task MovingAnEntryToAnExistingCategoryKeepsIdSlugAndStats()
+    {
+        var before = await SeedMicUpWithStats();
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(MovedToExistingCategoryList)], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
+
+        var after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(before.Id, after.Id);
+        Assert.Equal(42, after.InstallCount);
+        var vendor = await _db.Categories.SingleAsync(c => c.Name == "Vendor-specific");
+        Assert.Equal(vendor.Id, after.CategoryId);
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
+    }
+
+    [Fact]
+    public async Task RenamingACategoryKeepsTheRowIdentityAndItsApps()
+    {
+        var before = await SeedMicUpWithStats();
+        var audio = await _db.Categories.SingleAsync(c => c.Name == "Audio");
+        var categoryCount = await _db.Categories.CountAsync();
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(RenamedCategoryList)], new Dictionary<string, EntryHistory>(), T1);
+
+        // A heading rename with a stable slug is invisible to API clients:
+        // the row keeps its id, so every app keeps its category slug.
+        Assert.Equal((0, 0, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
+
+        _db.ChangeTracker.Clear();
+        var renamed = await _db.Categories.SingleAsync(c => c.Id == audio.Id);
+        Assert.Equal("Sound", renamed.Name);
+        Assert.Equal("audio", renamed.Slug);
+        Assert.Equal(categoryCount, await _db.Categories.CountAsync());
+        Assert.Equal(0, await _db.Categories.CountAsync(c => c.Slug == "sound"));
+
+        var micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(audio.Id, micUp.CategoryId);
+        Assert.Equal(42, micUp.InstallCount);
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
+    }
+
+    [Fact]
+    public async Task RenamingASubcategoryKeepsTheRowIdentityAndItsApps()
+    {
+        await SeedMicUpWithStats();
+        var miui = await _db.Categories.SingleAsync(c => c.Name == "MIUI");
+        var categoryCount = await _db.Categories.CountAsync();
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(RenamedSubcategoryList)], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 0, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
+
+        _db.ChangeTracker.Clear();
+        var renamed = await _db.Categories.SingleAsync(c => c.Id == miui.Id);
+        Assert.Equal("HyperOS", renamed.Name);
+        Assert.Equal(miui.Slug, renamed.Slug);
+        Assert.Equal(miui.ParentId, renamed.ParentId);
+        Assert.Equal(categoryCount, await _db.Categories.CountAsync());
+
+        var aura = await _db.Apps.SingleAsync(a => a.Slug == "aura");
+        Assert.Equal(miui.Id, aura.CategoryId);
+    }
+
+    [Fact]
+    public async Task RenamingACategoryWhileMovingAnEntryKeepsBothIdentities()
+    {
+        var before = await SeedMicUpWithStats();
+        var audio = await _db.Categories.SingleAsync(c => c.Name == "Audio");
+        var vendor = await _db.Categories.SingleAsync(c => c.Name == "Vendor-specific");
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(RenamedAndMovedList)], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
+
+        _db.ChangeTracker.Clear();
+        var renamed = await _db.Categories.SingleAsync(c => c.Id == audio.Id);
+        Assert.Equal("Sound", renamed.Name);
+        Assert.Equal("audio", renamed.Slug);
+
+        var micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(before.Id, micUp.Id);
+        Assert.Equal(42, micUp.InstallCount);
+        Assert.Equal(vendor.Id, micUp.CategoryId);
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
+    }
+
     [Fact]
     public async Task MissingEntriesAreRemovedWithSlugsReported()
     {

@@ -139,6 +139,11 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         // occurrences are left out and any existing duplicate rows go stale.
         var seenEntries = new HashSet<(Listing, string)>();
 
+        // Renamed headings first: FindOrCreateCategory matches by name, so a
+        // heading the parse dropped would orphan its old row (slug and links
+        // dead) beside a fresh one.
+        ApplyCategoryRenames(categories, apps, docs);
+
         foreach (var doc in docs)
         {
             var listing = MapListing(doc.ListingName);
@@ -289,9 +294,15 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         if (app.Category is not null)
         {
             var idx = categories.IndexOf(app.Category);
-            if (idx >= 0 && categories[idx].Id != 0)
+            if (idx >= 0)
             {
-                return categories[idx].Id;
+                return categories[idx].Id != 0
+                    ? categories[idx].Id
+                    // EF leaves the dependent's FK at its old value while the
+                    // principal key is still zero, so for a category created
+                    // this pass only the tracked instance identifies it. The
+                    // parse keys on the same instance via ParsedCategoryKey.
+                    : ParsedCategoryKey(app.Category);
             }
 
             return app.CategoryId != 0 ? app.CategoryId : ParsedCategoryKey(app.Category);
@@ -346,6 +357,154 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         categories.Add(category);
         db.Categories.Add(category);
         return category;
+    }
+
+    /// <summary>
+    /// A heading renamed in the list has no name left for FindOrCreateCategory
+    /// to match, which used to orphan the old row (empty, its slug dead to
+    /// every cached link and filter) beside a fresh one. A heading that
+    /// vanished and one that appeared in the same scope while sharing the
+    /// vanished row's entry URLs is the same category, so the row is renamed
+    /// in place: id, slug and parent stay put, and apps keep their category
+    /// without touching a single row. Detection that does not fire falls back
+    /// to create-new, which still keeps the apps via move reuse.
+    /// </summary>
+    private static void ApplyCategoryRenames(
+        List<Category> categories, List<App> apps, List<ParsedDocument> docs)
+    {
+        var parsedTop = new Dictionary<(CategorySection Section, string Name), HashSet<string>>();
+        var parsedSub = new Dictionary<(CategorySection Section, string Parent, string Name), HashSet<string>>();
+        foreach (var doc in docs)
+        {
+            foreach (var parsed in doc.Categories)
+            {
+                var section = MapSection(parsed.Section);
+                if (section != CategorySection.Apps)
+                {
+                    continue;
+                }
+
+                var urls = new HashSet<string>(StringComparer.Ordinal);
+                CollectEntryUrls(urls, parsed.Entries);
+                if (parsed.Subcategory is { } sub)
+                {
+                    Bucket(parsedSub, (section, parsed.Name, sub)).UnionWith(urls);
+                }
+                else
+                {
+                    Bucket(parsedTop, (section, parsed.Name)).UnionWith(urls);
+                }
+            }
+        }
+
+        // Top level first: the sub pass resolves parents by name, so it finds
+        // the rows renamed here.
+        foreach (var section in parsedTop.Keys.Select(k => k.Section)
+                     .Concat(parsedSub.Keys.Select(k => k.Section)).Distinct())
+        {
+            var existing = categories.Where(c => c.Section == section && c.ParentId is null).ToList();
+            var existingNames = existing.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+            // A heading with only subheadings has no top-level ParsedCategory
+            // of its own, yet is still present through its children.
+            var present = parsedTop.Keys.Where(k => k.Section == section).Select(k => k.Name)
+                .Concat(parsedSub.Keys.Where(k => k.Section == section).Select(k => k.Parent))
+                .ToHashSet(StringComparer.Ordinal);
+
+            var appeared = parsedTop
+                .Where(kv => kv.Key.Section == section && !existingNames.Contains(kv.Key.Name))
+                .Select(kv => (Name: kv.Key.Name, Urls: kv.Value))
+                .ToList();
+            var vanished = existing
+                .Where(c => !present.Contains(c.Name))
+                .Select(c => (Row: c, Urls: RowUrls(apps, c)))
+                .ToList();
+            RenameBySharedUrls(appeared, vanished);
+        }
+
+        // Subheadings pair per parent row, renamed parents included.
+        foreach (var group in parsedSub.GroupBy(kv => (kv.Key.Section, kv.Key.Parent)))
+        {
+            var parentRow = categories.FirstOrDefault(c =>
+                c.Section == group.Key.Section && c.ParentId is null && c.Name == group.Key.Parent);
+            if (parentRow is null)
+            {
+                continue; // The parent is new, so its subheadings cannot be renames.
+            }
+
+            var existingSubs = categories.Where(c => c.ParentId == parentRow.Id).ToList();
+            var existingNames = existingSubs.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+            var present = group.Select(kv => kv.Key.Name).ToHashSet(StringComparer.Ordinal);
+            var appeared = group
+                .Where(kv => !existingNames.Contains(kv.Key.Name))
+                .Select(kv => (Name: kv.Key.Name, Urls: kv.Value))
+                .ToList();
+            var vanished = existingSubs
+                .Where(c => !present.Contains(c.Name))
+                .Select(c => (Row: c, Urls: RowUrls(apps, c)))
+                .ToList();
+            RenameBySharedUrls(appeared, vanished);
+        }
+    }
+
+    /// <summary>
+    /// Pairs each appeared heading with the vanished row sharing entry URLs
+    /// (strictly more than zero, or it is a delete plus a create) and renames
+    /// the row in place. Greedy in parse order, one row per heading.
+    /// </summary>
+    private static void RenameBySharedUrls(
+        List<(string Name, HashSet<string> Urls)> appeared,
+        List<(Category Row, HashSet<string> Urls)> vanished)
+    {
+        var claimed = new HashSet<Category>();
+        foreach (var (name, urls) in appeared)
+        {
+            Category? best = null;
+            var bestOverlap = 0;
+            foreach (var (row, rowUrls) in vanished)
+            {
+                if (claimed.Contains(row))
+                {
+                    continue;
+                }
+
+                var overlap = rowUrls.Count(urls.Contains);
+                if (overlap > bestOverlap)
+                {
+                    bestOverlap = overlap;
+                    best = row;
+                }
+            }
+
+            if (best is not null)
+            {
+                claimed.Add(best);
+                best.Name = name;
+            }
+        }
+    }
+
+    private static HashSet<string> Bucket<T>(Dictionary<T, HashSet<string>> map, T key)
+        where T : notnull
+    {
+        if (!map.TryGetValue(key, out var set))
+        {
+            set = new HashSet<string>(StringComparer.Ordinal);
+            map[key] = set;
+        }
+
+        return set;
+    }
+
+    private static HashSet<string> RowUrls(List<App> apps, Category row) =>
+        apps.Where(a => a.CategoryId == row.Id).Select(a => a.Url).ToHashSet(StringComparer.Ordinal);
+
+    private static void CollectEntryUrls(HashSet<string> urls, List<ParsedEntry> entries)
+    {
+        foreach (var e in entries)
+        {
+            urls.Add(e.Url);
+            CollectEntryUrls(urls, e.Children);
+        }
     }
 
     private void UpsertEntry(

@@ -156,6 +156,8 @@ bundle` is rebuilt per deploy, never committed.
 
 - **categories** - `slug` unique; self-referencing `parent_id`
   (max depth 2 in real data); `section` (`apps|libraries|misc`).
+  A renamed list heading reuses the existing row (name updated, id
+  and slug unchanged), so category links and filters keep working.
 - **apps** - one awesome-list entry. `slug` globally unique and
   **stable across renames**. `url` is deliberately **non-unique**
   across listings, but within one listing a URL maps to a single row:
@@ -577,7 +579,17 @@ bundle` is rebuilt per deploy, never committed.
 - **Upserter** (`Sync/CatalogUpserter`): matches rows by
   `(listing, url, category)`. Rows from sections no longer ingested
   (libraries, misc) sweep out as stale, and closed rows sweep when the
-  closed list drops them. Same-URL
+  closed list drops them. Before any entry is matched, renamed category
+  headings are applied in place: a heading the parse dropped is paired
+  with a newly appeared heading of the same section (top level, or under
+  the same parent for subcategories) when the two share at least one
+  entry URL, and the existing row takes the new name while keeping its
+  id, slug and apps, so old category links keep serving (the name is
+  read live from `/v1/categories`; no app update is emitted). Unpaired
+  headings stay a delete-and-create, and an entry moved into a category
+  first seen this pass keeps its row too: while the new category's key
+  is still zero the parse identifies it by its tracked instance, so the
+  move is not swept as stale. Same-URL
   rename keeps id + slug and moves the row to the new category; a URL
   repeated in another category is a duplicate and is skipped. Stale
   `(url, category)` pairs, including duplicates created by earlier

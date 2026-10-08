@@ -18,6 +18,7 @@ The client has a setting to show these entries which is off by default.
 | New release on Play/Codeberg/other sites | within 24 hours |
 | List entry added/edited | within 30 minutes (+ analysis time) |
 | List entry renamed or moved to a new repo URL | within 30 minutes; slug, install counts and overrides stay with the entry |
+| List entry moved to another category, or a category heading renamed | within 30 minutes; the entry keeps its slug, install counts and overrides, and the category keeps its id and slug |
 | Entry hidden or restored by an operator | applied by the next full catalog pass (usually the nightly one) |
 | Metadata refresh (GitHub stars, etc.) | within 24 hours |
 | New screenshots added or removed | F-Droid/Izzy shots refresh within 24 hours; the app repo is re-scanned every week and dead URLs are cleared on the next scan |
@@ -34,6 +35,11 @@ slug, install counts and operator overrides over. If a new entry would take
 the slug of an entry that just left the list, the server keeps the existing
 entry and records a catalog issue instead of creating a second entry with a
 suffixed slug. Both cases show up under `GET /v1/issues` (kind `catalog`).
+
+Category changes behave the same way: moving an entry to another category
+updates the row in place (even when the move creates the category), and a
+renamed category heading renames the existing category row instead of
+adding a second one, so its id, slug and apps all stay put.
 
 An operator can also hide an entry server-side (for example an abandoned
 project whose package conflicts with a maintained app). Hiding keeps the
