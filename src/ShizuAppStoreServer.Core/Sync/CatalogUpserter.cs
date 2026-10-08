@@ -649,6 +649,15 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 {
                     match.UpdatedAt = ts;
                 }
+                else if (commitNow > match.UpdatedAt)
+                {
+                    // Silent commits are filtered out of the history, so a row
+                    // moved by one carries a date older than its enrichment
+                    // stamps. Fall back to the write clock: the change must
+                    // still cross a client's /v1/changes cursor. `changed` only
+                    // fires on a real write, so this cannot churn every pass.
+                    match.UpdatedAt = commitNow;
+                }
 
                 updated++;
             }

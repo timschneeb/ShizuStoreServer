@@ -567,6 +567,37 @@ public sealed class CatalogUpserterTests : IDisposable
     }
 
     [Fact]
+    public async Task StaleHistoryCategoryMoveStillAdvancesChangeClock()
+    {
+        var before = await SeedMicUpWithStats();
+
+        // Enrichment stamped the row after the last history entry, which is
+        // what a [silent] list commit leaves behind (silent commits never
+        // reach the history dictionary). ListUpdatedAt already carries that
+        // same history date, so re-writing it must not mask the test via the
+        // DbContext summary bump.
+        before.UpdatedAt = T1;
+        before.ListUpdatedAt = T0;
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        var history = new Dictionary<string, EntryHistory>
+        {
+            ["https://github.com/papergray/MicUp"] = new EntryHistory(T0, T0),
+        };
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(MovedToNewCategoryList)], history, T1);
+
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+
+        var after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(before.Id, after.Id);
+        // The move must cross a client's /v1/changes cursor even though the
+        // history date predates the row's own enrichment stamp.
+        Assert.True(after.UpdatedAt > T1, $"change clock stuck at {after.UpdatedAt:O}");
+    }
+
+    [Fact]
     public async Task RenamingACategoryKeepsTheRowIdentityAndItsApps()
     {
         var before = await SeedMicUpWithStats();

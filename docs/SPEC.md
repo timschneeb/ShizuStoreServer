@@ -589,7 +589,12 @@ bundle` is rebuilt per deploy, never committed.
   headings stay a delete-and-create, and an entry moved into a category
   first seen this pass keeps its row too: while the new category's key
   is still zero the parse identifies it by its tracked instance, so the
-  move is not swept as stale. Same-URL
+  move is not swept as stale. The change clock follows the entry's
+  history when that date is newer than the row, and falls back to the
+  write clock otherwise: `[silent]` housekeeping commits are filtered
+  out of the history, so a row changed only by one would keep an
+  enrichment-era `updated_at` and never reach a client's
+  `/v1/changes` cursor. Same-URL
   rename keeps id + slug and moves the row to the new category; a URL
   repeated in another category is a duplicate and is skipped. Stale
   `(url, category)` pairs, including duplicates created by earlier
