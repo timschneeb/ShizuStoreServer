@@ -1387,7 +1387,9 @@ exception clears the change tracker and closes the run as
    current branch to its upstream (`git merge --ff-only`), so the
    working tree the pass reads is current. The clone is never written
    to locally, so a fast-forward that cannot apply (diverged history,
-   dirty tree) deletes the clone and re-clones it from origin.
+   dirty tree) empties the clone directory and re-clones it from
+   origin (the directory is a systemd `ReadWritePaths` mount and
+   cannot itself be removed).
 3. Compares HEAD against the latest run's commit: unchanged HEAD +
    no requests + no `force` → enrich due-only apps plus
    poll-changed apps (forced), materialize operator overrides and the

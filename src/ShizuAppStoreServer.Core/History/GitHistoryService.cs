@@ -65,8 +65,8 @@ public sealed partial class GitHistoryService(ILogger<GitHistoryService>? log = 
     /// <summary>
     /// Fast-forwards the checked-out branch to its upstream. The clone is
     /// worker-owned (production never writes to it), so a fast-forward that
-    /// cannot apply (diverged history, dirty tree) is recovered by deleting
-    /// and re-cloning instead of leaving the sync on a stale list.
+    /// cannot apply (diverged history, dirty tree) is recovered by emptying
+    /// the clone and re-cloning instead of leaving the sync on a stale list.
     /// </summary>
     private async Task FastForwardAsync(string repoPath, CancellationToken ct)
     {
@@ -103,7 +103,7 @@ public sealed partial class GitHistoryService(ILogger<GitHistoryService>? log = 
 
     /// <summary>
     /// Replaces a broken clone with a fresh one. The remote URL is the only
-    /// state worth keeping, so it is read before the directory is deleted.
+    /// state worth keeping, so it is read before the directory is emptied.
     /// </summary>
     private static async Task RecloneAsync(string repoPath, CancellationToken ct)
     {
@@ -113,7 +113,21 @@ public sealed partial class GitHistoryService(ILogger<GitHistoryService>? log = 
             ?? throw new InvalidOperationException($"Cannot resolve the parent of '{repoPath}'.");
         if (Directory.Exists(full))
         {
-            Directory.Delete(full, recursive: true);
+            // The clone directory is a ReadWritePaths mount in production
+            // (ProtectSystem=strict): removing the directory itself needs
+            // write access to its read-only parent and always fails, so only
+            // the contents are cleared and git re-uses the existing directory.
+            foreach (var entry in Directory.GetFileSystemEntries(full))
+            {
+                if (Directory.Exists(entry))
+                {
+                    Directory.Delete(entry, recursive: true);
+                }
+                else
+                {
+                    File.Delete(entry);
+                }
+            }
         }
 
         await RunGitAsync(parent, $"clone \"{url}\" \"{full}\"", ct);

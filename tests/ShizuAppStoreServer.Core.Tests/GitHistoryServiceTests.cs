@@ -186,6 +186,76 @@ public sealed class GitHistoryServiceTests
         }
     }
 
+    [Fact]
+    public async Task FetchAsyncReclonesWhenCloneDirectoryCannotBeRemoved()
+    {
+        if (!GitAvailable() || OperatingSystem.IsWindows())
+        {
+            // Needs the git CLI and Unix directory modes.
+            return;
+        }
+
+        var root = TempRoot();
+        try
+        {
+            var (_, clone, other) = await InitTwoClonesAsync(root);
+            await File.WriteAllTextAsync(Path.Combine(clone, "local-only.txt"), "mine\n");
+            await CommitAllAsync(clone, "local commit");
+            await File.WriteAllTextAsync(Path.Combine(other, "README.md"), "list v2\n");
+            await CommitAllAsync(other, "update list");
+            await GitAsync(other, "push origin master");
+            var remoteHead = (await GitAsync(other, "rev-parse HEAD")).Trim();
+
+            // Production mounts the clone under ProtectSystem=strict: its
+            // parent is read-only while the clone itself stays writable.
+            File.SetUnixFileMode(root, ReadExecuteMode);
+            try
+            {
+                if (CanCreateInside(root))
+                {
+                    // Permission checks do not apply (root); the constraint
+                    // this test exists for cannot be reproduced here.
+                    return;
+                }
+
+                await new GitHistoryService().FetchAsync(clone);
+            }
+            finally
+            {
+                File.SetUnixFileMode(root, ReadWriteExecuteMode);
+            }
+
+            Assert.Equal(remoteHead, (await GitAsync(clone, "rev-parse HEAD")).Trim());
+            Assert.Equal("list v2\n", await File.ReadAllTextAsync(Path.Combine(clone, "README.md")));
+            Assert.False(File.Exists(Path.Combine(clone, "local-only.txt")));
+        }
+        finally
+        {
+            File.SetUnixFileMode(root, ReadWriteExecuteMode);
+            TryDelete(root);
+        }
+    }
+
+    private static UnixFileMode ReadWriteExecuteMode =>
+        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+    private static UnixFileMode ReadExecuteMode =>
+        UnixFileMode.UserRead | UnixFileMode.UserExecute;
+
+    private static bool CanCreateInside(string dir)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(dir, "probe"));
+            Directory.Delete(Path.Combine(dir, "probe"));
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private static bool GitAvailable()
     {
         try

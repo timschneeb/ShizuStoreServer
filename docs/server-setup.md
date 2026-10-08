@@ -443,7 +443,8 @@ The fast loop `git fetch`es before each pass, fast-forwards the local
 branch to its upstream (`git merge --ff-only`), and records the HEAD in
 `job_runs.reference` (the latest `kind=Sync` row). The clone is never edited locally; if a
 fast-forward cannot apply (diverged history or a dirty tree) the worker
-deletes the clone and re-clones it from origin.
+empties the clone directory and re-clones it from origin (the directory
+is a `ReadWritePaths` mount and cannot itself be removed).
 
 ## Metrics
 
@@ -507,7 +508,8 @@ sidecar node_exporter (job `node-zbox`) and from srv1's node_exporter (job
 lanraragi) and is reachable on the LAN and tailnet only. Unified alerting is
 provisioned from `grafana/provisioning/alerting/`: six ShizuStore health rules
 (API and storefront scrape down, p95 latency, sync stalled, storefront 5xx)
-delivered to a Telegram contact point. `GF_SERVER_ROOT_URL` must stay the
+delivered to a Telegram contact point; the sync stalled rule is paused with
+`isPaused: true` (the file-provisioning key, not `is_paused`). `GF_SERVER_ROOT_URL` must stay the
 public Grafana hostname or Telegram drops the message link.
 
 srv1 side: install `prometheus-node-exporter`, add the basic-auth `web.yml`,
