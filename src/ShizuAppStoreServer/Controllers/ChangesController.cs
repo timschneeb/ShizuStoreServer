@@ -17,7 +17,10 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
     /// Apps added/updated plus slugs removed since <c>since</c> (ISO-8601, required).
     /// <c>added = added_at >= since</c>
     /// <c>updated = updated_at >= since</c> excluding already-added rows;
-    /// <c>removed</c> = tombstones with <c>removed_at >= since</c>.
+    /// <c>removed</c> = tombstones with <c>removed_at >= since</c>, minus
+    /// tombstones whose slug still has a live row among the requested
+    /// listings (those record a listing move, which the moved row itself
+    /// reports through added/updated).
     /// <c>installsUpdated</c> maps slug to install count for rows whose
     /// count moved since <c>since</c>; it never triggers refetches, clients
     /// apply it onto their stored rows directly.
@@ -91,10 +94,16 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
             .OrderBy(a => a.UpdatedAt).ThenBy(a => a.Id)
             .ToList();
 
+        var liveSlugs = all.Select(a => a.Slug).ToHashSet(StringComparer.Ordinal);
         var removed = (await db.RemovedApps.AsNoTracking()
                 .Where(t => listings.Contains(t.Listing))
                 .ToListAsync(ct))
-            .Where(t => t.RemovedAt >= sinceValue)
+            // A tombstone whose slug still has a live row among the requested
+            // listings records a listing move, not a deletion: the row left one
+            // listing for another. Clients of the new listing keep it (it rides
+            // along in added/updated), so only clients scoped to the listing it
+            // left must see the removal.
+            .Where(t => t.RemovedAt >= sinceValue && !liveSlugs.Contains(t.Slug))
             .OrderBy(t => t.RemovedAt).ThenBy(t => t.Id)
             .ToList();
 

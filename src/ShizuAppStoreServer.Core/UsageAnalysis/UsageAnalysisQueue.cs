@@ -15,7 +15,10 @@ namespace ShizuAppStoreServer.Core.UsageAnalysis;
 /// variant app rows are analyzed on their own, so a variant release refreshes
 /// the variant report. A changed artifact of a release whose report is
 /// already stored (same release tag) is skipped: one release ships one run
-/// even when it carries several same-package flavor artifacts.
+/// even when it carries several same-package flavor artifacts. Closed-source
+/// listing rows are never eligible: they publish no source for the agent to
+/// read, which is also why the upserter drops their stored report when an
+/// entry moves into that listing.
 /// </summary>
 public interface IUsageAnalysisQueue
 {
@@ -41,8 +44,8 @@ public interface IUsageAnalysisQueue
     /// <summary>
     /// Operator backfill. <paramref name="onlyMissing"/> queues only apps with
     /// no stored analysis; <paramref name="includeStale"/> queues apps whose
-    /// analysis predates the current prompt/analysis generation. Returns the
-    /// number of runs added.
+    /// analysis predates the current prompt/analysis generation. Closed-source
+    /// listing rows are never queued. Returns the number of runs added.
     /// </summary>
     Task<int> BackfillAsync(
         bool onlyMissing, bool includeStale, bool force, string? slug, int? limit, CancellationToken ct = default);
@@ -72,8 +75,10 @@ public sealed class UsageAnalysisQueue(
         // ApplyAnalysisAsync records the download before it flips the row to
         // DirectApk, so requiring DirectApk here would silently drop every
         // first analysis of a new app. The caller only records artifacts it
-        // analyzed, and those always serve a direct APK.
-        if (!options.IsConfigured || (!artifactChanged && !firstAnalysis) || !HasAnalyzableRepo(app))
+        // analyzed, and those always serve a direct APK. The listing gate
+        // still applies: a closed-source entry publishes no source to read.
+        if (!options.IsConfigured || (!artifactChanged && !firstAnalysis)
+            || app.Listing != Listing.Main || !HasAnalyzableRepo(app))
         {
             return false;
         }
@@ -207,9 +212,15 @@ public sealed class UsageAnalysisQueue(
         return added;
     }
 
-    /// <summary>Direct-APK app (root or variant) with a GitHub/GitLab repo to read.</summary>
+    /// <summary>
+    /// Main-listing row (root or variant), DirectApk, with a GitHub/GitLab
+    /// repo to read. Closed-source rows publish no source, so they are never
+    /// analyzed.
+    /// </summary>
     private static bool IsEligible(App app) =>
-        app.Availability == Availability.DirectApk && HasAnalyzableRepo(app);
+        app.Listing == Listing.Main
+        && app.Availability == Availability.DirectApk
+        && HasAnalyzableRepo(app);
 
     private static bool HasAnalyzableRepo(App app) =>
         app.Id != 0

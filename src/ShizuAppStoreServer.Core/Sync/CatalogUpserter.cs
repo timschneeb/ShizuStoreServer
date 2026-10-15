@@ -27,6 +27,12 @@ public sealed record UpsertCounts(
 /// (e.g. <c>fluffy</c>, <c>krude</c>); those stay separate rows.</item>
 /// <item>An entry whose old <c>(url, category)</c> location vanished is treated
 /// as a move: the row is reused, not deleted + recreated.</item>
+/// <item>An entry that switched listings (main &lt;-&gt; closed_source) keeps its
+/// URL, so it is a move of the same row: the <c>listing</c> column flips and
+/// the row keeps id, slug, stats and overrides. A tombstone is recorded for the
+/// listing it left, so clients scoped to that listing drop it, and
+/// <c>GET /v1/changes</c> hides that tombstone from clients that also follow
+/// the new listing (they receive the moved row itself instead).</item>
 /// <item>An entry whose URL changed outright is adopted onto the vanished row
 /// when exactly one row in the listing matches by name, or by author plus
 /// description; the row keeps its id, slug, stats and overrides.</item>
@@ -195,6 +201,33 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             allApps.Where(a => a.RootAppId is { } rootId && staleRootIds.Contains(rootId)).ToList(),
             commitNow);
 
+        // Variants copy their root's listing once at creation and never take
+        // part in list matching, so a root that switched listings this pass
+        // would otherwise leave its children served under the old listing.
+        var liveRoots = apps
+            .Where(a => a.Id != 0 && !staleRootIds.Contains(a.Id))
+            .ToDictionary(a => a.Id);
+        foreach (var variant in allApps)
+        {
+            if (variant.RootAppId is not { } rootId
+                || !liveRoots.TryGetValue(rootId, out var root)
+                || variant.Listing == root.Listing)
+            {
+                continue;
+            }
+
+            var left = variant.Listing;
+            variant.Listing = root.Listing;
+            // The change clock, so clients of the new listing gain the child
+            // row and clients of the old one see it go.
+            variant.UpdatedAt = commitNow;
+            RecordListingDeparture(tombstones, variant, left, commitNow);
+            if (root.Listing == Listing.ClosedSource)
+            {
+                ClearUsageReport(variant);
+            }
+        }
+
         db.Apps.RemoveRange(stale);
 
         await db.SaveChangesAsync(ct);
@@ -221,6 +254,59 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             existing.Listing = app.Listing;
             existing.RemovedAt = removedAt;
         }
+    }
+
+    /// <summary>
+    /// Records (or refreshes) the tombstone for a listing a live row just left,
+    /// so clients that only follow that listing drop it while clients of the
+    /// new listing keep the row. Slugs are unique in <c>removed_apps</c>, so a
+    /// tombstone naming the listing the row just re-entered is cleared instead,
+    /// the same way a re-added slug clears its own.
+    /// </summary>
+    private void RecordListingDeparture(
+        List<RemovedApp> tombstones, App app, Listing left, DateTimeOffset removedAt)
+    {
+        var existing = tombstones.FirstOrDefault(t => t.Slug == app.Slug);
+        if (existing is not null && existing.Listing == app.Listing)
+        {
+            tombstones.Remove(existing);
+            db.RemovedApps.Remove(existing);
+            return;
+        }
+
+        if (existing is null)
+        {
+            existing = new RemovedApp { Slug = app.Slug };
+            tombstones.Add(existing);
+            db.RemovedApps.Add(existing);
+        }
+
+        existing.Name = app.Name;
+        existing.Listing = left;
+        existing.RemovedAt = removedAt;
+    }
+
+    /// <summary>
+    /// Drops the stored AI source report (report columns plus the generation
+    /// markers) so the row reads as never analyzed. A closed-source entry
+    /// publishes no source for the agent to read, so text generated from the
+    /// revision that was still public would keep serving code that is gone;
+    /// clearing the release ref also keeps a later analysis from being skipped
+    /// as already analyzed.
+    /// </summary>
+    private static void ClearUsageReport(App app)
+    {
+        app.UsageShort = null;
+        app.UsageMarkdown = null;
+        app.UsageMarkdownUsage = null;
+        app.UsageMarkdownApiUsage = null;
+        app.UsageMarkdownNotableDetails = null;
+        app.UsageAnalyzedAt = null;
+        app.UsageModel = null;
+        app.UsageCommit = null;
+        app.UsageReleaseRef = null;
+        app.UsagePromptVersion = 0;
+        app.UsageAnalysisVersion = 0;
     }
 
     private static HashSet<Location> CollectLocations(List<ParsedDocument> docs)
@@ -548,6 +634,14 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             adoptionMatches = matched;
         }
 
+        // An entry that switched lists carries the same URL, but adoption only
+        // looks inside one listing, so without this the clash guard below would
+        // keep the old listing's row and drop the entry from the new listing.
+        if (match is null)
+        {
+            match = FindListingMoveTarget(apps, parsedUrls, listing, entry);
+        }
+
         if (match is null)
         {
             var clash = FindSlugClash(apps, parsedUrls, entry.Slug);
@@ -612,7 +706,9 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         }
         else
         {
-            var changed = match.Name != entry.Name
+            var leftListing = match.Listing;
+            var changed = match.Listing != listing
+                || match.Name != entry.Name
                 || match.Url != entry.Url
                 || match.Description != entry.Description
                 || match.License != entry.License
@@ -639,6 +735,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             match.HasAds = entry.HasAds;
             match.TrialDays = entry.TrialDays;
             match.RequiresRoot = entry.RequiresRoot;
+            match.Listing = listing;
             match.Category = category;
             match.Parent = parent;
 
@@ -660,6 +757,19 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 }
 
                 updated++;
+            }
+
+            if (leftListing != listing)
+            {
+                // The row left a listing: its clients only learn that from a
+                // tombstone, because the row itself now rides in the other
+                // listing's buckets.
+                RecordListingDeparture(tombstones, match, leftListing, commitNow);
+
+                if (listing == Listing.ClosedSource)
+                {
+                    ClearUsageReport(match);
+                }
             }
 
             // History is authoritative for both the introduction and the
@@ -758,6 +868,25 @@ public sealed class CatalogUpserter(ShizuDbContext db)
     /// </summary>
     private static App? FindSlugClash(List<App> apps, HashSet<(Listing, string)> parsedUrls, string slug) =>
         apps.FirstOrDefault(a => a.Id != 0 && a.Slug == slug && !parsedUrls.Contains((a.Listing, a.Url)));
+
+    /// <summary>
+    /// Listing move: exactly one root row of another listing carries this URL
+    /// and that listing no longer parses it, so the entry switched lists
+    /// (main &lt;-&gt; closed_source) instead of forking. The row is reused and
+    /// its <c>listing</c> flips; a URL still listed in both files is a genuine
+    /// per-listing duplicate and stays out of this.
+    /// </summary>
+    private static App? FindListingMoveTarget(
+        List<App> apps, HashSet<(Listing, string)> parsedUrls, Listing listing, ParsedEntry entry)
+    {
+        var candidates = apps
+            .Where(a => a.Id != 0
+                && a.Listing != listing
+                && a.Url == entry.Url
+                && !parsedUrls.Contains((a.Listing, a.Url)))
+            .ToList();
+        return candidates.Count == 1 ? candidates[0] : null;
+    }
 
     /// <summary>
     /// Move reuse: exactly one row carries this URL elsewhere in the listing

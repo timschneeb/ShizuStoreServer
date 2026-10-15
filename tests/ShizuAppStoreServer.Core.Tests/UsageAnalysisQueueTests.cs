@@ -190,6 +190,25 @@ public sealed class UsageAnalysisQueueTests : IDisposable
     }
 
     [Fact]
+    public async Task ClosedSourceRowsAreNeverAnalyzed()
+    {
+        var closed = NewApp("closed");
+        closed.Listing = Listing.ClosedSource;
+        var closedMissing = NewApp("closed-missing");
+        closedMissing.Listing = Listing.ClosedSource;
+        _db.SaveChanges();
+        var queue = new UsageAnalysisQueue(_db, _options);
+
+        // A closed-source entry publishes no source for the agent to read, so
+        // neither the artifact hook nor an operator backfill may queue it.
+        Assert.False(await queue.EnqueueAsync(closed, artifactChanged: true, firstAnalysis: false));
+        Assert.False(await queue.EnqueueForAnalyzedArtifactAsync(closed, artifactChanged: true, firstAnalysis: false));
+        Assert.Equal(0, await queue.BackfillAsync(
+            onlyMissing: true, includeStale: true, force: true, slug: null, limit: null));
+        Assert.Empty(_db.UsageAnalysisRuns);
+    }
+
+    [Fact]
     public async Task EnqueueSkipsWhenAnActiveRunExists()
     {
         var app = NewApp("active");

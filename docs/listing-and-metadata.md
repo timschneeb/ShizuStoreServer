@@ -19,6 +19,7 @@ The client has a setting to show these entries which is off by default.
 | List entry added/edited | within 30 minutes (+ analysis time) |
 | List entry renamed or moved to a new repo URL | within 30 minutes; slug, install counts and overrides stay with the entry |
 | List entry moved to another category, or a category heading renamed | within 30 minutes; the entry keeps its slug, install counts and overrides, and the category keeps its id and slug |
+| List entry moved to the closed-source list, or back to the main list | within 30 minutes; the entry keeps its slug, install counts and overrides, clients following the list it left drop it, and its AI usage report is dropped on the way into the closed list |
 | Entry hidden or restored by an operator | applied by the next full catalog pass (usually the nightly one) |
 | Metadata refresh (GitHub stars, etc.) | within 24 hours |
 | New screenshots added or removed | F-Droid/Izzy shots refresh within 24 hours; the app repo is re-scanned every week and dead URLs are cleared on the next scan |
@@ -40,6 +41,19 @@ Category changes behave the same way: moving an entry to another category
 updates the row in place (even when the move creates the category), and a
 renamed category heading renames the existing category row instead of
 adding a second one, so its id, slug and apps all stay put.
+
+Switching lists behaves the same way: an entry moved from the main list
+to `pages/CLOSED_SOURCE.md` (or back) keeps its store entry, so its slug,
+install counts and operator overrides stay with it instead of a second
+entry appearing. Clients that only show the list the entry left drop it
+from their catalog, and clients of the new list pick the same entry up.
+
+The AI usage report ("How this app uses Shizuku") is the one thing that
+does not travel: it is generated from published source, so closed-source
+entries are never analyzed, and the report of an entry that moves into
+the closed list is dropped in the same pass instead of describing code
+that is no longer public. Moving such an entry back to the main list
+leaves it unreported until the analyzer runs again.
 
 An operator can also hide an entry server-side (for example an abandoned
 project whose package conflicts with a maintained app). Hiding keeps the

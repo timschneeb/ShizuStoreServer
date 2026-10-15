@@ -743,6 +743,30 @@ The next `/v1/changes` response carries the timestamp as
 `catalogPurgeRequestedAt`; the endpoint's 30s output cache and each
 client's sync cadence bound how fast it spreads.
 
+A stored AI usage report describes the source revision it was generated
+from, so it goes stale when that source stops being published (an entry
+moved to the closed-source list and dropped its code). Clear it: null the
+report columns, reset the generation markers to 0 (never analyzed) and
+bump `updated_at`, which is the detail endpoint's ETag clock, so cached
+clients refetch instead of holding the old text through a 304:
+
+```bash
+sudo -u postgres psql -d shizuappstore -c "
+UPDATE apps SET
+  usage_short = NULL, usage_markdown = NULL,
+  usage_markdown_usage = NULL, usage_markdown_api_usage = NULL,
+  usage_markdown_notable_details = NULL, usage_analyzed_at = NULL,
+  usage_model = NULL, usage_commit = NULL, usage_release_ref = NULL,
+  usage_prompt_version = 0, usage_analysis_version = 0,
+  updated_at = now()
+WHERE slug = 'battery-health-tracker';"
+```
+
+The `usage_analysis_runs` rows stay put: they are the token and cost
+history behind `GET /v1/admin/usage-analysis/stats`. The app now reads
+as never analyzed, so an `{"onlyMissing":true}` queue request or a later
+artifact change analyzes it again.
+
 `appsettings.Production.json` is written before the first
 `deploy.sh` run, because the rsync into `app/` excludes it and the
 migration bundle needs the connection string. Later passes are cheap: a

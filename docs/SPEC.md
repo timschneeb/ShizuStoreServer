@@ -401,8 +401,12 @@ bundle` is rebuilt per deploy, never committed.
   loses its trigger.
 - **removed_apps** - tombstones closing the delete path:
   `slug` unique + `removed_at` index. Written (add-or-refresh) on
-  stale delete and when the Shizuku-permission gate (§5.3) excludes a
-  row, cleared on re-add (resurrection) or when the gate heals a row.
+  stale delete, when the Shizuku-permission gate (§5.3) excludes a
+  row, and when a row switches listing: the row stays live there, the
+  tombstone names the listing it left and `GET /v1/changes` hides it
+  from clients that also follow the row's new listing. Cleared on
+  re-add (resurrection), when a row returns to the listing its
+  tombstone names, or when the gate heals a row.
 - **config_flags** - operator-controlled flags (`key` PK, `value`,
   `updated_at`), read live on every use so flips need no restart. A
   missing row reads as its documented default; `GET`s never insert.
@@ -609,7 +613,18 @@ bundle` is rebuilt per deploy, never committed.
   catalog issue (§7.1). A new entry whose slug is still held by a live
   root row that left the parse is skipped, so the owner keeps its slug
   and no `-2` row appears; that `slug_clash` is recorded as a catalog
-  issue too. Slug suffixes remain only for same-pass duplicates, category
+  issue too. An entry that keeps its URL but switches listing (main to
+  `closed_source` or back) is neither a delete nor a clash: it reuses
+  its row, flips the row's `listing` and keeps id, slug, install stats
+  and `app_overrides`, and records a tombstone for the listing it left
+  so clients scoped to that listing drop it (§8 hides that tombstone
+  from clients that also follow the new listing, who receive the moved
+  row itself). A move into `closed_source` also drops the AI usage
+  report of the moved row and of its variants (§5.4): it describes a
+  source revision the entry no longer publishes, and those rows read as
+  never analyzed afterwards. Variants follow their root's listing in the
+  same pass.
+  Slug suffixes remain only for same-pass duplicates, category
   slugs, variant slugs and parser collisions. When a stale root with
   `install_count > 0` is hard-deleted, the delete is recorded as a
   `stale_with_installs` catalog issue, because its install history
@@ -1190,9 +1205,12 @@ marker scanning survives only as internal context extraction.
   availability gate to the general policy. Only `DirectApk` rows
   are eligible there, root and variant alike: each app row carries its own
   report, and a variant release refreshes the variant's report. Play-redirect,
-  link-only and excluded rows are never analyzed. A row that becomes
-  `DirectApk` later is analyzed on its first checksum, and existing reports
-  are kept, not deleted.
+  link-only and excluded rows are never analyzed, and neither are
+  `closed_source` listing rows: they publish no source for the agent to
+  read. A row that becomes `DirectApk` later is analyzed on its first
+  checksum, and existing reports are kept, not deleted; the report of an
+  entry that moves into the closed-source listing is the exception the
+  upserter drops for the same reason (§4).
 - Source revision: the repo is resolved from the list URL/source URL. The
   checkout prefers the release the served artifact came from: the
   `release_tag` recorded at enrichment, else the tag parsed from the
@@ -1646,7 +1664,7 @@ rather than persisting them.
 | `GET /v1/apps` | Filters: `category` (subtree incl. subcategories, unknown → 400), `q` (case-insensitive contains over name/description/package), `license` (case-insensitive exact), `availability`/`type` (parse or 400), `listing` (comma-separated `main|closed_source`, default `main`, unknown → 400), `recommended` (`true|false` or 400). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. `sort` ∈ `updated|added|name|stars|downloads` (default `updated`, else 400); `order` ∈ `asc|desc`, default desc except `name` → asc. Ordering + paging run in memory (identical semantics on both DB providers). Output-cached 60s, `VaryByQuery(*)`. |
 | `GET /v1/apps/{slug}` | Full detail: summary fields + URLs, `source_kind`, version, `category_path` (root→leaf) + `parent_slug`, `added_at`, `last_checked_at`, `author_url`, `permissions[]`, `full_description`, `readme_url`, `changelog`, `changelog_url`, `screenshots[]`, `usageShort`, `usageMarkdown`, `usageAnalyzedAt`, `downloads[]` (primary first, then `versionCode` desc; each entry: `source`, `packageName`, `apkUrl`, `archiveEntry`, `versionCode`, `versionName`, `size`, `sha256`, `sigSha256`, `sigMd5`, `minSdk`, `abi`, `targetSdk`, `compileSdk`, `locales`, `abis`, `localizedLabels`, `signerDn`, `signerScheme`, `signerKeyAlgorithm`, `dhizukuDeclared`, `trackers`, `trackerTags`, `primary`). Top-level version/sig fields come from the primary download; the old flattened `apkUrl`/`apkSize`/`apkSha256`/`apkArchiveEntry` fields and the `fdroidVariant` object are gone. When `apkUrl` is a zip, `archiveEntry` names the APK inside (clients must extract it). ETag `"{ticks}-{id}"`; `If-None-Match` → 304. Output-cached 60s. |
 | `GET /v1/categories` | Tree with per-node subtree app counts over the requested `listing` set (comma-separated, default `main`; excluded and unpublished omitted). Roots and children are name-sorted (case-insensitive, id breaks ties). ETag from count + id-sum + max `updated_at`; `If-None-Match` → 304. Output-cached 5min. |
-| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since) - all oldest-first, excluded and unpublished hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. `generated_at` is captured before the response's reads and is the cursor clients must persist: a client-side clock (or a later `/v1/meta` timestamp) can pass a concurrent enrichment commit and skip the update forever. Output-cached 30s, `VaryByQuery(*)`. |
+| `GET /v1/changes?since=` | `since` required ISO-8601 else 400. Optional `listing` (comma-separated, default `main`, else 400) scopes every bucket. `added` (`added_at` ≥ since), `updated` (`updated_at` ≥ since but added before), `removed` (tombstones ≥ since, minus tombstones whose slug still has a live row among the requested listings, which record a listing move reported by the moved row itself) - all oldest-first, excluded and unpublished hidden. `installsUpdated` maps slug → install count for rows whose count moved since `since` (`install_count_updated_at` ≥ since); it carries no summaries, so clients apply it onto stored rows without refetching. `catalogPurgeRequestedAt` is the `config_flags` high-water mark for remote catalog purges (null = never requested); a client that recorded an older value wipes its cached app list and downloads (never user data) and bootstraps. `generated_at` is captured before the response's reads and is the cursor clients must persist: a client-side clock (or a later `/v1/meta` timestamp) can pass a concurrent enrichment commit and skip the update forever. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/issues` | Health snapshot from the latest completed run: `runId`, `headCommit` (null before the first pass), `summary` (parse/enrich/quality/catalog/total counts over the whole snapshot), `items[]` (`kind`, `rule`, `slug`, `message`, `location`) oldest by kind/rule/slug. Filters: `kind` (`parse\|enrich\|quality\|catalog`, else 400), `rule` (exact). `page` ≥ 1 else 400; `pageSize` clamped 1–200, default 50. Summary counts ignore the filters. ETag `"runId-count"`; `If-None-Match` → 304. Output-cached 30s, `VaryByQuery(*)`. |
 | `GET /v1/meta` | `generated_at`, latest run's `list_commit` (null before the first pass), counts (published, non-excluded apps, categories), `use_install_counts_for_popularity` (the `config_flags` row below; missing row reads as false). Output-cached 60s. |
 | `GET /healthz` | `{"status":"ok"}`. No rate limit, no cache. |
@@ -1660,7 +1678,7 @@ rather than persisting them.
 | `POST /v1/admin/refresh-screenshots` | Same token rules. Starts the in-process screenshots refresh (`RefreshScreenshotsAsync`) and returns 202 with the running status; poll `GET` for progress. Re-resolves F-Droid/Izzy for every served app and forces the repo lookup when the indexes carry nothing, even inside the per-app recheck window; stored repo URLs are dropped when an index supplies shots. Takes the shared sync gate exactly like `refresh-icons`. Records one `job_runs` row (`kind=ScreenshotRefresh`, `trigger=Manual`) with its event stream. |
 | `GET /v1/admin/refresh-screenshots` | Same token rules. Current status: `state` (`idle\|running\|completed\|failed`), `startedAt`/`finishedAt`, `checked`/`updated`/`current`/`failed`, `errors[]`, `error`. |
 | `DELETE /v1/admin/refresh-screenshots` | Same token rules. Cancels the running pass → 202, or 409 when nothing is running. |
-| `POST /v1/admin/usage-analysis/queue` | Same token rules. Queues AI source analyses; body `{"onlyMissing":true,"stale":false,"force":false,"slug":null,"limit":null}`. Defaults to apps that have never been analyzed, root and variant rows alike, and skips apps with an active run and parked failures (unless `force`); `stale` adds rows whose prompt/analysis generation is older than configured. → 202 `{queued:n}`. |
+| `POST /v1/admin/usage-analysis/queue` | Same token rules. Queues AI source analyses; body `{"onlyMissing":true,"stale":false,"force":false,"slug":null,"limit":null}`. Defaults to apps that have never been analyzed, root and variant rows alike, and skips apps with an active run and parked failures (unless `force`) as well as every `closed_source` listing row (no published source to read); `stale` adds rows whose prompt/analysis generation is older than configured. → 202 `{queued:n}`. |
 | `GET /v1/admin/usage-analysis/status` | Same token rules. Queue counts per status, runs started today, month-to-date cost, budget and the ten most recent failures. |
 | `GET /v1/admin/usage-analysis/stats?days=30` | Same token rules. Token and cost totals per day and per model for finished runs. |
 | `DELETE /v1/admin/usage-analysis/pending` | Same token rules. Deletes pending queue rows (running rows are untouched). |

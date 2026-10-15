@@ -566,6 +566,175 @@ public sealed class CatalogUpserterTests : IDisposable
         Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
     }
 
+    private const string MainWithoutMicUpList = """
+        ## Apps
+
+        ### Audio
+
+        * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+          * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+        ### Vendor-specific
+
+        #### MIUI
+
+        * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+        """;
+
+    private const string ClosedMicUpList = """
+        ## Closed-source apps
+
+        ### Audio
+
+        * [MicUp](https://github.com/papergray/MicUp) ✨ - Real-time mic `MIT`
+        """;
+
+    private static ParsedDocument ParseClosed(string md) =>
+        new AwesomeListParser().Parse(md, "closed-source");
+
+    [Fact]
+    public async Task MovingAnEntryToTheOtherListingKeepsIdSlugAndStats()
+    {
+        var before = await SeedMicUpWithStats();
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(MainWithoutMicUpList), ParseClosed(ClosedMicUpList)],
+            new Dictionary<string, EntryHistory>(), T1);
+
+        // The same URL in the other list is the same entry: the row flips
+        // listings instead of sweeping out of main and being skipped there as
+        // a slug clash in the closed list.
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+
+        var after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(before.Id, after.Id);
+        Assert.Equal(Listing.ClosedSource, after.Listing);
+        Assert.Equal(42, after.InstallCount);
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
+        var audio = await _db.Categories.SingleAsync(c => c.Name == "Audio");
+        Assert.Equal(audio.Id, after.CategoryId);
+
+        // Clients that only follow main must drop the row, so a tombstone is
+        // recorded for the listing it left; the closed listing's clients get
+        // the row itself.
+        var tombstone = Assert.Single(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+        Assert.Equal(Listing.Main, tombstone.Listing);
+        Assert.Equal("MicUp", tombstone.Name);
+    }
+
+    [Fact]
+    public async Task MovingAnEntryBackToTheOriginalListingClearsTheTombstone()
+    {
+        await SeedMicUpWithStats();
+        await Upserter().UpsertAsync(
+            [ParseMain(MainWithoutMicUpList), ParseClosed(ClosedMicUpList)],
+            new Dictionary<string, EntryHistory>(), T1);
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(), new ParsedDocument { ListingName = "closed-source" }],
+            new Dictionary<string, EntryHistory>(), T1);
+
+        // Coming back to main clears the departure tombstone, otherwise
+        // /v1/changes would report the slug as removed while it is live again.
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+        Assert.Empty(await _db.RemovedApps.ToListAsync());
+
+        var after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(Listing.Main, after.Listing);
+        Assert.Equal(42, after.InstallCount);
+    }
+
+    [Fact]
+    public async Task VariantFollowsItsRootAcrossListings()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var root = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        var child = NewVariant(root, "com.example.plugin", T0);
+        child.UsageShort = "The plugin bridges to the root app over Shizuku.";
+        child.UsageAnalyzedAt = T0;
+        _db.Apps.Add(child);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(MainWithoutMicUpList), ParseClosed(ClosedMicUpList)],
+            new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+
+        // A variant never takes part in list matching, so the pass carries its
+        // listing over with the root instead of leaving it served under the
+        // listing the root just left.
+        var variant = await _db.Apps.SingleAsync(a => a.RootAppId == root.Id);
+        Assert.Equal(Listing.ClosedSource, variant.Listing);
+        Assert.True(variant.UpdatedAt > T1, $"variant change clock stuck at {variant.UpdatedAt:O}");
+        Assert.Null(variant.UsageShort);
+        Assert.Null(variant.UsageAnalyzedAt);
+        var tombstone = Assert.Single(
+            await _db.RemovedApps.ToListAsync(), t => t.Slug == variant.Slug);
+        Assert.Equal(Listing.Main, tombstone.Listing);
+        // Only the root flipped listings during the entry loop; the variant is
+        // reconciled after it, so exactly one row counts as updated.
+        Assert.Equal(Listing.ClosedSource, (await _db.Apps.SingleAsync(a => a.Slug == "micup")).Listing);
+    }
+
+    [Fact]
+    public async Task MovingAnEntryToTheClosedListingDropsItsUsageReport()
+    {
+        var before = await SeedMicUpWithStats();
+        var seeded = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        seeded.UsageShort = "MicUp reads the microphone through Shizuku.";
+        seeded.UsageMarkdown = "## Usage\n\nMicUp uses Shizuku for the mic.";
+        seeded.UsageMarkdownUsage = "- Microphone access";
+        seeded.UsageMarkdownApiUsage = "android.media.action.*";
+        seeded.UsageMarkdownNotableDetails = "Falls back to the system mic.";
+        seeded.UsageAnalyzedAt = T1;
+        seeded.UsageModel = "mimo-v2.6-flash";
+        seeded.UsageCommit = "7106dd3502962b0c529549a5ba507d82474b6261";
+        seeded.UsageReleaseRef = "v1.2.3";
+        seeded.UsagePromptVersion = 17;
+        seeded.UsageAnalysisVersion = 12;
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        // A category move inside the main list leaves the report alone.
+        await Upserter().UpsertAsync(
+            [ParseMain(MovedToNewCategoryList)], new Dictionary<string, EntryHistory>(), T1);
+        _db.ChangeTracker.Clear();
+        var kept = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.NotNull(kept.UsageShort);
+        Assert.Equal(17, kept.UsagePromptVersion);
+
+        var counts = await Upserter().UpsertAsync(
+            [ParseMain(MainWithoutMicUpList), ParseClosed(ClosedMicUpList)],
+            new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 1, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+
+        // The closed entry publishes no source, so the report generated while
+        // the source was still public is dropped instead of being served for
+        // code that is gone. The move also moved the change clock, so the
+        // detail ETag rotates and clients drop their cached text.
+        var after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal(Listing.ClosedSource, after.Listing);
+        Assert.Null(after.UsageShort);
+        Assert.Null(after.UsageMarkdown);
+        Assert.Null(after.UsageMarkdownUsage);
+        Assert.Null(after.UsageMarkdownApiUsage);
+        Assert.Null(after.UsageMarkdownNotableDetails);
+        Assert.Null(after.UsageAnalyzedAt);
+        Assert.Null(after.UsageModel);
+        Assert.Null(after.UsageCommit);
+        Assert.Null(after.UsageReleaseRef);
+        Assert.Equal(0, after.UsagePromptVersion);
+        Assert.Equal(0, after.UsageAnalysisVersion);
+        Assert.True(after.UpdatedAt > before.UpdatedAt);
+    }
+
     [Fact]
     public async Task StaleHistoryCategoryMoveStillAdvancesChangeClock()
     {

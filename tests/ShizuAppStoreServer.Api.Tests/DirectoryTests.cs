@@ -222,6 +222,45 @@ public sealed class ChangesTests(ShizuApiFactory factory) : IClassFixture<ShizuA
     }
 
     [Fact]
+    public async Task ListingMoveTombstoneOnlyReachesTheListingItLeft()
+    {
+        await factory.ResetAsync(db =>
+        {
+            var audio = Seeds.NewCategory("audio", "Audio");
+            db.Categories.Add(audio);
+            // A row that moved main -> closed_source: the tombstone names the
+            // listing it left while the live row serves the new one.
+            db.Apps.Add(Seeds.NewApp("moved", audio, listing: Listing.ClosedSource,
+                addedAt: Jan, updatedAt: Jul2));
+            db.RemovedApps.Add(new RemovedApp
+            {
+                Slug = "moved", Name = "Moved", Listing = Listing.Main, RemovedAt = Jul2,
+            });
+        });
+
+        var client = factory.NewClient();
+
+        var main = (await (await client.GetAsync("/v1/changes?since=" + Since))
+            .Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+        Assert.Equal(["moved"], main.Removed.Select(r => r.Slug));
+        Assert.Empty(main.Updated);
+
+        // The clients of the new listing receive the row itself, so reporting
+        // the slug as removed too would delete it right after the upsert.
+        var both = (await (await client
+            .GetAsync("/v1/changes?since=" + Since + "&listing=main,closed_source"))
+            .Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+        Assert.DoesNotContain(both.Removed, r => r.Slug == "moved");
+        Assert.Equal(["moved"], both.Updated.Select(a => a.Slug));
+
+        var closed = (await (await client
+            .GetAsync("/v1/changes?since=" + Since + "&listing=closed_source"))
+            .Content.ReadFromJsonAsync<ChangesDto>(Json))!;
+        Assert.DoesNotContain(closed.Removed, r => r.Slug == "moved");
+        Assert.Equal(["moved"], closed.Updated.Select(a => a.Slug));
+    }
+
+    [Fact]
     public async Task InstallsUpdatedCarriesOnlyPostCursorCounts()
     {
         await factory.ResetAsync(db =>
