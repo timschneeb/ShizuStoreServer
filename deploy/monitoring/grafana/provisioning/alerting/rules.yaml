@@ -115,6 +115,7 @@ groups:
 
       - uid: shizu-api-sync-stalled
         title: ShizuStore sync stalled
+        isPaused: true
         condition: C
         data:
           - refId: A
