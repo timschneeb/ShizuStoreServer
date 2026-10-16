@@ -786,9 +786,10 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         else
         {
             var leftListing = match.Listing;
+            var urlChanged = match.Url != entry.Url;
             var changed = match.Listing != listing
                 || match.Name != entry.Name
-                || match.Url != entry.Url
+                || urlChanged
                 || match.Description != entry.Description
                 || match.License != entry.License
                 || match.SourceUrl != entry.SourceUrl
@@ -836,6 +837,18 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                 }
 
                 updated++;
+            }
+
+            if (urlChanged)
+            {
+                // The repo moved: the recorded release state belongs to the
+                // old URL, so force a re-enrichment in this same pass (the
+                // upsert saves before due selection runs) instead of serving
+                // the old owner's artifacts until the recheck window lapses.
+                match.LastCheckedAt = null;
+                match.LastError = null;
+                match.EnrichEtag = null;
+                match.ScreenshotsCheckedAt = null;
             }
 
             if (match.Retired)

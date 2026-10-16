@@ -260,6 +260,47 @@ public sealed class CatalogUpserterTests : IDisposable
     }
 
     [Fact]
+    public async Task UrlChangeForcesReenrichment()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var before = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        before.LastCheckedAt = T0;
+        before.LastError = "boom";
+        before.EnrichEtag = "old-etag";
+        before.ScreenshotsCheckedAt = T0;
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        const string moved = """
+            ## Apps
+
+            ### Audio
+
+            * [MicUp](https://github.com/papergray/MicUpNext) ✨ - Real-time mic `MIT`
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+              * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+            ### Vendor-specific
+
+            #### MIUI
+
+            * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(moved, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        // The repo moved, so the recorded release state belongs to the old
+        // URL: the row must re-enrich in the same pass instead of serving the
+        // old owner's artifacts until the recheck window lapses.
+        var after = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        Assert.Equal("https://github.com/papergray/MicUpNext", after.Url);
+        Assert.Null(after.LastCheckedAt);
+        Assert.Null(after.LastError);
+        Assert.Null(after.EnrichEtag);
+        Assert.Null(after.ScreenshotsCheckedAt);
+    }
+
+    [Fact]
     public async Task RenamedEntryWithNewUrlAdoptsByAuthorAndDescription()
     {
         await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);

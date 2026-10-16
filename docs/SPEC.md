@@ -613,7 +613,11 @@ bundle` is rebuilt per deploy, never committed.
   still free (a retired row keeps its freed name otherwise). A unique trimmed
   case-insensitive name match wins; otherwise a unique row whose
   `author_key` equals the new URL's owner and whose description is
-  identical is adopted (a rename where name and URL both moved). Several
+  identical is adopted (a rename where name and URL both moved). A URL
+  change also resets the row's enrichment state (check stamps, release
+  ETag, screenshot scan), so the same pass re-enriches from the new URL
+  instead of serving the old owner's artifacts until the recheck window
+  lapses. Several
   candidates decline the adoption and record an `ambiguous_identity`
   catalog issue (§7.1). A new entry whose slug is still held by a live
   root row that left the parse is skipped, so the owner keeps its slug
@@ -757,10 +761,11 @@ F-Droid/Izzy build can take the primary slot.
   already recorded and a complete stored row short-circuits to
   `UpToDate` (`asset URL unchanged`) without downloading; the digest is
   verified whenever the source declares one. GitHub allows replacing an
-  asset under the same tag: a moved URL still downloads the bytes but
-  verifies them against the recorded primary hash, so identical content
-  skips re-analysis (the rare undetected replacement is accepted when no
-  digest is declared). The release markdown
+   asset under the same tag: a moved URL still downloads the bytes but
+   verifies them against the recorded primary hash, so identical content
+   skips re-analysis and the recorded primary is re-pointed at the
+   verified new URL (the rare undetected replacement is accepted when no
+   digest is declared). The release markdown
   `body` is captured as the app's `changelog`, and the release's
   `html_url` as `changelog_url`.
 - **GitLab** (`GitLabReleaseClient`, `PRIVATE-TOKEN` from config or

@@ -164,6 +164,18 @@ internal sealed class DownloadStore(
     }
 
     /// <summary>
+    /// Repo move with identical bytes: point the row at the verified new URL
+    /// instead of keeping the old owner's dead link. The old URL stays in the
+    /// twin memory so it is never re-downloaded.
+    /// </summary>
+    internal static void RepointApkUrl(AppDownload row, string newUrl)
+    {
+        RememberArtifact(row, row.Sha256, row.ApkUrl);
+        row.ApkUrl = newUrl;
+        RememberArtifact(row, row.Sha256, newUrl);
+    }
+
+    /// <summary>
     /// Rank for same-version flavor twins: stable release builds beat debug,
     /// test, beta and terminal builds; equal rank keeps the incumbent. Matches
     /// whole filename tokens so a name like <c>app-latest.apk</c> does not

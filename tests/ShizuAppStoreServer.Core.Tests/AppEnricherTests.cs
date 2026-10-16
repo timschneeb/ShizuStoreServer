@@ -5388,6 +5388,92 @@ public sealed class AppEnricherTests : IDisposable
         Assert.Equal("APK unchanged, analysis skipped", second.Detail);
         Assert.Equal(2, downloads.Calls);
         Assert.Equal(1, aapt2.Calls);
+
+        // Identical bytes under a moved URL: the recorded primary follows the
+        // verified new URL instead of keeping the old owner's dead link, so
+        // the next pass short-circuits without another transfer.
+        Assert.Equal("https://cdn.example/app-v1.1.apk", Primary(app).ApkUrl);
+        await _db.SaveChangesAsync();
+        Age(app);
+        var third = await enricher.EnrichAsync(app, T0);
+        Assert.Equal(EnrichOutcome.UpToDate, third.Outcome);
+        Assert.Equal(2, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+    }
+
+    [Fact]
+    public async Task MovedAssetUrlRepointsPrimaryWhenRememberedAsTwin()
+    {
+        // A pre-fix pass recorded the moved URL as twin memory but kept the
+        // dead old URL on the primary row: identical bytes must still move
+        // the row onto the live URL.
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var url = "https://cdn.example/app.apk";
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", url, zip.Length),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        var row = _db.Downloads.Local.Single(d => d.AppId == app.Id && d.IsPrimary);
+        var moved = "https://cdn.example/app-moved.apk";
+        row.AnalyzedArtifacts.Add($"{row.Sha256} {moved}");
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        url = moved;
+        var second = await enricher.EnrichAsync(app, T0);
+        Assert.Equal(EnrichOutcome.UpToDate, second.Outcome);
+        Assert.Equal("APK unchanged, analysis skipped", second.Detail);
+        Assert.Equal(moved, row.ApkUrl);
+        Assert.Equal(2, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
+    }
+
+    [Fact]
+    public async Task MovedAssetUrlRepointsPrimaryOnDeclaredDigestSkip()
+    {
+        // Same move, but the source declares the digest: the transfer is
+        // skipped entirely, yet the primary must still follow the verified
+        // new URL instead of keeping the old owner's dead link.
+        var zip = TestAssets.BuildApk((TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var digest = "sha256:" + Sha256(zip);
+        var url = "https://cdn.example/app.apk";
+        var github = new StubHandler(_ => JsonReleases(
+            ReleaseJson("v1.0", "app-release.apk", url, zip.Length, digest),
+            "\"rel-etag\""));
+        var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging());
+        var enricher = BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        var app = NewApp("micup", "MicUp", "https://github.com/papergray/MicUp");
+
+        Assert.Equal(EnrichOutcome.Enriched, (await enricher.EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+
+        var row = _db.Downloads.Local.Single(d => d.AppId == app.Id && d.IsPrimary);
+        var moved = "https://cdn.example/app-moved.apk";
+        row.AnalyzedArtifacts.Add($"{row.Sha256} {moved}");
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        url = moved;
+        var second = await enricher.EnrichAsync(app, T0);
+        Assert.Equal(EnrichOutcome.UpToDate, second.Outcome);
+        Assert.Equal("APK unchanged, analysis skipped", second.Detail);
+        Assert.Equal(moved, row.ApkUrl);
+        Assert.Equal(1, downloads.Calls);
+        Assert.Equal(1, aapt2.Calls);
     }
 
     [Fact]

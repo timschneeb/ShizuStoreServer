@@ -590,11 +590,42 @@ public sealed class AppEnricher(
         // the run log; otherwise the outcome stays Enriched.
         var unchanged = false;
 
+        // Repo move, identical bytes: the candidate was verified against a
+        // recorded hash (declared digest or downloaded bytes), so serve the
+        // live URL instead of keeping the old owner's dead link. The hash may
+        // come from the primary row or from twin memory that already remembers
+        // the new URL, so only re-point when the verified bytes match the
+        // primary's recorded hash.
+        async Task MaybeRepointPrimaryAsync(string assetUrl, string verifiedSha)
+        {
+            if (recordedByUrl.TryGetValue(assetUrl, out var recorded)
+                && string.Equals(recorded.ApkUrl, assetUrl, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (await downloadStore.PrimaryDownloadAsync(app, ct) is { } primaryRow
+                && primaryRow.Sha256 is not null
+                && EnrichmentQueries.HashMatches(primaryRow.Sha256, verifiedSha)
+                && !string.Equals(primaryRow.ApkUrl, assetUrl, StringComparison.Ordinal))
+            {
+                DownloadStore.RepointApkUrl(primaryRow, assetUrl);
+                recordedByUrl[assetUrl] = primaryRow;
+                recordedShaByUrl[assetUrl] = verifiedSha;
+                known.Add(assetUrl);
+            }
+        }
+
         if (alwaysAnalyzePrimary || !known.Contains(asset.Url))
         {
             var releasedAt = asset.ReleasedAt ?? releaseReleasedAt;
             if (TrySkipByChecksum(asset, releasedAt))
             {
+                if (asset.Sha256 is { Length: > 0 } declared)
+                {
+                    await MaybeRepointPrimaryAsync(asset.Url, declared);
+                }
+
                 unchanged = true;
             }
             else
@@ -613,6 +644,11 @@ public sealed class AppEnricher(
                     asset.Url, etag, kind, releasedAt, expected, ct);
                 if (result.Unchanged)
                 {
+                    if (expected is not null)
+                    {
+                        await MaybeRepointPrimaryAsync(asset.Url, expected);
+                    }
+
                     StampUrl(asset.Url, releasedAt);
                     unchanged = true;
                 }

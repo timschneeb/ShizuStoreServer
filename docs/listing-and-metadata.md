@@ -17,7 +17,7 @@ The client has a setting to show these entries which is off by default.
 | New release on GitHub/GitLab/F-Droid/IzzyOnDroid | within 30 minutes (+ analysis time) |
 | New release on Play/Codeberg/other sites | within 24 hours |
 | List entry added/edited | within 30 minutes (+ analysis time) |
-| List entry renamed or moved to a new repo URL | within 30 minutes; slug, install counts and overrides stay with the entry |
+| List entry renamed or moved to a new repo URL | within 30 minutes; slug, install counts and overrides stay with the entry, and the entry is re-checked from the new URL in the same pass |
 | List entry moved to another category, or a category heading renamed | within 30 minutes; the entry keeps its slug, install counts and overrides, and the category keeps its id and slug |
 | List entry moved to the closed-source list, or back to the main list | within 30 minutes; the entry keeps its slug, install counts and overrides, clients following the list it left drop it, and its AI usage report is dropped on the way into the closed list |
 | Entry hidden or restored by an operator | applied by the next full catalog pass (usually the nightly one) |
@@ -32,7 +32,10 @@ retries with the normal failure backoff.
 Renaming an entry or pointing it at a new repository URL does not create a
 new store entry: the server recognizes the row that left the list (same
 name, or the same developer plus an unchanged description) and carries its
-slug, install counts and operator overrides over. If a new entry would take
+slug, install counts and operator overrides over. A move also resets the
+entry's check state, so the next enrichment reads releases, metadata and
+screenshots from the new URL instead of serving the old location until the
+normal recheck window lapses. If a new entry would take
 the slug of an entry that just left the list, the server keeps the existing
 entry and records a catalog issue instead of creating a second entry with a
 suffixed slug. Both cases show up under `GET /v1/issues` (kind `catalog`).
