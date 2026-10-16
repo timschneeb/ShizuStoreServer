@@ -368,12 +368,14 @@ public sealed class SyncService(
     {
         var rows = await db.Apps.AsNoTracking()
             .Where(a => a.RootAppId == null)
-            .Select(a => new { a.Id, a.LastCheckedAt, a.LastError, a.ExcludedReason })
+            .Select(a => new { a.Id, a.LastCheckedAt, a.LastError, a.ExcludedReason, a.Retired })
             .ToListAsync(ct);
         return rows
-            // Operator unlists and override exclusions are hidden on purpose:
-            // the recheck window would otherwise re-enrich and re-publish them.
-            .Where(r => r.ExcludedReason != UnlistedReason
+            // Operator unlists, override exclusions and retired rows are
+            // hidden on purpose: the recheck window would otherwise
+            // re-enrich and re-publish them.
+            .Where(r => !r.Retired
+                && r.ExcludedReason != UnlistedReason
                 && r.ExcludedReason != AppOverrideApplier.ExcludedReason)
             .Where(r => r.LastCheckedAt is null
                 || r.LastCheckedAt + (r.LastError is null
@@ -526,7 +528,9 @@ public sealed class SyncService(
         {
             var isArchived = urls.Contains(app.Url)
                 || (app.SourceUrl is not null && urls.Contains(app.SourceUrl));
-            if (isArchived && app.ExcludedReason != ArchivedReason && app.ExcludedReason != UnlistedReason)
+            // Retired rows stay retired: the upserter revives them when the
+            // entry returns, and only then may archiving apply to them.
+            if (isArchived && !app.Retired && app.ExcludedReason != ArchivedReason && app.ExcludedReason != UnlistedReason)
             {
                 app.Availability = Availability.Excluded;
                 app.ExcludedReason = ArchivedReason;

@@ -62,7 +62,7 @@ public sealed class TrendingController(ShizuDbContext db) : ControllerBase
         var previousStart = currentStart.AddDays(-days);
 
         var apps = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded && a.PublishedAt != null)
+            .Where(a => a.Availability != Availability.Excluded && !a.Retired && a.PublishedAt != null)
             .Select(a => new { a.Id, a.Slug })
             .ToListAsync(ct);
 

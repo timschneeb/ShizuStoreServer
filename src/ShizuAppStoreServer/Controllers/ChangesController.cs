@@ -77,7 +77,7 @@ public sealed class ChangesController(ShizuDbContext db) : ControllerBase
         // DateTimeOffset in SQL; Npgsql can). Delta sets are small and this
         // endpoint is output-cached for 30 s.
         var all = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded
+            .Where(a => a.Availability != Availability.Excluded && !a.Retired
                 && a.PublishedAt != null
                 && listings.Contains(a.Listing))
             .Include(a => a.Category)

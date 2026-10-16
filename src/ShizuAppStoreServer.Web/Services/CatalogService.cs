@@ -21,7 +21,7 @@ public sealed class CatalogService(ShizuDbContext db)
             .Include(a => a.Parent)
             .Include(a => a.Downloads)
             .FirstOrDefaultAsync(
-                a => a.Slug == slug && a.Availability != Availability.Excluded && a.PublishedAt != null, ct);
+                a => a.Slug == slug && a.Availability != Availability.Excluded && !a.Retired && a.PublishedAt != null, ct);
 
     /// <summary>Active operator-blocked screenshot URLs for read-side filtering.</summary>
     public Task<HashSet<string>> GetBlockedScreenshotsAsync(CancellationToken ct = default) =>
@@ -34,7 +34,7 @@ public sealed class CatalogService(ShizuDbContext db)
                 && a.Id != app.Id
                 && (app.RootAppId == null || a.Id != app.RootAppId)
                 && a.RootAppId == null
-                && a.Availability != Availability.Excluded
+                && a.Availability != Availability.Excluded && !a.Retired
                 && a.PublishedAt != null)
             .OrderByDescending(a => a.InstallCount)
             .ThenBy(a => a.Name)
@@ -48,7 +48,7 @@ public sealed class CatalogService(ShizuDbContext db)
                 && a.Id != app.Id
                 && (app.RootAppId == null || a.Id != app.RootAppId)
                 && a.RootAppId == null
-                && a.Availability != Availability.Excluded
+                && a.Availability != Availability.Excluded && !a.Retired
                 && a.PublishedAt != null)
             .OrderByDescending(a => a.InstallCount)
             .ThenBy(a => a.Name)
@@ -68,7 +68,7 @@ public sealed class CatalogService(ShizuDbContext db)
     /// </summary>
     public Task<List<SitemapEntry>> GetSitemapEntriesAsync(CancellationToken ct = default) =>
         db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded && a.PublishedAt != null)
+            .Where(a => a.Availability != Availability.Excluded && !a.Retired && a.PublishedAt != null)
             .OrderBy(a => a.Slug)
             .Select(a => new SitemapEntry(a.Slug, a.UpdatedAt))
             .ToListAsync(ct);
@@ -83,7 +83,7 @@ public sealed class CatalogService(ShizuDbContext db)
     public async Task<(IReadOnlyList<App> Items, int Total)> GetAppsAsync(AppListQuery query, CancellationToken ct = default)
     {
         var apps = db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded
+            .Where(a => a.Availability != Availability.Excluded && !a.Retired
                 && a.PublishedAt != null
                 && a.Listing == Listing.Main);
 

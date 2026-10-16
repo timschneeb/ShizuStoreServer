@@ -66,6 +66,16 @@ public sealed class App
     public string? ExcludedReason { get; set; }
 
     /// <summary>
+    /// True once the entry left the awesome-list while it still held install
+    /// history. Retired rows are never hard-deleted: the row keeps its id,
+    /// totals and daily/version history so an operator can migrate them onto
+    /// a successor, and frees its slug (suffixed with <c>-retired</c>) so it
+    /// blocks no future entry. Hidden from every read path like any excluded
+    /// row; cleared when the entry returns to the list.
+    /// </summary>
+    public bool Retired { get; set; }
+
+    /// <summary>
     /// When the row first passed an enrichment check without failing. Null
     /// while the entry still awaits its first successful check; every public
     /// read path hides unpublished rows so clients never see an entry

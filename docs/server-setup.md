@@ -785,28 +785,54 @@ A list edit that changed an entry's URL used to import it as a new app
 history. The upserter now adopts the vanished row (same trimmed name, or the
 new URL's owner plus an identical description) and the slug-clash guard keeps
 an existing row instead of suffixing; both are reported as `catalog` issues.
-Recovering counts lost before those guards still needs a pre-fork dump. The
+When adoption cannot match (a rename that also changed name and description),
+the old row is retired instead of deleted: it keeps its id, totals and
+daily/version history behind the `retired` flag under a `-retired` slug, so
+no pre-fork dump is needed anymore. Recovering counts lost before those
+guards still needs a pre-fork dump. The
 dumps live outside the repo and must never be committed (they contain env
 secrets); installs reported between a dump and the fork pass are not in
 `request_logs` and stay lost.
 
-1. Restore the newest predeploy dump into a scratch database on the server:
-   `sudo -u postgres createdb shizu_repair` then
-   `sudo -u postgres pg_restore -d shizu_repair --no-owner --no-acl <dump>`.
-2. Map each old row onto the live one: add `apps.install_count`, copy
-   `added_at` and `list_updated_at`, insert the daily rows
-   (`app_install_days`, `app_version_install_days`) re-keyed to the live app id
-   with `ON CONFLICT ... DO UPDATE SET install_count = <table>.install_count +
-   EXCLUDED.install_count` so a shared final day sums correctly, and set
-   `install_count_updated_at = now()` so `/v1/changes` republishes the count.
-3. Rename the `-2` slug back to the canonical slug, delete the canonical
-   `removed_apps` tombstone and insert a tombstone for the freed `-2` slug in
-   the same transaction, then bump `updated_at`. Clients that synced the forked
-   row drop it from `removed[]` and re-add the canonical row from `updated[]`.
-   Never leave a live slug and its tombstone coexisting. For a row deleted in
-   the same pass, report it with a null `sync_issues.app_id`: the FK rejects
-   the dangling id.
-4. Drop the scratch database, drain a sync pass (`POST /v1/admin/sync`) and
-   confirm a clean `+0 ~0 -0` summary with no `catalog` issues, then verify the
-   merged totals and daily series on `GET /v1/apps/{slug}` and
-   `GET /v1/apps/{slug}/history`.
+Migrating a retired row onto its successor (same transaction):
+
+```sql
+-- guest-manager retired as guest-manager-retired (id 256), successor
+-- user-hopper (id 592): carry the total, the listing dates and every
+-- daily row, then republish the count.
+UPDATE apps SET install_count = install_count + (SELECT install_count FROM apps WHERE slug = 'guest-manager-retired'),
+                added_at = LEAST(added_at, (SELECT added_at FROM apps WHERE slug = 'guest-manager-retired')),
+                list_updated_at = COALESCE(LEAST(list_updated_at, (SELECT list_updated_at FROM apps WHERE slug = 'guest-manager-retired')), list_updated_at, (SELECT list_updated_at FROM apps WHERE slug = 'guest-manager-retired')),
+                install_count_updated_at = now()
+WHERE slug = 'user-hopper';
+INSERT INTO app_install_days (app_id, day, install_count)
+SELECT 592, day, install_count FROM app_install_days WHERE app_id = 256
+ON CONFLICT (app_id, day) DO UPDATE SET install_count = app_install_days.install_count + EXCLUDED.install_count;
+INSERT INTO app_version_install_days (app_id, version_code, install_type, day, install_count)
+SELECT 592, version_code, install_type, day, install_count FROM app_version_install_days WHERE app_id = 256
+ON CONFLICT (app_id, version_code, install_type, day) DO UPDATE SET install_count = app_version_install_days.install_count + EXCLUDED.install_count;
+```
+
+The shared-day `ON CONFLICT` sum keeps the series correct when both rows
+collected installs on the same day. Then drain a sync pass
+(`POST /v1/admin/sync`) and verify the merged totals and daily series on
+`GET /v1/apps/{slug}` and `GET /v1/apps/{slug}/history`.
+
+To drop a retired row for good once its stats are migrated (or were never
+worth keeping), hard-delete it with SQL: the daily/version history,
+downloads and star history cascade with it. Clients already dropped the
+slug through the retire tombstone, so no new tombstone is needed:
+
+```sql
+DELETE FROM apps WHERE slug = 'guest-manager-retired';
+```
+
+Dump-based recovery for pre-guard losses (unchanged): restore the newest
+predeploy dump into a scratch database
+(`sudo -u postgres createdb shizu_repair`, then
+`sudo -u postgres pg_restore -d shizu_repair --no-owner --no-acl <dump>`),
+map each old row onto the live one as above (re-keyed to the live app id,
+`install_count_updated_at = now()` so `/v1/changes` republishes the
+count), drop the scratch database and verify. For a row deleted in the
+same pass, report it with a null `sync_issues.app_id`: the FK rejects
+the dangling id.

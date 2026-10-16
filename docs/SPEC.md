@@ -237,7 +237,9 @@ bundle` is rebuilt per deploy, never committed.
     through `/v1/changes` and the detail ETag even though the text is
     detail-only.
   - `exclude_override` (operator flag, never touched by the
-    upserter), `excluded_reason`, `added_at`/`updated_at` (git
+    upserter), `excluded_reason`, `retired` (stale entries with install
+    history are hidden but kept instead of hard-deleted, §4),
+    `added_at`/`updated_at` (git
     history, §4; `updated_at` is the change clock, not the release
     date).
   - Indexes on `url`, `updated_at`, `availability`, `category_id`.
@@ -401,10 +403,12 @@ bundle` is rebuilt per deploy, never committed.
   loses its trigger.
 - **removed_apps** - tombstones closing the delete path:
   `slug` unique + `removed_at` index. Written (add-or-refresh) on
-  stale delete, when the Shizuku-permission gate (§5.3) excludes a
+  stale delete and retire, when the Shizuku-permission gate (§5.3) excludes a
   row, and when a row switches listing: the row stays live there, the
   tombstone names the listing it left and `GET /v1/changes` hides it
-  from clients that also follow the row's new listing. Cleared on
+  from clients that also follow the row's new listing. A retire tombstone
+  names the original slug while the retired row itself carries the freed
+  `-retired` slug. Cleared on
   re-add (resurrection), when a row returns to the listing its
   tombstone names, or when the gate heals a row.
 - **config_flags** - operator-controlled flags (`key` PK, `value`,
@@ -601,11 +605,12 @@ bundle` is rebuilt per deploy, never committed.
   `/v1/changes` cursor. Same-URL
   rename keeps id + slug and moves the row to the new category; a URL
   repeated in another category is a duplicate and is skipped. Stale
-  `(url, category)` pairs, including duplicates created by earlier
+  `(url, category)` pairs without install history, including duplicates created by earlier
   syncs, are hard-deleted and reported by slug. An entry whose URL moved
   is not a new app: before creating a row the upserter adopts a root row
   of the same listing that vanished from this parse, keeping its id,
-  slug, install stats and `app_overrides`. A unique trimmed
+  stats and `app_overrides` and reclaiming its original slug when it is
+  still free (a retired row keeps its freed name otherwise). A unique trimmed
   case-insensitive name match wins; otherwise a unique row whose
   `author_key` equals the new URL's owner and whose description is
   identical is adopted (a rename where name and URL both moved). Several
@@ -624,16 +629,23 @@ bundle` is rebuilt per deploy, never committed.
   source revision the entry no longer publishes, and those rows read as
   never analyzed afterwards. Variants follow their root's listing in the
   same pass.
-  Slug suffixes remain only for same-pass duplicates, category
-  slugs, variant slugs and parser collisions. When a stale root with
-  `install_count > 0` is hard-deleted, the delete is recorded as a
-  `stale_with_installs` catalog issue, because its install history
-  cascades away with the row. Only root rows
-  (`root_app_id` null) are matched or swept: a variant shares its
-  root's URL, so it must never look like a duplicate or go stale on
-  its own. When a root does sweep out, its variants are hard-deleted
-  with it and each variant slug gets its own tombstone, so cached
-  clients drop the child rows too. First-seen rows start unpublished
+   Slug suffixes remain only for same-pass duplicates, category
+   slugs, variant slugs, parser collisions and retired rows (`-retired`).
+   A stale root with install history (`install_count > 0` or any install
+   day rows) is never hard-deleted: it is retired instead, keeping its id,
+   totals and daily/version history behind the `retired` flag, excluded
+   with reason `No longer listed.`, renamed to free its slug, and
+   tombstoned under the original slug so cached clients drop it. The
+   retire is recorded as a `stale_with_installs` catalog issue, because an
+   operator should migrate its stats onto the successor; the row returns
+   to life (slug reclaimed when free) when its entry comes back to the
+   list. Only root rows
+   (`root_app_id` null) are matched or swept: a variant shares its
+   root's URL, so it must never look like a duplicate or go stale on
+   its own. When a root without history sweeps out, its variants are hard-deleted
+   with it and each variant slug gets its own tombstone, so cached
+   clients drop the child rows too; a retired root keeps its variants
+   (retired with it) instead. First-seen rows start unpublished
   (`published_at` null) and stay invisible until their first successful
   check (§5). First-seen rows and stale-row
   tombstones are stamped with
@@ -1104,6 +1116,19 @@ Unlisted rows are skipped by due selection, so the 24h recheck window
 cannot resurrect them. An operator unlist outranks the `ARCHIVED.md`
 reason: an entry in both stays unlisted until the override is removed,
 then hands back to the archived state.
+
+Retired rows (stale entries with install history, §4) use the same shape:
+`Availability.Excluded` with reason `No longer listed.`, a `removed[]`
+tombstone under the original slug, and the row hidden from every read
+path. Unlike unlisted rows the slug is freed (`-retired` suffix), so a
+future entry can reuse the name; the retire tombstone is cleared by such
+a re-add like any other. Retired rows are skipped by due selection and
+by full rechecks, and neither the unlist/archived appliers nor the
+Shizuku gate touches them. When the entry returns to the list the row is
+revived with its id and history, reclaiming the original slug when it is
+still free. To drop a retired row for good (cascading its history),
+delete it with SQL and drain a pass; clients already dropped the slug
+through the retire tombstone.
 
 `KieronQuinn/SmartspacerPlugins` publishes one plugin per GitHub
 release, so the newest-release scan cannot see them: it is a hard-coded

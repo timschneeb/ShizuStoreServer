@@ -35,17 +35,24 @@ public sealed record UpsertCounts(
 /// the new listing (they receive the moved row itself instead).</item>
 /// <item>An entry whose URL changed outright is adopted onto the vanished row
 /// when exactly one row in the listing matches by name, or by author plus
-/// description; the row keeps its id, slug, stats and overrides.</item>
+/// description; the row keeps its id, stats and overrides, and reclaims its
+/// original slug when it is still free (a retired row keeps its freed name
+/// otherwise).</item>
 /// <item>When no adoption applies and the parsed slug is taken by a row whose
 /// URL vanished, the existing row is kept and the new entry is skipped with a
 /// <see cref="IssueKind.Catalog"/> warning. Slugs are only suffixed for
 /// collisions inside one pass, category slugs, variant slugs and the parser's
 /// per-document dedupe.</item>
-/// <item>Rows whose <c>(url, category)</c> pair vanished from the parse are
-/// hard-deleted, and a <see cref="RemovedApp"/> tombstone is written (or
-/// refreshed) per deleted slug so <c>GET /v1/changes</c> can report
-/// <c>removed[]</c>. Re-adding a deleted slug clears its tombstone. Deleting a
-/// row with recorded installs raises a warning, because its stats cascade.</item>
+/// <item>Rows whose <c>(url, category)</c> pair vanished from the parse and
+/// hold no install history are hard-deleted, and a <see cref="RemovedApp"/>
+/// tombstone is written (or refreshed) per deleted slug so
+/// <c>GET /v1/changes</c> can report <c>removed[]</c>. Re-adding a deleted
+/// slug clears its tombstone. Rows that hold install history are retired
+/// instead: the row keeps its id, totals and daily/version history behind
+/// <see cref="App.Retired"/>, frees its slug with a <c>-retired</c> suffix
+/// so it blocks no future entry, and is tombstoned under the original slug.
+/// Deleting a row with recorded installs raises a warning, because an
+/// operator should migrate its stats onto the successor.</item>
 /// <item>Only the <c>## Apps</c> section is ingested: Development libraries
 /// and Miscellaneous content stay out of the catalog entirely, so rows
 /// from an earlier import of those sections sweep out as stale.</item>
@@ -53,6 +60,12 @@ public sealed record UpsertCounts(
 /// </summary>
 public sealed class CatalogUpserter(ShizuDbContext db)
 {
+    /// <summary>Operator-facing reason stamped on retired rows.</summary>
+    public const string RetiredReason = "No longer listed.";
+
+    /// <summary>Suffix freeing a retired row's slug for future entries.</summary>
+    private const string RetiredSlugSuffix = "-retired";
+
     /// <summary>Logical category location, for move-vs-duplicate detection.</summary>
     private readonly record struct Location(Listing Listing, string Url, CategorySection Section, string Name, string? Sub);
 
@@ -178,34 +191,61 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             .Where(a => syncedListings.Contains(a.Listing)
                 && !parsedKeys.Contains((a.Listing, a.Url, EffectiveCategoryId(a, categories))))
             .ToList();
-        var removedSlugs = stale.Select(a => a.Slug).ToList();
-        foreach (var app in stale.Where(a => a.Id != 0 && a.InstallCount > 0))
+        // Retire threshold: rows holding install history are hidden but kept,
+        // so their totals and daily/version rows survive for restore/migrate.
+        var staleIds = stale.Where(a => a.Id != 0).Select(a => a.Id).ToHashSet();
+        var withDayHistory = staleIds.Count == 0
+            ? new HashSet<long>()
+            : await db.AppInstallDays.AsNoTracking()
+                .Where(d => staleIds.Contains(d.AppId))
+                .Select(d => d.AppId)
+                .Concat(db.AppVersionInstallDays.AsNoTracking()
+                    .Where(d => staleIds.Contains(d.AppId))
+                    .Select(d => d.AppId))
+                .ToHashSetAsync(ct);
+        var retiring = stale
+            .Where(a => a.Id != 0 && (a.InstallCount > 0 || withDayHistory.Contains(a.Id)))
+            .ToList();
+        var deleting = stale.Except(retiring).ToList();
+        // Original slugs: tombstones, the removed list and the warning name
+        // the slug clients cached, before the retire rename frees it.
+        var retiringSlugs = retiring.Select(a => a.Slug).ToList();
+        var removedSlugs = deleting.Select(a => a.Slug).Concat(retiringSlugs).ToList();
+        foreach (var app in retiring)
         {
-            // The row and its daily/version stats cascade away with the delete,
-            // so an entry leaving the list silently loses its install history.
-            // The id is gone with the row, so the issue carries only the slug
-            // (an app_id FK to a deleted row would reject the snapshot insert).
             warnings.Add(new CatalogWarning(
-                "stale_with_installs", null, app.Slug,
-                $"Deleted '{app.Name}' ({app.Url}) with {app.InstallCount} recorded installs; the entry left the list."));
+                "stale_with_installs", app.Id, app.Slug,
+                $"Retired '{app.Name}' ({app.Url}) with {app.InstallCount} recorded installs; the entry left the list."));
         }
 
-        WriteTombstones(tombstones, stale, commitNow);
+        WriteTombstones(tombstones, retiring, commitNow);
 
-        // Variants cascade with their root at the DB level, but each owns a
-        // client row that only a tombstone can delete; without one the stale
-        // child lingers forever and /v1/changes never reports it.
-        var staleRootIds = stale.Where(a => a.Id != 0).Select(a => a.Id).ToHashSet();
+        var retiredIds = retiring.Select(a => a.Id).ToHashSet();
+        foreach (var app in retiring)
+        {
+            RetireApp(app, usedSlugs, commitNow);
+        }
+
+        // Retiree variants stay with their root: the root is never removed,
+        // so no DB cascade fires and each child keeps its downloads, history
+        // and freed slug. Only variants of hard-deleted roots are tombstoned.
+        var deletedIds = deleting.Where(a => a.Id != 0).Select(a => a.Id).ToHashSet();
+        foreach (var variant in allApps.Where(a => a.RootAppId is { } rootId && retiredIds.Contains(rootId)))
+        {
+            RetireApp(variant, usedSlugs, commitNow);
+        }
+
+        WriteTombstones(tombstones, deleting, commitNow);
         WriteTombstones(
             tombstones,
-            allApps.Where(a => a.RootAppId is { } rootId && staleRootIds.Contains(rootId)).ToList(),
+            allApps.Where(a => a.RootAppId is { } rootId && deletedIds.Contains(rootId)).ToList(),
             commitNow);
 
         // Variants copy their root's listing once at creation and never take
         // part in list matching, so a root that switched listings this pass
         // would otherwise leave its children served under the old listing.
         var liveRoots = apps
-            .Where(a => a.Id != 0 && !staleRootIds.Contains(a.Id))
+            .Where(a => a.Id != 0 && !deletedIds.Contains(a.Id) && !retiredIds.Contains(a.Id))
             .ToDictionary(a => a.Id);
         foreach (var variant in allApps)
         {
@@ -228,10 +268,49 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             }
         }
 
-        db.Apps.RemoveRange(stale);
+        db.Apps.RemoveRange(deleting);
 
         await db.SaveChangesAsync(ct);
-        return new UpsertCounts(added, updated, stale.Count, removedSlugs, warnings);
+        return new UpsertCounts(added, updated, deleting.Count + retiring.Count, removedSlugs, warnings);
+    }
+
+    /// <summary>
+    /// Hides a stale row with install history without deleting it: the row
+    /// keeps its id, totals and daily/version history for restore/migrate,
+    /// and frees its slug so it blocks no future entry. Read paths already
+    /// drop excluded rows; the tombstone (written before the rename, under
+    /// the original slug) tells cached clients to delete their copy.
+    /// </summary>
+    private static void RetireApp(App app, HashSet<string> usedSlugs, DateTimeOffset commitNow)
+    {
+        usedSlugs.Remove(app.Slug);
+        app.Slug = UniqueSlug(usedSlugs, app.Slug + RetiredSlugSuffix);
+        app.Retired = true;
+        app.Availability = Availability.Excluded;
+        app.ExcludedReason = RetiredReason;
+        app.UpdatedAt = commitNow;
+    }
+
+    /// <summary>
+    /// Original slug of a retired row, derived by stripping the retire
+    /// suffix (<c>-retired</c> plus the <see cref="UniqueSlug"/> counter).
+    /// Null when the slug was never freed by <see cref="RetireApp"/>.
+    /// </summary>
+    private static string? RetiredSlugOriginal(string slug)
+    {
+        var idx = slug.LastIndexOf(RetiredSlugSuffix, StringComparison.Ordinal);
+        if (idx <= 0)
+        {
+            return null;
+        }
+
+        var rest = slug[(idx + RetiredSlugSuffix.Length)..];
+        if (rest.Length == 0)
+        {
+            return slug[..idx];
+        }
+
+        return rest[0] == '-' && rest[1..].All(char.IsAsciiDigit) ? slug[..idx] : null;
     }
 
     /// <summary>
@@ -756,6 +835,39 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                     match.UpdatedAt = commitNow;
                 }
 
+                updated++;
+            }
+
+            if (match.Retired)
+            {
+                // The entry is back on the list: revive the row with its id,
+                // totals and history intact, and reclaim the tombstoned slug
+                // when it is still free. A taken slug keeps the freed name
+                // and is reported like any other clash; unlist/ARCHIVED and
+                // the Shizuku gate re-apply afterwards when they still hold.
+                match.Retired = false;
+                var original = RetiredSlugOriginal(match.Slug);
+                var tombstone = original is null ? null : tombstones.FirstOrDefault(t =>
+                    t.Slug == original && t.Listing == match.Listing);
+                if (original is not null && tombstone is not null && !usedSlugs.Contains(original))
+                {
+                    usedSlugs.Remove(match.Slug);
+                    match.Slug = original;
+                    usedSlugs.Add(original);
+                    tombstones.Remove(tombstone);
+                    db.RemovedApps.Remove(tombstone);
+                }
+                else if (original is not null && tombstone is not null)
+                {
+                    warnings.Add(new CatalogWarning(
+                        "slug_clash", match.Id, match.Slug,
+                        $"Restored entry '{entry.Name}' ({entry.Url}) could not reclaim slug '{original}'; kept the freed name."));
+                }
+
+                match.ExcludedReason = null;
+                match.LastCheckedAt = null; // force re-enrichment (re-classifies availability)
+                match.LastError = null;
+                match.UpdatedAt = commitNow;
                 updated++;
             }
 

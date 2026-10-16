@@ -200,6 +200,10 @@ namespace ShizuAppStoreServer.Core.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("requires_root");
 
+                    b.Property<bool>("Retired")
+                        .HasColumnType("boolean")
+                        .HasColumnName("retired");
+
                     b.Property<long?>("RootAppId")
                         .HasColumnType("bigint")
                         .HasColumnName("root_app_id");

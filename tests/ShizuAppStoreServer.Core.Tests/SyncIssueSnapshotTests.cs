@@ -173,7 +173,13 @@ public sealed class SyncIssueSnapshotTests : IDisposable
         var row = Assert.Single(_db.SyncIssues.Where(i => i.Kind == IssueKind.Catalog).ToList());
         Assert.Equal("stale_with_installs", row.Rule);
         Assert.Equal("micup", row.Slug);
+        // Retired, not deleted: the slug is freed, the row keeps its history,
+        // and the issue now carries the surviving row id.
         Assert.Null(await _db.Apps.SingleOrDefaultAsync(a => a.Slug == "micup"));
+        var retired = await _db.Apps.SingleAsync(a => a.Slug == "micup-retired");
+        Assert.True(retired.Retired);
+        Assert.Equal(5, retired.InstallCount);
+        Assert.Equal(retired.Id, row.AppId);
 
         // Due-only passes keep catalog rows around, like parse warnings.
         var tuner = _db.Apps.Single(a => a.Slug == "tuner");

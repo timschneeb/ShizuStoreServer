@@ -43,7 +43,7 @@ public sealed class CategoriesController(ShizuDbContext db) : ControllerBase
             .ThenBy(c => c.Id)
             .ToList();
         var counts = await db.Apps.AsNoTracking()
-            .Where(a => a.Availability != Availability.Excluded
+            .Where(a => a.Availability != Availability.Excluded && !a.Retired
                 && a.PublishedAt != null
                 && listings.Contains(a.Listing))
             .GroupBy(a => a.CategoryId)

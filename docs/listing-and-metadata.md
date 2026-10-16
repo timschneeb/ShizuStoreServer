@@ -36,6 +36,10 @@ slug, install counts and operator overrides over. If a new entry would take
 the slug of an entry that just left the list, the server keeps the existing
 entry and records a catalog issue instead of creating a second entry with a
 suffixed slug. Both cases show up under `GET /v1/issues` (kind `catalog`).
+When even that recognition fails (a rename that changed name, URL and
+description at once), the old row is retired rather than deleted: it keeps
+its install history under a `-retired` slug so an operator can migrate it
+onto the new entry, and it never blocks the original slug.
 
 Category changes behave the same way: moving an entry to another category
 updates the row in place (even when the move creates the category), and a

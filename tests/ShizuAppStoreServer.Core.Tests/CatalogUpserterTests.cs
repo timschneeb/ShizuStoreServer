@@ -365,13 +365,9 @@ public sealed class CatalogUpserterTests : IDisposable
     }
 
     [Fact]
-    public async Task StaleDeleteWithInstallsWarns()
+    public async Task StaleWithInstallsRetiresAndKeepsHistory()
     {
-        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
-        var micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
-        micUp.InstallCount = 7;
-        await _db.SaveChangesAsync();
-        _db.ChangeTracker.Clear();
+        var before = await SeedMicUpWithStats();
 
         const string shrunk = """
             ## Apps
@@ -392,8 +388,197 @@ public sealed class CatalogUpserterTests : IDisposable
 
         var warning = Assert.Single(counts.Warnings);
         Assert.Equal("stale_with_installs", warning.Rule);
+        Assert.Equal(before.Id, warning.AppId);
         Assert.Equal("micup", warning.Slug);
         Assert.Contains("micup", counts.RemovedSlugs);
+
+        // Retired, not deleted: same id, freed slug, hidden, history intact.
+        Assert.Null(await _db.Apps.SingleOrDefaultAsync(a => a.Slug == "micup"));
+        var retired = await _db.Apps.SingleAsync(a => a.Id == before.Id);
+        Assert.Equal("micup-retired", retired.Slug);
+        Assert.True(retired.Retired);
+        Assert.Equal(Availability.Excluded, retired.Availability);
+        Assert.Equal(CatalogUpserter.RetiredReason, retired.ExcludedReason);
+        Assert.Equal(42, retired.InstallCount);
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
+
+        // Tombstoned under the original slug so clients drop their copy.
+        var tombstone = Assert.Single(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+        Assert.Equal("MicUp", tombstone.Name);
+    }
+
+    [Fact]
+    public async Task StaleWithOnlyDayHistoryRetires()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+        var micUp = await _db.Apps.SingleAsync(a => a.Slug == "micup");
+        _db.AppInstallDays.Add(new AppInstallDay
+        {
+            AppId = micUp.Id,
+            Day = new DateOnly(2024, 6, 1),
+            InstallCount = 3,
+        });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        var retired = await _db.Apps.SingleAsync(a => a.Id == micUp.Id);
+        Assert.True(retired.Retired);
+        Assert.Equal("micup-retired", retired.Slug);
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == micUp.Id));
+    }
+
+    [Fact]
+    public async Task StaleWithoutHistoryHardDeletes()
+    {
+        await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T0);
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+              * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+            ### Vendor-specific
+
+            #### MIUI
+
+            * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+            """;
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Empty(counts.Warnings);
+        Assert.DoesNotContain(await _db.Apps.ToListAsync(), a => a.Retired);
+        Assert.Null(await _db.Apps.SingleOrDefaultAsync(a => a.Slug.StartsWith("micup")));
+        Assert.Contains("micup", counts.RemovedSlugs);
+        Assert.Single(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+    }
+
+    [Fact]
+    public async Task RetiredEntryReturningRestoresAndReclaimsSlug()
+    {
+        var before = await SeedMicUpWithStats();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+        Assert.True((await _db.Apps.SingleAsync(a => a.Id == before.Id)).Retired);
+        _db.ChangeTracker.Clear();
+
+        var counts = await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T1);
+
+        var restored = await _db.Apps.SingleAsync(a => a.Id == before.Id);
+        Assert.False(restored.Retired);
+        Assert.Equal("micup", restored.Slug);
+        Assert.Equal(42, restored.InstallCount);
+        Assert.Null(restored.ExcludedReason);
+        Assert.Null(restored.LastCheckedAt); // forced re-enrichment
+        Assert.Equal(1, await _db.AppInstallDays.CountAsync(d => d.AppId == before.Id));
+        Assert.DoesNotContain(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+        Assert.DoesNotContain(counts.Warnings, w => w.Rule == "slug_clash");
+    }
+
+    [Fact]
+    public async Task RestoreKeepsFreedNameWhenSlugTaken()
+    {
+        var before = await SeedMicUpWithStats();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+        _db.ChangeTracker.Clear();
+
+        // A different entry reuses the freed slug through the normal import;
+        // like any same-slug re-add it also clears the retire tombstone.
+        const string squatter = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+            * [MicUp!](https://github.com/other/micup) - Other mic app `MIT`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(squatter, "main")], new Dictionary<string, EntryHistory>(), T1);
+        Assert.Equal("micup", (await _db.Apps.SingleAsync(a => a.Url == "https://github.com/other/micup")).Slug);
+        Assert.DoesNotContain(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+        _db.ChangeTracker.Clear();
+
+        // The original entry returns and is adopted onto its retired row, but
+        // the slug is taken and no tombstone names it: the freed name stays,
+        // with nothing to report.
+        var counts = await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T1);
+
+        var restored = await _db.Apps.SingleAsync(a => a.Id == before.Id);
+        Assert.False(restored.Retired);
+        Assert.Equal("micup-retired", restored.Slug);
+        Assert.Equal(42, restored.InstallCount);
+        Assert.DoesNotContain(counts.Warnings, w => w.Rule == "slug_clash");
+    }
+
+    [Fact]
+    public async Task RestoreReportsClashWhenTombstonedSlugTaken()
+    {
+        var before = await SeedMicUpWithStats();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+        Assert.Single(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+
+        // Operator-created state: the tombstoned slug is held by another live
+        // row, so reclaiming it would steal a live slug.
+        var audio = await _db.Categories.SingleAsync(c => c.Name == "Audio");
+        _db.Apps.Add(new App
+        {
+            Slug = "micup",
+            Name = "MicUp!",
+            Url = "https://github.com/other/micup",
+            Description = "Other mic app",
+            CategoryId = audio.Id,
+            AddedAt = T1,
+            UpdatedAt = T1,
+        });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        var counts = await Upserter().UpsertAsync([ParseMain()], new Dictionary<string, EntryHistory>(), T1);
+
+        var restored = await _db.Apps.SingleAsync(a => a.Id == before.Id);
+        Assert.False(restored.Retired);
+        Assert.Equal("micup-retired", restored.Slug);
+        var clash = Assert.Single(counts.Warnings, w => w.Rule == "slug_clash");
+        Assert.Equal(before.Id, clash.AppId);
     }
 
     [Fact]
