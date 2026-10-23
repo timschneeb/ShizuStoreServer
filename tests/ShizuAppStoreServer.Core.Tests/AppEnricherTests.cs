@@ -1535,6 +1535,59 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task SameVersionCodeNewReleaseTagReplacesDownload()
+    {
+        // Live case (Continuum): the upstream re-ships the same versionCode
+        // under a new tag with a new asset name. The new build must replace
+        // the incumbent instead of being remembered as a twin. The seed below
+        // reproduces the stuck state old passes left behind: the new asset URL
+        // sits in twin memory with its declared digest and VersionUpdatedAt
+        // already reflects the new release, so the checksum short-circuit
+        // would skip the download forever without the tag gate.
+        var zipV1 = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Blue)));
+        var zipV2 = TestAssets.BuildApk(
+            (TestAssets.XxxhdpiIcon, TestAssets.SolidPng(512, 512, Color.Red)));
+        const string urlV1 = "https://cdn.example/v1.2.0/app.apk";
+        const string urlV2 = "https://cdn.example/v1.2.1/app.apk";
+
+        AppEnricher Wiring(string tag, string assetUrl, byte[] zip, string publishedAt)
+        {
+            var github = new StubHandler(_ => JsonReleases(
+                ReleaseJson(tag, "app.apk", assetUrl, zip.Length,
+                    digest: $"sha256:{Sha256(zip)}", publishedAt: publishedAt),
+                "\"rel-etag\""));
+            var downloads = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(zip),
+            });
+            var aapt2 = new FakeAapt2Runner(_ => TestAssets.CannedBadging(
+                versionCode: "40", versionName: "M9"));
+            return BuildEnricher(github, downloads, aapt2, signer: new FakeSignerRunner(_ => SignerOutputA));
+        }
+
+        var app = NewApp("reshipped", "Reshipped", "https://github.com/example/reshipped");
+        Assert.Equal(EnrichOutcome.Enriched,
+            (await Wiring("v1.2.0", urlV1, zipV1, "2024-06-01T00:00:00Z").EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(urlV1, Primary(app).ApkUrl);
+
+        // Stuck state left by old passes: twin memory knows the new asset and
+        // the served date already moved to the new release.
+        Primary(app).AnalyzedArtifacts.Add($"{Sha256(zipV2)} {urlV2}");
+        app.VersionUpdatedAt = DateTimeOffset.Parse("2024-07-01T00:00:00Z");
+        await _db.SaveChangesAsync();
+
+        Age(app);
+        Assert.Equal(EnrichOutcome.Enriched,
+            (await Wiring("v1.2.1", urlV2, zipV2, "2024-07-01T00:00:00Z").EnrichAsync(app, T0)).Outcome);
+        await _db.SaveChangesAsync();
+        Assert.Equal(urlV2, Primary(app).ApkUrl);
+        Assert.Equal(40, Primary(app).VersionCode);
+        Assert.Equal(1, await _db.AppVersions.CountAsync());
+    }
+
+    [Fact]
     public async Task StableDowngradeFlagsSupersededPrereleaseHistory()
     {
         // Prerelease-only repos used to serve their prerelease; when a stable

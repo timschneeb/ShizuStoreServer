@@ -481,7 +481,10 @@ public sealed class AppEnricher(
             }
         }
 
-        // Source-declared digest match: skip the download entirely.
+        // Source-declared digest match: skip the download entirely. A new
+        // release tag re-shipping the same version code must not inherit the
+        // previous release's twin/checksum memory, so the tag has to match the
+        // recorded row or the asset is analyzed and the upsert replaces it.
         bool TrySkipByChecksum(SourceAsset candidate, DateTimeOffset? releasedAt)
         {
             if (candidate.Sha256 is not { Length: > 0 } declared
@@ -489,7 +492,8 @@ public sealed class AppEnricher(
                 || OwnerOf(download) is not { } owner
                 || !Complete(owner, download, releasedAt)
                 || !recordedShaByUrl.TryGetValue(candidate.Url, out var recordedSha)
-                || !EnrichmentQueries.HashMatches(recordedSha, declared))
+                || !EnrichmentQueries.HashMatches(recordedSha, declared)
+                || (releaseTag is not null && !string.Equals(releaseTag, download.ReleaseTag, StringComparison.Ordinal)))
             {
                 return false;
             }
@@ -503,6 +507,7 @@ public sealed class AppEnricher(
             && OwnerOf(download) is { } owner
             && Complete(owner, download, releasedAt)
             && recordedShaByUrl.TryGetValue(candidate.Url, out var recordedSha)
+            && (releaseTag is null || string.Equals(releaseTag, download.ReleaseTag, StringComparison.Ordinal))
                 ? recordedSha
                 : null;
 
@@ -675,7 +680,10 @@ public sealed class AppEnricher(
             }
 
             var releasedAt = extra.ReleasedAt ?? releaseReleasedAt;
-            if (known.Contains(extra.Url))
+            var releaseMoved = releaseTag is not null
+                && recordedByUrl.TryGetValue(extra.Url, out var recordedRow)
+                && !string.Equals(releaseTag, recordedRow.ReleaseTag, StringComparison.Ordinal);
+            if (!releaseMoved && known.Contains(extra.Url))
             {
                 var reuploaded = extra.Sha256 is { Length: > 0 } declared
                     && recordedShaByUrl.TryGetValue(extra.Url, out var recorded)

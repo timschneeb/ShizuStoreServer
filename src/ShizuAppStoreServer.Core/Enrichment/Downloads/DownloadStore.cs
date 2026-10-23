@@ -264,10 +264,12 @@ internal sealed class DownloadStore(
 
     /// <summary>
     /// Upserts the row for the candidate's signing identity. Newer versions
-    /// replace older ones; on a version tie the forge source's URL wins. A
-    /// row is matched by signing key, then by MD5, then by the APK's SHA-256,
-    /// so an index-only twin without a SHA-256 identity merges with its
-    /// analyzed counterpart instead of duplicating it.
+    /// replace older ones; on a version tie a new release tag also replaces
+    /// (upstreams sometimes re-ship the same version code), while same-release
+    /// flavor twins keep the higher-ranked artifact. A row is matched by
+    /// signing key, then by MD5, then by the APK's SHA-256, so an index-only
+    /// twin without a SHA-256 identity merges with its analyzed counterpart
+    /// instead of duplicating it.
     /// </summary>
     internal async Task UpsertDownloadAsync(App app, DownloadCandidate candidate, DateTimeOffset now, CancellationToken ct)
     {
@@ -301,12 +303,18 @@ internal sealed class DownloadStore(
             }
 
             // Same source and version: flavor twins (debug vs release, terminal
-            // vs full, fdroid vs plain) share the identity row. Keep the row
-            // holding the higher-ranked artifact and only remember the twin, so
-            // later passes skip it without re-downloading or re-queueing AI.
+            // vs full, fdroid vs plain) share the identity row, but only within
+            // the same release. A new release tag means the upstream re-shipped
+            // the same version code, so the new artifact replaces the incumbent
+            // instead of being remembered as a twin. Keep the row holding the
+            // higher-ranked artifact and only remember the twin, so later
+            // passes skip it without re-downloading or re-queueing AI.
+            var sameRelease = candidate.ReleaseTag is null
+                || string.Equals(candidate.ReleaseTag, row.ReleaseTag, StringComparison.Ordinal);
             if (candidate.Source == row.Source
                 && candidate.VersionCode is not null
                 && candidate.VersionCode == row.VersionCode
+                && sameRelease
                 && !string.Equals(candidate.ApkUrl, row.ApkUrl, StringComparison.Ordinal)
                 && ArtifactRank(candidate.ApkUrl) <= ArtifactRank(row.ApkUrl))
             {
@@ -324,9 +332,13 @@ internal sealed class DownloadStore(
             await FlagSupersededPrereleaseVersionsAsync(app, incoming, ct);
         }
 
-        // A different version invalidates the twin memory of the old release.
-        if (candidate.VersionCode is not null && row.VersionCode is not null
+        // A different version or a different release tag invalidates the twin
+        // memory of the old release.
+        var tagMoved = candidate.ReleaseTag is not null
+            && !string.Equals(candidate.ReleaseTag, row.ReleaseTag, StringComparison.Ordinal);
+        if ((candidate.VersionCode is not null && row.VersionCode is not null
             && candidate.VersionCode != row.VersionCode)
+            || tagMoved)
         {
             row.AnalyzedArtifacts.Clear();
         }

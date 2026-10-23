@@ -322,9 +322,11 @@ bundle` is rebuilt per deploy, never committed.
     this.
   - Shizuku usage reports are source-derived and stored on the `apps`
     row, not on the build; §5.4.
-  - Upsert: same `(package_name, sig_key, abi)` updates in place only
-    when the new `version_code` is higher; on an equal `version_code`
-    the preferred source's URL is kept; lower versions are ignored. A
+  - Upsert: same `(package_name, sig_key, abi)` updates in place when the
+    new `version_code` is higher, or on an equal `version_code` with a
+    different `release_tag` (the upstream re-shipped the same code); on an
+    equal `version_code` within the same release the higher-ranked artifact
+    wins and the twin is only remembered. Lower versions are ignored. A
     legacy row with a null `package_name` adopts the package of the
     candidate that claims it. A candidate whose APK `sha256` matches an
     existing row of the same package and ABI claims that row too, so
@@ -982,9 +984,10 @@ computed first: a match against the recorded or source-declared hash
 returns `Unchanged`, so aapt2, apksigner and the icon render are all
 skipped. A skipped artifact still stamps `last_checked_at`, and the
 apply pass still runs so vanished variants prune and display names
-recompute. A newer release date or a changed checksum always
-re-analyzes; any gap (missing package, icon hash, or icon file)
-heals on the next pass.
+recompute. A newer release date, a changed checksum, or a new release
+tag on an asset the previous release only left in twin memory (same
+version code re-shipped) always re-analyzes; any gap (missing package,
+icon hash, or icon file) heals on the next pass.
 
 Outcomes: `Enriched`, `UpToDate`, `AvatarFallback`,
 `Failed` (`last_error` set, previous good values kept),
@@ -1396,8 +1399,10 @@ rows take the signing-cert SHA-256 from the repo's `index-v2.json`
 also the only repo index the server reads.
 
 Upsert rule: a candidate with the same `package_name`, `sig_key` and
-`abi` updates the row in place only when its `version_code` is higher;
-on an equal `version_code` the preferred source's URL is kept; a lower
+`abi` updates the row in place when its `version_code` is higher, or on an
+equal `version_code` with a different `release_tag` (the upstream re-shipped
+the same code); on an equal `version_code` within the same release the
+higher-ranked artifact wins and the twin is only remembered. A lower
 version is ignored. A candidate whose APK `sha256` matches an existing
 row of the same package and ABI claims that row, so an index-only row
 (no SHA-256 identity) upgrades in place once analysis or the index-v2
