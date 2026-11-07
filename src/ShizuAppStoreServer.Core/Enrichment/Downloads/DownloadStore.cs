@@ -176,10 +176,12 @@ internal sealed class DownloadStore(
     }
 
     /// <summary>
-    /// Rank for same-version flavor twins: stable release builds beat debug,
-    /// test, beta and terminal builds; equal rank keeps the incumbent. Matches
-    /// whole filename tokens so a name like <c>app-latest.apk</c> does not
-    /// count as a test build.
+    /// Rank for artifact flavors: debug, test, beta and terminal builds rank
+    /// below every other artifact; equal rank keeps the incumbent. A
+    /// <c>release</c> token is neutral so an old release-named forge APK
+    /// cannot outrank a newer alternative-source build. Matches whole filename
+    /// tokens so a name like <c>app-latest.apk</c> does not count as a test
+    /// build.
     /// </summary>
     private static int ArtifactRank(string url)
     {
@@ -188,21 +190,12 @@ internal sealed class DownloadStore(
             ['-', '_', '.', ' ', '+', '(', ')', '[', ']'],
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        var rank = 0;
-        if (tokens.Any(t => t.Equals("release", StringComparison.OrdinalIgnoreCase)))
-        {
-            rank += 2;
-        }
-
-        if (tokens.Any(t => t.Equals("debug", StringComparison.OrdinalIgnoreCase)
+        return tokens.Any(t => t.Equals("debug", StringComparison.OrdinalIgnoreCase)
             || t.Equals("test", StringComparison.OrdinalIgnoreCase)
             || t.Equals("beta", StringComparison.OrdinalIgnoreCase)
-            || t.Equals("terminal", StringComparison.OrdinalIgnoreCase)))
-        {
-            rank -= 2;
-        }
-
-        return rank;
+            || t.Equals("terminal", StringComparison.OrdinalIgnoreCase))
+                ? -2
+                : 0;
     }
 
     /// <summary>Ranks by the file the client installs, the archive entry when
@@ -631,9 +624,10 @@ internal sealed class DownloadStore(
             }
         }
 
-        // A release-named artifact beats debug/test/beta/terminal builds even
-        // when the latter carry a higher version code: a debug APK must never
-        // become the fresh-install default.
+        // Debug/test/beta/terminal builds rank below every other artifact even
+        // when they carry a higher version code: a debug APK must never become
+        // the fresh-install default. Plain and release-named builds are equal
+        // here and fall through to version code.
         var aRank = ArtifactRank(a);
         var bRank = ArtifactRank(b);
         if (aRank != bRank)

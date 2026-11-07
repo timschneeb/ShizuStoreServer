@@ -1415,9 +1415,9 @@ claimed by the matching candidate instead of spawning a twin.
 with no fingerprint match. Selection: non-F-Droid sources first
 (GitHub/GitLab/Izzy/Codeberg/Other all count as forge-like), then a
 row carrying the `release_tag` of the release just scanned, then the
-artifact filename class (a `release`-named APK beats a debug/test/beta/
-terminal build; tokens are matched whole, so `latest` is not a test
-build), then
+artifact filename class (plain and `release`-named APKs tie, and both
+beat a debug/test/beta/terminal build; tokens are matched whole, so
+`latest` is not a test build), then
 higher `version_code`, then ABI (`null` universal first, then
 `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, then others), then a
 non-null `sig_sha256` (an analyzed identity beats an index-only

@@ -3637,6 +3637,31 @@ public sealed class AppEnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task AssetlessForgeReleaseDoesNotOutrankNewerFdroidBuild()
+    {
+        // A persisted v1 release-named GitHub APK used to keep the primary slot
+        // over a newer F-Droid build because its filename ranked higher.
+        var (enricher, _, _) = FdroidHappyPath(githubResponse: () => JsonReleases(
+            AssetlessNewestFeed("v2.0", "v1.0", "https://cdn.example/forge-v1.0-release.apk", 100)));
+        var app = NewApp("assetless-seeded", "AssetlessSeeded", "https://github.com/example/aod");
+        AddDownload(
+            app, SourceKind.GitHub, "https://cdn.example/forge-v1.0-release.apk",
+            versionCode: 1, packageName: "com.example.app");
+
+        var result = await enricher.EnrichAsync(app, T0);
+
+        Assert.Equal(EnrichOutcome.Enriched, result.Outcome);
+        Assert.True(app.ForgeAssetsStale);
+        var primary = Primary(app);
+        Assert.Equal(SourceKind.FDroid, primary.Source);
+        Assert.Equal(20L, primary.VersionCode);
+        Assert.Equal("https://f-droid.org/repo/com.example.app_20.apk", primary.ApkUrl);
+        var oldForge = Assert.Single(
+            _db.Downloads.Local, d => d.AppId == app.Id && d.Source == SourceKind.GitHub);
+        Assert.False(oldForge.IsPrimary);
+    }
+
+    [Fact]
     public async Task AssetlessNewestForgeReleaseWithoutFdroidKeepsServableForgeApk()
     {
         var zip = TestAssets.BuildApk(

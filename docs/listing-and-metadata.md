@@ -115,10 +115,11 @@ The app store can handle app variants with different signatures automatically (e
 ### Which file is used
 
 - A `.apk` asset whose name contains `release` is preferred, otherwise the largest `.apk`.
-- The served default keeps that class order across candidates: a release-named
-  APK beats a debug/test/beta build even when their signing certificates differ
-  (so they are separate downloads). Only same-class candidates fall back to
-  version code, architecture and source order.
+- The served default keeps that class order across candidates: release-named
+  and plain-named APKs are the same class and compete on version code; both
+  beat a debug/test/beta build even when their signing certificates differ (so
+  they are separate downloads). Architecture and source order break the
+  remaining ties.
 - If the release has no `.apk` but a `.zip`, it will try to extract it and the best APK
   inside is analyzed.
 - Every other `.apk` asset of the release is analyzed as a candidate, so a
