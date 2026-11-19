@@ -50,9 +50,7 @@ public sealed record UpsertCounts(
 /// slug clears its tombstone. Rows that hold install history are retired
 /// instead: the row keeps its id, totals and daily/version history behind
 /// <see cref="App.Retired"/>, frees its slug with a <c>-retired</c> suffix
-/// so it blocks no future entry, and is tombstoned under the original slug.
-/// Deleting a row with recorded installs raises a warning, because an
-/// operator should migrate its stats onto the successor.</item>
+/// so it blocks no future entry, and is tombstoned under the original slug.</item>
 /// <item>Only the <c>## Apps</c> section is ingested: Development libraries
 /// and Miscellaneous content stay out of the catalog entirely, so rows
 /// from an earlier import of those sections sweep out as stale.</item>
@@ -187,8 +185,15 @@ public sealed class CatalogUpserter(ShizuDbContext db)
             }
         }
 
+        // One-time heal for rows mangled before the retire sweep excluded
+        // retired rows: each repeat pass appended another -retired suffix and
+        // tombstoned the intermediate name. Collapse those back to a single
+        // suffix anchored on the tombstoned original; fresh passes are
+        // idempotent so the names stay put afterwards.
+        RepairMangledRetiredSlugs(allApps, tombstones, usedSlugs);
+
         var stale = apps
-            .Where(a => syncedListings.Contains(a.Listing)
+            .Where(a => !a.Retired && syncedListings.Contains(a.Listing)
                 && !parsedKeys.Contains((a.Listing, a.Url, EffectiveCategoryId(a, categories))))
             .ToList();
         // Retire threshold: rows holding install history are hidden but kept,
@@ -204,19 +209,13 @@ public sealed class CatalogUpserter(ShizuDbContext db)
                     .Select(d => d.AppId))
                 .ToHashSetAsync(ct);
         var retiring = stale
-            .Where(a => a.Id != 0 && (a.InstallCount > 0 || withDayHistory.Contains(a.Id)))
+            .Where(a => a.Id != 0 && !a.Retired && (a.InstallCount > 0 || withDayHistory.Contains(a.Id)))
             .ToList();
         var deleting = stale.Except(retiring).ToList();
-        // Original slugs: tombstones, the removed list and the warning name
-        // the slug clients cached, before the retire rename frees it.
+        // Original slugs: tombstones and the removed list name, before the
+        // retire rename frees them.
         var retiringSlugs = retiring.Select(a => a.Slug).ToList();
         var removedSlugs = deleting.Select(a => a.Slug).Concat(retiringSlugs).ToList();
-        foreach (var app in retiring)
-        {
-            warnings.Add(new CatalogWarning(
-                "stale_with_installs", app.Id, app.Slug,
-                $"Retired '{app.Name}' ({app.Url}) with {app.InstallCount} recorded installs; the entry left the list."));
-        }
 
         WriteTombstones(tombstones, retiring, commitNow);
 
@@ -230,7 +229,7 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         // so no DB cascade fires and each child keeps its downloads, history
         // and freed slug. Only variants of hard-deleted roots are tombstoned.
         var deletedIds = deleting.Where(a => a.Id != 0).Select(a => a.Id).ToHashSet();
-        foreach (var variant in allApps.Where(a => a.RootAppId is { } rootId && retiredIds.Contains(rootId)))
+        foreach (var variant in allApps.Where(a => a.RootAppId is { } rootId && retiredIds.Contains(rootId) && !a.Retired))
         {
             RetireApp(variant, usedSlugs, commitNow);
         }
@@ -280,9 +279,16 @@ public sealed class CatalogUpserter(ShizuDbContext db)
     /// and frees its slug so it blocks no future entry. Read paths already
     /// drop excluded rows; the tombstone (written before the rename, under
     /// the original slug) tells cached clients to delete their copy.
+    /// Idempotent: an already retired row is left alone, so a repeated pass
+    /// never appends another <c>-retired</c> suffix.
     /// </summary>
     private static void RetireApp(App app, HashSet<string> usedSlugs, DateTimeOffset commitNow)
     {
+        if (app.Retired)
+        {
+            return;
+        }
+
         usedSlugs.Remove(app.Slug);
         app.Slug = UniqueSlug(usedSlugs, app.Slug + RetiredSlugSuffix);
         app.Retired = true;
@@ -311,6 +317,85 @@ public sealed class CatalogUpserter(ShizuDbContext db)
         }
 
         return rest[0] == '-' && rest[1..].All(char.IsAsciiDigit) ? slug[..idx] : null;
+    }
+
+    /// <summary>
+    /// Chain of retire-suffix strippings for a slug, outermost first. A
+    /// singly retired row yields one entry (its original); a row mangled by
+    /// repeat retires yields one per appended suffix.
+    /// </summary>
+    private static List<string> RetiredSlugChain(string slug)
+    {
+        var chain = new List<string>();
+        var current = RetiredSlugOriginal(slug);
+        while (current is not null)
+        {
+            chain.Add(current);
+            current = RetiredSlugOriginal(current);
+        }
+
+        return chain;
+    }
+
+    /// <summary>
+    /// Collapses <c>-retired</c> suffix runs that repeat retires appended
+    /// before the sweep excluded retired rows. The true original is the
+    /// deepest stripping anchored by a tombstone under the same listing
+    /// (falling back to the deepest stripping for rows like variants that
+    /// retire without a tombstone); a singly retired row already matches
+    /// its normalized name and is left alone. Intermediate tombstones for
+    /// the mangled names are dropped when no live row holds them, keeping
+    /// only the original clients cached.
+    /// </summary>
+    private void RepairMangledRetiredSlugs(
+        List<App> allApps, List<RemovedApp> tombstones, HashSet<string> usedSlugs)
+    {
+        var liveSlugs = allApps
+            .Where(a => !a.Retired)
+            .Select(a => a.Slug)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var app in allApps.Where(a => a.Retired))
+        {
+            var chain = RetiredSlugChain(app.Slug);
+            if (chain.Count < 2)
+            {
+                continue;
+            }
+
+            string? original = null;
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                if (tombstones.Any(t => t.Slug == chain[i] && t.Listing == app.Listing))
+                {
+                    original = chain[i];
+                    break;
+                }
+            }
+
+            original ??= chain[^1];
+            var normalizedBase = original + RetiredSlugSuffix;
+            if (app.Slug == normalizedBase)
+            {
+                continue;
+            }
+
+            usedSlugs.Remove(app.Slug);
+            app.Slug = UniqueSlug(usedSlugs, normalizedBase);
+            foreach (var candidate in chain)
+            {
+                if (candidate == original || liveSlugs.Contains(candidate))
+                {
+                    continue;
+                }
+
+                var spurious = tombstones.FirstOrDefault(t => t.Slug == candidate && t.Listing == app.Listing);
+                if (spurious is not null)
+                {
+                    tombstones.Remove(spurious);
+                    db.RemovedApps.Remove(spurious);
+                }
+            }
+        }
     }
 
     /// <summary>

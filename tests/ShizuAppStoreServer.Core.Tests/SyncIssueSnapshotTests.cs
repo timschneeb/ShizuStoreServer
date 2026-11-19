@@ -143,7 +143,7 @@ public sealed class SyncIssueSnapshotTests : IDisposable
     }
 
     [Fact]
-    public async Task StaleDeleteWithInstallsIsReportedAsCatalogIssue()
+    public async Task StaleDeleteWithInstallsWritesNoCatalogIssue()
     {
         if (!InitRepo())
         {
@@ -170,24 +170,20 @@ public sealed class SyncIssueSnapshotTests : IDisposable
         var result = await Service().RunAsync("scheduled", fullRecheck: false, T0.AddMinutes(16));
 
         Assert.Null(result.Error);
-        var row = Assert.Single(_db.SyncIssues.Where(i => i.Kind == IssueKind.Catalog).ToList());
-        Assert.Equal("stale_with_installs", row.Rule);
-        Assert.Equal("micup", row.Slug);
-        // Retired, not deleted: the slug is freed, the row keeps its history,
-        // and the issue now carries the surviving row id.
+        Assert.Empty(_db.SyncIssues.Where(i => i.Kind == IssueKind.Catalog).ToList());
+        // Retired, not deleted: the slug is freed and the row keeps its history.
         Assert.Null(await _db.Apps.SingleOrDefaultAsync(a => a.Slug == "micup"));
         var retired = await _db.Apps.SingleAsync(a => a.Slug == "micup-retired");
         Assert.True(retired.Retired);
         Assert.Equal(5, retired.InstallCount);
-        Assert.Equal(retired.Id, row.AppId);
 
-        // Due-only passes keep catalog rows around, like parse warnings.
+        // Due-only passes stay free of catalog rows too.
         var tuner = _db.Apps.Single(a => a.Slug == "tuner");
         tuner.LastCheckedAt = T0.AddHours(-25);
         await _db.SaveChangesAsync();
         await Service().RunAsync("scheduled", fullRecheck: false, T0.AddHours(1));
 
-        Assert.Equal(1, _db.SyncIssues.Count(i => i.Kind == IssueKind.Catalog));
+        Assert.Equal(0, _db.SyncIssues.Count(i => i.Kind == IssueKind.Catalog));
     }
 
     [Fact]

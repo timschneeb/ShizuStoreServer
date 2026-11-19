@@ -641,11 +641,13 @@ bundle` is rebuilt per deploy, never committed.
    day rows) is never hard-deleted: it is retired instead, keeping its id,
    totals and daily/version history behind the `retired` flag, excluded
    with reason `No longer listed.`, renamed to free its slug, and
-   tombstoned under the original slug so cached clients drop it. The
-   retire is recorded as a `stale_with_installs` catalog issue, because an
-   operator should migrate its stats onto the successor; the row returns
-   to life (slug reclaimed when free) when its entry comes back to the
-   list. Only root rows
+   tombstoned under the original slug so cached clients drop it; the row
+   returns to life (slug reclaimed when free) when its entry comes back
+   to the list. Retired rows are excluded from later sweeps and retiring is
+   idempotent, so a repeat pass warns nothing and appends no further
+   `-retired` suffix; suffix runs mangled by earlier repeat retires are
+   collapsed back to a single `-retired` anchored on the tombstoned
+   original, dropping the intermediate tombstones. Only root rows
    (`root_app_id` null) are matched or swept: a variant shares its
    root's URL, so it must never look like a duplicate or go stale on
    its own. When a root without history sweeps out, its variants are hard-deleted
@@ -1486,8 +1488,8 @@ exception clears the change tracker and closes the run as
 
 Each successful pass replaces the snapshot: parse rows from this
 pass's warnings (README plus `ARCHIVED.md`), catalog rows from the
-upserter's identity warnings (`ambiguous_identity`, `slug_clash`,
-`stale_with_installs`, §4), enrich rows from every
+upserter's identity warnings (`ambiguous_identity`, `slug_clash`, §4),
+enrich rows from every
 non-excluded row currently carrying `last_error`, quality rows from
 `CatalogHealthCheck` (missing license/description/icon, non-http
 entry or source URL, direct-APK rows without package name or primary

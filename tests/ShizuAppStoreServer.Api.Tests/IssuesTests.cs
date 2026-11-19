@@ -83,7 +83,7 @@ public sealed class IssuesTests(ShizuApiFactory factory) : IClassFixture<ShizuAp
     {
         await factory.ResetAsync(db => SeedRun(db, "abc123",
             (IssueKind.Catalog, "slug_clash", "micup"),
-            (IssueKind.Catalog, "stale_with_installs", "tuner"),
+            (IssueKind.Catalog, "ambiguous_identity", "tuner"),
             (IssueKind.Quality, "missing_icon", "tuner")));
 
         var body = (await factory.NewClient()

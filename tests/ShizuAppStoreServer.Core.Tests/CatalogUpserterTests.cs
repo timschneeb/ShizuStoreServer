@@ -427,10 +427,7 @@ public sealed class CatalogUpserterTests : IDisposable
         var counts = await Upserter().UpsertAsync(
             [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
 
-        var warning = Assert.Single(counts.Warnings);
-        Assert.Equal("stale_with_installs", warning.Rule);
-        Assert.Equal(before.Id, warning.AppId);
-        Assert.Equal("micup", warning.Slug);
+        Assert.Empty(counts.Warnings);
         Assert.Contains("micup", counts.RemovedSlugs);
 
         // Retired, not deleted: same id, freed slug, hidden, history intact.
@@ -446,6 +443,89 @@ public sealed class CatalogUpserterTests : IDisposable
         // Tombstoned under the original slug so clients drop their copy.
         var tombstone = Assert.Single(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
         Assert.Equal("MicUp", tombstone.Name);
+    }
+
+    [Fact]
+    public async Task RepeatPassAfterRetireIsIdempotent()
+    {
+        await SeedMicUpWithStats();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+              * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+            ### Vendor-specific
+
+            #### MIUI
+
+            * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+            """;
+        var shrunkDoc = new AwesomeListParser().Parse(shrunk, "main");
+        await Upserter().UpsertAsync([shrunkDoc], new Dictionary<string, EntryHistory>(), T1);
+        _db.ChangeTracker.Clear();
+
+        // A retired row already left the list: the next pass must not warn,
+        // re-suffix or re-tombstone it.
+        var second = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 0, 0), (second.Added, second.Updated, second.Removed));
+        Assert.Empty(second.Warnings);
+        Assert.Empty(second.RemovedSlugs);
+        var retired = await _db.Apps.SingleAsync(a => a.Retired);
+        Assert.Equal("micup-retired", retired.Slug);
+        Assert.Single(await _db.RemovedApps.ToListAsync(), t => t.Slug == "micup");
+    }
+
+    [Fact]
+    public async Task MangledRetiredSlugIsRepaired()
+    {
+        var before = await SeedMicUpWithStats();
+
+        const string shrunk = """
+            ## Apps
+
+            ### Audio
+
+            * [Tuner](https://github.com/thetwom/tuner) - Tuner app `GPL-3.0`
+              * [Tuner Beta](https://github.com/thetwom/tuner-beta) - Beta builds `GPL-3.0`
+
+            ### Vendor-specific
+
+            #### MIUI
+
+            * [Aura](https://github.com/tgvdufuture/Aura) - LED app `MIT`
+            """;
+        await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        // Simulate the pre-fix repeat retire: another suffix plus its tombstone.
+        var retired = await _db.Apps.SingleAsync(a => a.Id == before.Id);
+        retired.Slug = "micup-retired-retired";
+        _db.RemovedApps.Add(new RemovedApp
+        {
+            Slug = "micup-retired",
+            Name = "MicUp",
+            Listing = Listing.Main,
+            RemovedAt = T1,
+        });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        var counts = await Upserter().UpsertAsync(
+            [new AwesomeListParser().Parse(shrunk, "main")], new Dictionary<string, EntryHistory>(), T1);
+
+        Assert.Equal((0, 0, 0), (counts.Added, counts.Updated, counts.Removed));
+        Assert.Empty(counts.Warnings);
+        var healed = await _db.Apps.SingleAsync(a => a.Id == before.Id);
+        Assert.True(healed.Retired);
+        Assert.Equal("micup-retired", healed.Slug);
+        Assert.Single(await _db.RemovedApps.ToListAsync());
+        Assert.NotNull(await _db.RemovedApps.SingleOrDefaultAsync(t => t.Slug == "micup"));
     }
 
     [Fact]
